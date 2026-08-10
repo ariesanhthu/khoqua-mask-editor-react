@@ -1,0 +1,12 @@
+{
+  "name": "bitter-melon-annotation-workspace",
+  "private": true,
+  "version": "3.0.0",
+  "scripts": {
+    "dev": "npm --prefix annotation-tool run dev",
+    "build": "npm --prefix annotation-tool run build",
+    "start": "npm --prefix annotation-tool run start",
+    "lint": "npm --prefix annotation-tool run lint",
+    "typecheck": "npm --prefix annotation-tool run typecheck"
+  }
+}

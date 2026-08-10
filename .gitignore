@@ -1,0 +1,9 @@
+node_modules/
+.next/
+annotation-tool/node_modules/
+annotation-tool/.next/
+annotation-tool/data/
+annotation-tool/annotation-storage/
+annotation-tool/.env*
+!annotation-tool/.env.example
+*.tsbuildinfo

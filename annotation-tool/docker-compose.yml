@@ -1,0 +1,22 @@
+services:
+  annotation-tool:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY to a random value with at least 32 characters}
+      DATABASE_PATH: /app/data/annotation.db
+      ANNOTATION_STORAGE_PATH: /app/annotation-storage
+      LOCK_TTL_SECONDS: ${LOCK_TTL_SECONDS:-300}
+      BOOTSTRAP_ADMIN_NAME: ${BOOTSTRAP_ADMIN_NAME:-Admin}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set the first admin password}
+      GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON: ${GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON:-}
+    volumes:
+      - annotation-data:/app/data
+      - annotation-storage:/app/annotation-storage
+    restart: unless-stopped
+
+volumes:
+  annotation-data:
+  annotation-storage:

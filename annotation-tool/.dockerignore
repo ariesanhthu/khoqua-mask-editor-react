@@ -1,0 +1,7 @@
+node_modules
+.next
+data
+annotation-storage
+.env*
+npm-debug.log*
+
