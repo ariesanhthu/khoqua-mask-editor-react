@@ -50,3 +50,20 @@ Dựa trên quá trình phân tích thư mục `docs/bitter-melon-labeling-spec/
 * Mã nguồn/build/dependency Vite cũ đã được dọn khỏi thư mục gốc.
 
 Đã chạy thành công TypeScript, ESLint, Next.js production build và API E2E cho các luồng lock, heartbeat, revision conflict, Done, re-edit và hai người dùng. Chưa kiểm thử trực quan tự động vì phiên làm việc không có browser khả dụng; tích hợp Google Drive thật cần credential/dataset thật của môi trường triển khai.
+
+---
+
+## Cập nhật Vercel 2026-08-10
+
+Theo yêu cầu triển khai serverless, kiến trúc SQLite/filesystem/Docker ở phần trên đã được thay thế:
+
+* Backend vẫn nằm hoàn toàn trong Next.js; không dùng Python.
+* Shared state, lock và revision dùng PostgreSQL với transaction và khóa hàng `FOR UPDATE`.
+* Development không có `DATABASE_URL` dùng PGlite; Vercel bắt buộc có Postgres serverless, không fallback sang filesystem.
+* Mask chỉnh sửa dùng Vercel Blob riêng tư ở production; local storage chỉ còn là fallback development.
+* Export tạo thư mục phiên bản mới và tải mask + JSONL trực tiếp lên thư mục Drive đích `DATABASE-GT`.
+* Đã xóa `Dockerfile`, `docker-compose.yml`, `.dockerignore`, dependency `better-sqlite3` và cấu hình Next standalone.
+* Đã thêm `/api/health` để kiểm tra cấu hình Postgres, Blob, JWT secret và Google Drive mà không làm lộ giá trị bí mật.
+* Đã deploy project Vercel `bitter-melon-annotation`; deployment build thành công nhưng runtime chỉ sẵn sàng sau khi kết nối Postgres/Blob và cung cấp JSON service account hợp lệ.
+* API E2E chạy lại thành công cho login, multi-user lock (423), heartbeat, autosave, conflict (409), Done/re-edit/versioning và upload/đọc mask PNG.
+* Luồng ghi Drive đã được smoke-test bằng cách tạo thư mục/tệp thử trong `DATABASE-GT`, đọc xác minh rồi xóa chính xác các artifact thử nghiệm.

@@ -32,6 +32,12 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
   const loadProjects = useCallback(async () => {
     const result = await getProjects();
     setProjects(result);
+    if (result.length === 0) {
+      setProjectId('');
+      setFiles([]);
+      setLoading(false);
+      return;
+    }
     setProjectId((current) => {
       const remembered = localStorage.getItem('last-project-id');
       return current || (remembered && result.some((project) => project.id === remembered) ? remembered : result[0]?.id || '');
@@ -52,7 +58,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
       return;
     }
     if (!silent) setLoading(true);
-    const params: Record<string, string> = { pageSize: '100' };
+    const params: Record<string, string> = { pageSize: '50' };
     if (deferredSearch.trim()) params.search = deferredSearch.trim();
     if (filter === 'AVAILABLE') params.lockState = 'AVAILABLE';
     if (filter === 'DOING') params.lockState = 'LOCKED';
@@ -90,9 +96,12 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
   return (
     <main className="dashboard-shell">
       <header className="app-header">
-        <div>
-          <p className="eyebrow">Bitter Melon Lab</p>
-          <h1>Gán nhãn vân khổ qua</h1>
+        <div className="dashboard-brand">
+          <span className="app-logo" aria-hidden="true">A</span>
+          <div>
+            <p className="eyebrow">Bitter Melon Lab</p>
+            <h1>Gán nhãn vân khổ qua</h1>
+          </div>
         </div>
         <div className="header-user">
           <span className="avatar">{user.displayName.slice(0, 1).toUpperCase()}</span>
@@ -104,13 +113,13 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
       <section className="dashboard-toolbar panel">
         <label>
           <span>Dự án</span>
-          <select value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+          <select name="project" autoComplete="off" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
         </label>
         <label className="search-field">
           <span>Tìm ảnh</span>
-          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ví dụ: BM_000123" />
+          <input name="file-search" autoComplete="off" spellCheck={false} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ví dụ: BM_000123…" />
         </label>
         <div className="progress-pill"><strong>{files.length}</strong><span>tệp hiển thị</span></div>
       </section>
@@ -123,7 +132,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
         ))}
       </nav>
 
-      {message ? <p className="notice warning">{message}</p> : null}
+      {message ? <p role="status" aria-live="polite" className="notice warning">{message}</p> : null}
 
       <section className="file-grid" aria-busy={loading}>
         {loading ? Array.from({ length: 8 }, (_, index) => <div className="file-card skeleton" key={index} />) : null}

@@ -12,16 +12,16 @@ export async function GET(
 ) {
   const user = await requireAuth(request);
   const { fileId } = await params;
-  const db = getDb();
+  const db = await getDb();
 
-  const file = db.prepare(`SELECT df.*, d.project_id FROM dataset_files df
-    JOIN datasets d ON d.id = df.dataset_id WHERE df.id = ?`).get(fileId) as Record<string, unknown> | undefined;
+  const file = await db.prepare(`SELECT df.*, d.project_id FROM dataset_files df
+    JOIN datasets d ON d.id = df.dataset_id WHERE df.id = ?`).get(fileId);
   if (!file) {
     return NextResponse.json({ code: 'FILE_NOT_FOUND', message: 'File not found' }, { status: 404 });
   }
 
   // Check lock ownership
-  const lock = db.prepare('SELECT * FROM file_locks WHERE dataset_file_id = ?').get(fileId) as Record<string, unknown> | undefined;
+  const lock = await db.prepare('SELECT * FROM file_locks WHERE dataset_file_id = ?').get(fileId);
   const isLocked = lock && new Date(lock.expires_at as string) > new Date();
   const isOwner = isLocked && lock!.user_id === user.userId;
 
@@ -29,7 +29,7 @@ export async function GET(
     return NextResponse.json({ code: 'LOCK_LOST', message: 'You do not own the edit lock' }, { status: 409 });
   }
 
-  const annotation = getAnnotation(fileId);
+  const annotation = await getAnnotation(fileId);
 
   return NextResponse.json({
     file: {

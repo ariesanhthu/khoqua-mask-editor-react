@@ -12,9 +12,9 @@ export async function POST(request: Request) {
     );
   }
 
-  const db = getDb();
-  const user = db.prepare('SELECT * FROM users WHERE display_name = ? OR email = ?')
-    .get(username, username) as Record<string, unknown> | undefined;
+  const db = await getDb();
+  const user = await db.prepare('SELECT * FROM users WHERE display_name = ? OR email = ?')
+    .get(username, username);
 
   if (!user || !verifyPassword(password, user.hashed_password as string)) {
     return NextResponse.json(

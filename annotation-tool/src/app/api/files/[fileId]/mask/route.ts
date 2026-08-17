@@ -14,7 +14,7 @@ export async function POST(
   const token = request.headers.get('X-Annotation-Lock-Token') || '';
   try {
     const bytes = new Uint8Array(await request.arrayBuffer());
-    const lock = validateLockToken(fileId, token);
+    const lock = await validateLockToken(fileId, token);
     if (!lock || lock.user_id !== user.userId) {
       return NextResponse.json(
         { code: 'LOCK_LOST', message: 'Your edit lock is no longer active.' },

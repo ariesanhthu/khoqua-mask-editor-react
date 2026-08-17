@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { access, readFile } from 'fs/promises';
+import crypto from 'crypto';
 import path from 'path';
 import { importPKCS8, SignJWT } from 'jose';
 import { getDb, generateId, nowISO } from './db';
@@ -36,10 +37,21 @@ export function normalizeDriveFolderId(value: string): string {
 async function serviceAccountConfig(): Promise<ServiceAccount> {
   const raw = process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON;
   if (!raw) throw new Error('GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON chưa được cấu hình.');
-  const json = raw.trim().startsWith('{')
-    ? raw
-    : await readFile(path.resolve(raw), 'utf8');
-  return JSON.parse(json) as ServiceAccount;
+  let json: string;
+  if (raw.trim().startsWith('{')) {
+    json = raw;
+  } else {
+    try {
+      json = await readFile(path.resolve(raw), 'utf8');
+    } catch {
+      throw new Error('GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON phải là chuỗi JSON hoặc đường dẫn tới file JSON tồn tại.');
+    }
+  }
+  const account = JSON.parse(json) as Partial<ServiceAccount>;
+  if (!account.client_email || !account.private_key) {
+    throw new Error('Service account Google Drive thiếu client_email hoặc private_key.');
+  }
+  return account as ServiceAccount;
 }
 
 export async function getDriveAccessToken(): Promise<string> {
@@ -50,7 +62,7 @@ export async function getDriveAccessToken(): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const key = await importPKCS8(account.private_key, 'RS256');
   const assertion = await new SignJWT({
-    scope: 'https://www.googleapis.com/auth/drive.readonly',
+    scope: 'https://www.googleapis.com/auth/drive',
   })
     .setProtectedHeader({ alg: 'RS256', typ: 'JWT' })
     .setIssuer(account.client_email)
@@ -117,6 +129,55 @@ async function downloadDriveFile(fileId: string): Promise<Uint8Array> {
 
 export async function fetchDriveAsset(fileId: string): Promise<Uint8Array> {
   return downloadDriveFile(fileId);
+}
+
+export async function createDriveFolder(name: string, parentFolderId: string): Promise<string> {
+  const token = await getDriveAccessToken();
+  const response = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: [normalizeDriveFolderId(parentFolderId)],
+    }),
+  });
+  if (!response.ok) throw new Error(`Không tạo được thư mục Drive (${response.status}).`);
+  return ((await response.json()) as { id: string }).id;
+}
+
+export async function uploadDriveFile(
+  name: string,
+  parentFolderId: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<string> {
+  const token = await getDriveAccessToken();
+  const boundary = `annotation-${crypto.randomUUID()}`;
+  const encoder = new TextEncoder();
+  const metadata = encoder.encode(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify({ name, parents: [normalizeDriveFolderId(parentFolderId)] })}\r\n` +
+    `--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n`,
+  );
+  const suffix = encoder.encode(`\r\n--${boundary}--`);
+  const body = new Uint8Array(metadata.length + bytes.length + suffix.length);
+  body.set(metadata, 0);
+  body.set(bytes, metadata.length);
+  body.set(suffix, metadata.length + bytes.length);
+  const response = await fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    },
+  );
+  if (!response.ok) throw new Error(`Không tải được kết quả lên Drive (${response.status}).`);
+  return ((await response.json()) as { id: string }).id;
 }
 
 async function loadManifest(folderValue: string): Promise<{
@@ -193,19 +254,19 @@ async function loadManifest(folderValue: string): Promise<{
 }
 
 export async function syncProjectFromDrive(projectId: string) {
-  const db = getDb();
-  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as Record<string, unknown> | undefined;
+  const db = await getDb();
+  const project = await db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
   if (!project) return null;
   if (!project.drive_folder_id) throw new Error('Dự án chưa có thư mục dữ liệu.');
 
   const { manifest, manifestRef, resolve } = await loadManifest(project.drive_folder_id as string);
   if (!Array.isArray(manifest.items)) throw new Error('manifest.json thiếu danh sách items.');
   const now = nowISO();
-  let dataset = db.prepare('SELECT * FROM datasets WHERE project_id = ? ORDER BY created_at LIMIT 1')
-    .get(projectId) as Record<string, unknown> | undefined;
+  let dataset = await db.prepare('SELECT * FROM datasets WHERE project_id = ? ORDER BY created_at LIMIT 1')
+    .get(projectId);
   if (!dataset) {
     const datasetId = generateId();
-    db.prepare(`INSERT INTO datasets
+    await db.prepare(`INSERT INTO datasets
       (id, project_id, name, dataset_version, algorithm_version, manifest_drive_file_id, last_drive_sync_at, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(datasetId, projectId, `${project.name} Dataset`, manifest.dataset_version || null,
@@ -220,17 +281,17 @@ export async function syncProjectFromDrive(projectId: string) {
     try {
       if (!item.id || !item.image || !item.prediction) throw new Error('Thiếu id, image hoặc prediction.');
       const [imageRef, predictionRef] = await Promise.all([resolve(item.image), resolve(item.prediction)]);
-      const existing = db.prepare('SELECT id FROM dataset_files WHERE dataset_id = ? AND external_key = ?')
-        .get(dataset.id, item.id) as { id: string } | undefined;
+      const existing = await db.prepare<{ id: string }>('SELECT id FROM dataset_files WHERE dataset_id = ? AND external_key = ?')
+        .get(dataset.id, item.id);
       if (existing) {
-        db.prepare(`UPDATE dataset_files SET image_drive_file_id = ?, prediction_drive_file_id = ?,
+        await db.prepare(`UPDATE dataset_files SET image_drive_file_id = ?, prediction_drive_file_id = ?,
           image_filename = ?, prediction_filename = ?, width = COALESCE(?, width), height = COALESCE(?, height), asset_state = 'READY', updated_at = ?
           WHERE id = ?`)
           .run(imageRef, predictionRef, path.basename(item.image), path.basename(item.prediction),
             item.width || null, item.height || null, now, existing.id);
         updated += 1;
       } else {
-        db.prepare(`INSERT INTO dataset_files
+        await db.prepare(`INSERT INTO dataset_files
           (id, dataset_id, external_key, image_drive_file_id, prediction_drive_file_id,
            image_filename, prediction_filename, width, height, annotation_state, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'UNSTARTED', ?, ?)`)
@@ -241,14 +302,14 @@ export async function syncProjectFromDrive(projectId: string) {
     } catch (error) {
       errors.push({ id: item.id || '(unknown)', message: error instanceof Error ? error.message : String(error) });
       if (item.id) {
-        db.prepare(`UPDATE dataset_files SET asset_state = 'ERROR', updated_at = ?
+        await db.prepare(`UPDATE dataset_files SET asset_state = 'ERROR', updated_at = ?
           WHERE dataset_id = ? AND external_key = ?`).run(now, dataset.id, item.id);
       }
     }
   }
-  db.prepare(`UPDATE datasets SET dataset_version = ?, algorithm_version = ?, manifest_drive_file_id = ?,
+  await db.prepare(`UPDATE datasets SET dataset_version = ?, algorithm_version = ?, manifest_drive_file_id = ?,
     last_drive_sync_at = ?, updated_at = ? WHERE id = ?`)
     .run(manifest.dataset_version || null, manifest.algorithm_version || null, manifestRef, now, now, dataset.id);
-  db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(now, projectId);
+  await db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(now, projectId);
   return { added, updated, missing: errors.length, errors };
 }

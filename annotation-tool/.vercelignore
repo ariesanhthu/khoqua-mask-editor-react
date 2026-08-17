@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.next
+node_modules
+data
+annotation-storage
+artifacts
+.agents
+.claude
+skills-lock.json

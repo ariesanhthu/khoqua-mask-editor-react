@@ -12,7 +12,7 @@ export async function GET(
 ) {
   const user = await requireAuth(request);
   const { projectId } = await params;
-  const db = getDb();
+  const db = await getDb();
   const url = new URL(request.url);
 
   const annotationState = url.searchParams.get('annotationState');
@@ -51,32 +51,35 @@ export async function GET(
   }
 
   // Count total
-  const countRow = db.prepare(`
+  const countRow = await db.prepare(`
     SELECT COUNT(*) as total FROM dataset_files df
     JOIN datasets d ON df.dataset_id = d.id
     ${where}
-  `).get(...queryParams) as Record<string, unknown>;
-  const total = countRow.total as number;
+  `).get(...queryParams);
+  const total = Number(countRow?.total || 0);
 
   // Get page
   const offset = (page - 1) * pageSize;
-  const files = db.prepare(`
-    SELECT df.*, d.project_id FROM dataset_files df
+  const files = await db.prepare(`
+    SELECT df.*, d.project_id,
+      fl.user_id AS lock_user_id, fl.expires_at AS lock_expires_at,
+      lock_user.display_name AS lock_display_name,
+      (SELECT a.user_id FROM assignments a WHERE a.dataset_file_id = df.id ORDER BY a.created_at LIMIT 1) AS assignment_user_id,
+      (SELECT assigned_user.display_name FROM assignments a
+        JOIN users assigned_user ON assigned_user.id = a.user_id
+        WHERE a.dataset_file_id = df.id ORDER BY a.created_at LIMIT 1) AS assignment_display_name
+    FROM dataset_files df
     JOIN datasets d ON df.dataset_id = d.id
+    LEFT JOIN file_locks fl ON fl.dataset_file_id = df.id
+    LEFT JOIN users lock_user ON lock_user.id = fl.user_id
     ${where}
     ORDER BY df.external_key ASC
     LIMIT ? OFFSET ?
-  `).all(...queryParams, pageSize, offset) as Record<string, unknown>[];
+  `).all(...queryParams, pageSize, offset);
 
   // Enrich with lock + assignment info
   const items = files.map((f) => {
-    const lock = db.prepare('SELECT fl.*, u.display_name FROM file_locks fl JOIN users u ON fl.user_id = u.id WHERE fl.dataset_file_id = ?')
-      .get(f.id as string) as Record<string, unknown> | undefined;
-
-    const assignment = db.prepare('SELECT a.user_id, u.display_name FROM assignments a JOIN users u ON a.user_id = u.id WHERE a.dataset_file_id = ? LIMIT 1')
-      .get(f.id as string) as Record<string, unknown> | undefined;
-
-    const isLocked = lock && new Date(lock.expires_at as string) > new Date();
+    const isLocked = f.lock_user_id && new Date(f.lock_expires_at as string) > new Date();
 
     return {
       id: f.id,
@@ -85,10 +88,10 @@ export async function GET(
       annotationState: f.annotation_state,
       assetState: f.asset_state,
       lock: isLocked
-        ? { state: 'LOCKED', userId: lock!.user_id, displayName: lock!.display_name, expiresAt: lock!.expires_at }
+        ? { state: 'LOCKED', userId: f.lock_user_id, displayName: f.lock_display_name, expiresAt: f.lock_expires_at }
         : { state: 'AVAILABLE' },
-      assignment: assignment
-        ? { userId: assignment.user_id as string, displayName: assignment.display_name as string }
+      assignment: f.assignment_user_id
+        ? { userId: f.assignment_user_id as string, displayName: f.assignment_display_name as string }
         : undefined,
       latestRevision: f.latest_revision,
       latestVersionNumber: f.latest_version_number,

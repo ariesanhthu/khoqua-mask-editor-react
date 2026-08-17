@@ -13,7 +13,7 @@ export async function POST(
   const { fileId } = await params;
   const token = request.headers.get('X-Annotation-Lock-Token') || '';
 
-  const expiresAt = heartbeat(fileId, token, user.userId);
+  const expiresAt = await heartbeat(fileId, token, user.userId);
   if (!expiresAt) {
     return NextResponse.json(
       { code: 'LOCK_LOST', message: 'Your edit lock is no longer active.' },

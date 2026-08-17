@@ -1,11 +1,6 @@
 # Bitter Melon Annotation Tool — Next.js
 
-Ứng dụng gán nhãn nhiều người dùng cho hai tác vụ:
-
-- kiểm tra/chỉnh sửa mặt nạ phân đoạn vân khổ qua;
-- thêm, di chuyển, xóa hoặc xác nhận không có điểm đứt gãy.
-
-Frontend và backend đều nằm trong Next.js App Router. Không có backend Python.
+Ứng dụng gán nhãn nhiều người dùng cho mặt nạ phân đoạn vân khổ qua và điểm đứt gãy. UI và backend đều dùng Next.js App Router; không có backend Python, Vite hay Docker.
 
 ## Chạy cục bộ
 
@@ -17,27 +12,56 @@ copy .env.example .env.local
 npm run dev
 ```
 
-Mở `http://localhost:3000/login`. Trong môi trường development có thể bấm “Tạo dữ liệu mẫu”, sau đó đăng nhập bằng `Thư / 123456` hoặc `Admin / admin123`.
+Nếu không có `DATABASE_URL`, development dùng PostgreSQL nhúng PGlite tại `data/pglite`. Có thể gọi `/api/seed` trong development để tạo dữ liệu mẫu và đăng nhập bằng `Admin / admin123` hoặc `Thư / 123456`.
 
-Khi triển khai production với database trống, đặt `BOOTSTRAP_ADMIN_PASSWORD` (tối thiểu 8 ký tự). Tài khoản admin đầu tiên chỉ được tự tạo khi bảng người dùng chưa có dữ liệu.
+## Kiến trúc lưu trữ
 
-## Cấu hình dữ liệu
+- PostgreSQL serverless: người dùng, project, chỉ mục file, lock, session, revision và annotation.
+- Vercel Blob riêng tư: các mask PNG do người gán nhãn chỉnh sửa.
+- Google Drive: ảnh nguồn, prediction mask và thư mục xuất ground truth.
+- IndexedDB: bản nháp/offline recovery trong trình duyệt.
+- Cookie `httpOnly`: JWT đăng nhập.
 
-Quản trị viên tạo dự án bằng một trong hai loại nguồn:
+Google Drive không nằm trong vòng lặp chỉnh sửa thời gian thực. Chỉ thao tác Sync đọc `manifest.json`; thao tác Export tạo một thư mục `export_<timestamp>` mới trong Drive đích.
 
-- đường dẫn tuyệt đối đến thư mục local có `manifest.json`, `images/`, `predictions/`;
-- URL/ID thư mục Google Drive đã chia sẻ cho service account.
+## Cấu trúc Drive nguồn
 
-Với Google Drive, đặt `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` bằng chuỗi JSON hoặc đường dẫn tuyệt đối đến file JSON của service account. Credential chỉ được đọc ở server.
+```text
+source-folder/
+  manifest.json
+  images/
+  predictions/
+```
 
-## Lưu trữ
+`manifest.json`:
 
-- SQLite: `data/annotation.db` (WAL mode);
-- mask người dùng: `annotation-storage/<dataset>/<file>/revisions/`;
-- bản xuất: `annotation-storage/exports/<project>/export_<timestamp>/`;
-- bản nháp trình duyệt: IndexedDB;
-- `localStorage` chỉ chứa tùy chọn nhỏ như cỡ hiển thị/opacity và project gần nhất;
-- JWT đăng nhập nằm trong cookie `httpOnly`.
+```json
+{
+  "dataset_version": "2026-08-10",
+  "algorithm_version": "unsupervised-v1",
+  "items": [
+    {
+      "id": "BM_000001",
+      "image": "images/BM_000001.jpg",
+      "prediction": "predictions/BM_000001.png",
+      "width": 1024,
+      "height": 768
+    }
+  ]
+}
+```
+
+Service account trong `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` phải được chia sẻ quyền đọc thư mục nguồn và quyền Editor cho Drive đích. Drive đích mặc định của dự án này là `DATABASE-GT` (`147cVK2C7EZiupfMJQntP5Nc6tkkhqchN`).
+
+## Deploy Vercel
+
+1. Tạo project Vercel với Root Directory là `annotation-tool`.
+2. Kết nối một Postgres serverless và đặt `DATABASE_URL`.
+3. Kết nối một Vercel Blob store riêng tư.
+4. Đặt các biến `SECRET_KEY`, `BOOTSTRAP_ADMIN_*`, `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` và `GOOGLE_DRIVE_EXPORT_FOLDER_ID`.
+5. Deploy production.
+
+Ứng dụng cố ý báo lỗi khi chạy trên Vercel mà thiếu `DATABASE_URL` hoặc Blob store; không fallback về filesystem tạm.
 
 ## Kiểm tra
 
@@ -46,11 +70,3 @@ npm run typecheck
 npm run lint
 npm run build
 ```
-
-## Docker
-
-```bash
-docker compose up --build
-```
-
-Hai volume `annotation-data` và `annotation-storage` giữ SQLite/mask qua các lần khởi động lại. Ứng dụng không phù hợp với filesystem tạm thời của serverless.

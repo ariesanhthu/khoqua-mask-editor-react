@@ -1,8 +1,21 @@
 import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
-import { validateLockToken } from '@/lib/lock-service';
 import { saveDraft } from '@/lib/annotation-service';
 import { getDb } from '@/lib/db';
+
+function hasPersistableOperations(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  return value.every((operation) => {
+    if (!operation || typeof operation !== 'object' || !('type' in operation)) return false;
+    if (operation.type === 'RESET_TO_PREDICTION') return true;
+    if (operation.type === 'BRUSH_ADD' || operation.type === 'BRUSH_ERASE') {
+      return 'points' in operation && Array.isArray(operation.points);
+    }
+    return operation.type === 'POLYGON_SET'
+      && 'polygons' in operation
+      && Array.isArray(operation.polygons);
+  });
+}
 
 /**
  * PATCH /api/files/[fileId]/annotation — Save draft (spec 03 §9)
@@ -27,9 +40,12 @@ export async function PATCH(
       { status: 400 }
     );
   }
-  if (segmentation.humanAction === 'MODIFIED' && !segmentation.maskUploadRef) {
-    const existing = getDb().prepare('SELECT segmentation_json FROM annotations WHERE dataset_file_id = ?')
-      .get(fileId) as { segmentation_json: string } | undefined;
+  if (segmentation.humanAction === 'MODIFIED'
+      && !segmentation.maskUploadRef
+      && !hasPersistableOperations(segmentation.maskOperations)) {
+    const db = await getDb();
+    const existing = await db.prepare<{ segmentation_json: string }>('SELECT segmentation_json FROM annotations WHERE dataset_file_id = ?')
+      .get(fileId);
     const currentKey = existing
       ? (JSON.parse(existing.segmentation_json) as { maskStorageKey?: string }).maskStorageKey
       : undefined;
@@ -38,20 +54,17 @@ export async function PATCH(
     }
   }
 
-  // Validate immediately before the synchronous database transaction so a
-  // replaced/expired lock cannot mutate the annotation after body parsing.
-  const lock = validateLockToken(fileId, token);
-  if (!lock || lock.user_id !== user.userId) {
-    return NextResponse.json(
-      { code: 'LOCK_LOST', message: 'Your edit lock is no longer active.' },
-      { status: 409 }
-    );
-  }
-
-  const result = saveDraft(fileId, user.userId, baseRevision, segmentation, breakpoints);
+  const result = await saveDraft(fileId, user.userId, token, baseRevision, segmentation, breakpoints);
 
   if (!result) {
     return NextResponse.json({ code: 'FILE_NOT_FOUND', message: 'File not found' }, { status: 404 });
+  }
+
+  if (result === 'LOCK_LOST') {
+    return NextResponse.json(
+      { code: 'LOCK_LOST', message: 'Your edit lock is no longer active.' },
+      { status: 409 },
+    );
   }
 
   if ('conflict' in result) {

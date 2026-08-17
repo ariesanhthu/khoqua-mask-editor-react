@@ -1,8 +1,9 @@
 import 'server-only';
 
+import { get, put } from '@vercel/blob';
+import crypto from 'crypto';
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import path from 'path';
-import crypto from 'crypto';
 import sharp from 'sharp';
 import { getDb } from './db';
 
@@ -11,8 +12,8 @@ const storageRoot = path.resolve(
   process.env.ANNOTATION_STORAGE_PATH || path.join(process.cwd(), 'annotation-storage'),
 );
 
-export function annotationStorageRoot(): string {
-  return storageRoot;
+function usesVercelBlob(): boolean {
+  return Boolean(process.env.VERCEL || process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_STORE_ID);
 }
 
 function safeStoragePath(storageKey: string): string {
@@ -32,11 +33,12 @@ export async function persistMask(fileId: string, bytes: Uint8Array): Promise<st
     throw new Error('Mask must be a PNG image');
   }
 
-  const db = getDb();
-  const row = db.prepare(`
-    SELECT df.dataset_id, df.width, df.height FROM dataset_files df WHERE df.id = ?
-  `).get(fileId) as { dataset_id: string; width: number | null; height: number | null } | undefined;
+  const db = await getDb();
+  const row = await db.prepare<{ dataset_id: string; width: number | null; height: number | null }>(
+    'SELECT dataset_id, width, height FROM dataset_files WHERE id = ?',
+  ).get(fileId);
   if (!row) throw new Error('File not found');
+
   const image = sharp(bytes, { failOn: 'error' });
   const metadata = await image.metadata();
   const pngWidth = metadata.width || 0;
@@ -46,25 +48,36 @@ export async function persistMask(fileId: string, bytes: Uint8Array): Promise<st
     throw new Error(`Mask dimensions ${pngWidth}×${pngHeight} do not match the source image.`);
   }
 
-  const relativeKey = path.join(
-    row.dataset_id,
-    fileId,
-    'revisions',
-    `${Date.now()}-${crypto.randomUUID()}.png`,
-  );
-  const target = safeStoragePath(relativeKey);
-  await mkdir(path.dirname(target), { recursive: true });
-  const normalizedBinaryMask = await image
+  const normalized = await image
     .flatten({ background: '#000000' })
     .greyscale()
     .threshold(127)
     .removeAlpha()
     .png()
     .toBuffer();
-  await writeFile(/* turbopackIgnore: true */ target, normalizedBinaryMask, { flag: 'wx' });
-  return relativeKey.replaceAll(path.sep, '/');
+  const storageKey = `masks/${row.dataset_id}/${fileId}/revisions/${Date.now()}-${crypto.randomUUID()}.png`;
+
+  if (usesVercelBlob()) {
+    if (!process.env.BLOB_READ_WRITE_TOKEN && !process.env.BLOB_STORE_ID) {
+      throw new Error('A Vercel Blob store is not connected to this project.');
+    }
+    await put(storageKey, normalized, {
+      access: 'private',
+      addRandomSuffix: false,
+      allowOverwrite: false,
+      contentType: 'image/png',
+    });
+  } else {
+    const target = safeStoragePath(storageKey);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(/* turbopackIgnore: true */ target, normalized, { flag: 'wx' });
+  }
+  return storageKey;
 }
 
 export async function readStoredMask(storageKey: string): Promise<Buffer> {
-  return readFile(/* turbopackIgnore: true */ safeStoragePath(storageKey));
+  if (!usesVercelBlob()) return readFile(/* turbopackIgnore: true */ safeStoragePath(storageKey));
+  const result = await get(storageKey, { access: 'private', useCache: false });
+  if (!result || result.statusCode !== 200 || !result.stream) throw new Error('Stored mask not found');
+  return Buffer.from(await new Response(result.stream).arrayBuffer());
 }

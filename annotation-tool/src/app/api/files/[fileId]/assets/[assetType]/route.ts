@@ -19,9 +19,9 @@ export async function GET(
 ) {
   await requireAuth(request);
   const { fileId, assetType } = await params;
-  const db = getDb();
+  const db = await getDb();
 
-  const file = db.prepare('SELECT * FROM dataset_files WHERE id = ?').get(fileId) as Record<string, unknown> | undefined;
+  const file = await db.prepare('SELECT * FROM dataset_files WHERE id = ?').get(fileId);
   if (!file) {
     return NextResponse.json({ code: 'FILE_NOT_FOUND', message: 'File not found' }, { status: 404 });
   }
@@ -31,8 +31,8 @@ export async function GET(
   let contentType: string;
 
   if (assetType === 'current-mask') {
-    const annotation = db.prepare('SELECT segmentation_json FROM annotations WHERE dataset_file_id = ?')
-      .get(fileId) as { segmentation_json: string } | undefined;
+    const annotation = await db.prepare<{ segmentation_json: string }>('SELECT segmentation_json FROM annotations WHERE dataset_file_id = ?')
+      .get(fileId);
     const storageKey = annotation
       ? (JSON.parse(annotation.segmentation_json) as { maskStorageKey?: string }).maskStorageKey
       : undefined;

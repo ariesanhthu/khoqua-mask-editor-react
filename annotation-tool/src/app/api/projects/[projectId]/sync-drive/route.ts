@@ -3,6 +3,7 @@ import { requireAuth } from '@/lib/auth';
 import { syncProjectFromDrive } from '@/lib/drive-service';
 
 export const runtime = 'nodejs';
+export const maxDuration = 300;
 
 export async function POST(
   request: Request,

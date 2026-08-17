@@ -1,7 +1,7 @@
 import { jwtVerify } from 'jose';
 import { NextResponse, type NextRequest } from 'next/server';
 
-const publicApiPaths = new Set(['/api/auth/login', '/api/auth/logout', '/api/seed']);
+const publicApiPaths = new Set(['/api/auth/login', '/api/auth/logout', '/api/health', '/api/seed']);
 
 export async function proxy(request: NextRequest) {
   if (publicApiPaths.has(request.nextUrl.pathname)) return NextResponse.next();

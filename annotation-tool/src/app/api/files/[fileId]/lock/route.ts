@@ -12,12 +12,13 @@ export async function POST(
 ) {
   const user = await requireAuth(request);
   const { fileId } = await params;
-  const file = getDb().prepare('SELECT asset_state FROM dataset_files WHERE id = ?').get(fileId) as { asset_state: string } | undefined;
+  const db = await getDb();
+  const file = await db.prepare<{ asset_state: string }>('SELECT asset_state FROM dataset_files WHERE id = ?').get(fileId);
   if (file?.asset_state === 'ERROR') {
     return NextResponse.json({ code: 'ASSET_NOT_FOUND', message: 'Source image or prediction is missing.' }, { status: 409 });
   }
 
-  const result = acquireLock(fileId, user.userId);
+  const result = await acquireLock(fileId, user.userId);
   if (!result) {
     return NextResponse.json({ code: 'FILE_NOT_FOUND', message: 'File not found' }, { status: 404 });
   }
@@ -50,8 +51,8 @@ export async function DELETE(
   const { fileId } = await params;
   const token = request.headers.get('X-Annotation-Lock-Token') || '';
 
-  const lockOwner = validateLockToken(fileId, token);
-  const released = lockOwner?.user_id === user.userId && releaseLock(fileId, token);
+  const lockOwner = await validateLockToken(fileId, token);
+  const released = lockOwner?.user_id === user.userId && await releaseLock(fileId, token);
   if (!released) {
     return NextResponse.json({ code: 'LOCK_LOST', message: 'Lock not found or invalid' }, { status: 409 });
   }

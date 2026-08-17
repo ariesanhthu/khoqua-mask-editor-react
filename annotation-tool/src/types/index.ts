@@ -25,6 +25,18 @@ export interface BreakpointPoint {
   y: number;
 }
 
+export interface PolygonNode {
+  id: string;
+  x: number;
+  y: number;
+}
+
+export interface AnnotationPolygon {
+  id: string;
+  label: string;
+  nodes: PolygonNode[];
+}
+
 export interface SegmentationAnnotation {
   sourcePredictionDriveFileId: string;
   humanAction: HumanAction;
@@ -100,7 +112,7 @@ export interface SaveDraftResponse {
 export interface DoneRequest {
   baseRevision: number;
   annotation: {
-    segmentation: { humanAction: HumanAction; maskUploadRef?: string };
+    segmentation: { humanAction: HumanAction; maskUploadRef?: string; maskOperations?: MaskOperation[] };
     breakpoints: BreakpointAnnotation;
   };
 }
@@ -128,6 +140,7 @@ export interface ProjectSummary {
   id: string;
   name: string;
   driveFolderId: string;
+  exportDriveFolderId: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -137,6 +150,7 @@ export interface ProjectSummary {
 export type MaskOperation =
   | { type: 'BRUSH_ADD'; brushSize: number; points: Array<{ x: number; y: number }> }
   | { type: 'BRUSH_ERASE'; brushSize: number; points: Array<{ x: number; y: number }> }
+  | { type: 'POLYGON_SET'; polygons: AnnotationPolygon[] }
   | { type: 'RESET_TO_PREDICTION' };
 
 // ─── Local Draft (IndexedDB) ────────────────────────────

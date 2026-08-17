@@ -1,8 +1,19 @@
 import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
-import { validateLockToken } from '@/lib/lock-service';
 import { submitDone } from '@/lib/annotation-service';
 import { getDb } from '@/lib/db';
+
+function hasPersistableOperations(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  return value.every((operation) => operation
+    && typeof operation === 'object'
+    && 'type' in operation
+    && (operation.type === 'RESET_TO_PREDICTION'
+      || ((operation.type === 'BRUSH_ADD' || operation.type === 'BRUSH_ERASE')
+        && 'points' in operation && Array.isArray(operation.points))
+      || (operation.type === 'POLYGON_SET'
+        && 'polygons' in operation && Array.isArray(operation.polygons))));
+}
 
 /**
  * POST /api/files/[fileId]/done — Finalize annotation (spec 03 §12)
@@ -25,15 +36,17 @@ export async function POST(
       !['ANNOTATED', 'CONFIRMED_NONE'].includes(breakpoints.state) ||
       !Array.isArray(breakpoints.points) ||
       (breakpoints.state === 'ANNOTATED' && breakpoints.points.length === 0) ||
-      (breakpoints.state === 'CONFIRMED_NONE' && breakpoints.points.length !== 0)) {
+      (breakpoints.state === 'CONFIRMED_NONE' && breakpoints.points.length !== 0) ||
+      (segmentation.maskOperations !== undefined && !hasPersistableOperations(segmentation.maskOperations))) {
     return NextResponse.json(
       { code: 'INVALID_ANNOTATION', message: 'Complete the mask and breakpoint tasks before finishing.' },
       { status: 400 }
     );
   }
   if (segmentation.humanAction === 'MODIFIED' && !segmentation.maskUploadRef) {
-    const existing = getDb().prepare('SELECT segmentation_json FROM annotations WHERE dataset_file_id = ?')
-      .get(fileId) as { segmentation_json: string } | undefined;
+    const db = await getDb();
+    const existing = await db.prepare<{ segmentation_json: string }>('SELECT segmentation_json FROM annotations WHERE dataset_file_id = ?')
+      .get(fileId);
     const currentKey = existing
       ? (JSON.parse(existing.segmentation_json) as { maskStorageKey?: string }).maskStorageKey
       : undefined;
@@ -42,17 +55,10 @@ export async function POST(
     }
   }
 
-  const lock = validateLockToken(fileId, token);
-  if (!lock || lock.user_id !== user.userId) {
-    return NextResponse.json(
-      { code: 'LOCK_LOST', message: 'Your edit lock is no longer active.' },
-      { status: 409 }
-    );
-  }
-
-  const result = submitDone(
+  const result = await submitDone(
     fileId,
     user.userId,
+    token,
     baseRevision,
     segmentation,
     breakpoints,
@@ -60,6 +66,13 @@ export async function POST(
 
   if (!result) {
     return NextResponse.json({ code: 'FILE_NOT_FOUND', message: 'File not found' }, { status: 404 });
+  }
+
+  if (result === 'LOCK_LOST') {
+    return NextResponse.json(
+      { code: 'LOCK_LOST', message: 'Your edit lock is no longer active.' },
+      { status: 409 },
+    );
   }
 
   if ('conflict' in result) {

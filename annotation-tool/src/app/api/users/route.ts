@@ -8,7 +8,8 @@ const roles = new Set<UserRole>(['ADMIN', 'ANNOTATOR', 'REVIEWER']);
 export async function GET(request: Request) {
   const user = await requireAuth(request);
   if (user.role !== 'ADMIN') return NextResponse.json({ code: 'FORBIDDEN', message: 'Admin access required' }, { status: 403 });
-  const rows = getDb().prepare('SELECT id, display_name, email, role, created_at FROM users ORDER BY created_at DESC').all() as Record<string, unknown>[];
+  const db = await getDb();
+  const rows = await db.prepare('SELECT id, display_name, email, role, created_at FROM users ORDER BY created_at DESC').all();
   return NextResponse.json(rows.map((row) => ({ id: row.id, displayName: row.display_name, email: row.email, role: row.role, createdAt: row.created_at })));
 }
 
@@ -21,7 +22,8 @@ export async function POST(request: Request) {
   }
   try {
     const id = generateId();
-    getDb().prepare('INSERT INTO users (id, display_name, email, hashed_password, role) VALUES (?, ?, ?, ?, ?)')
+    const db = await getDb();
+    await db.prepare('INSERT INTO users (id, display_name, email, hashed_password, role) VALUES (?, ?, ?, ?, ?)')
       .run(id, body.displayName.trim(), body.email?.trim() || null, hashPassword(body.password), body.role);
     return NextResponse.json({ id, displayName: body.displayName.trim(), email: body.email || null, role: body.role }, { status: 201 });
   } catch {

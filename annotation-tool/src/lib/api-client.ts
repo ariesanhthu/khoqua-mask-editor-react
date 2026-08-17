@@ -57,9 +57,9 @@ export async function getProjects() {
   return apiFetch<ProjectSummary[]>('/api/projects');
 }
 
-export async function createProject(name: string, driveFolderId: string) {
+export async function createProject(name: string, driveFolderId: string, exportDriveFolderId: string) {
   return apiFetch<ProjectSummary>('/api/projects', {
-    method: 'POST', body: JSON.stringify({ name, driveFolderId }),
+    method: 'POST', body: JSON.stringify({ name, driveFolderId, exportDriveFolderId }),
   });
 }
 
@@ -70,7 +70,7 @@ export async function syncProject(projectId: string) {
 }
 
 export async function exportProject(projectId: string) {
-  return apiFetch<{ exportName: string; outputPath: string; exported: number; errors: Array<{ id: string; message: string }> }>(
+  return apiFetch<{ exportName: string; driveFolderId: string; driveFolderUrl: string; exported: number; errors: Array<{ id: string; message: string }> }>(
     `/api/projects/${projectId}/export`, { method: 'POST' },
   );
 }

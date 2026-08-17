@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="vi"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Annotation Workspace - Bước Vùng chọn</title>
+<!-- Material Symbols -->
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@100..900&amp;family=JetBrains+Mono:wght@100..900&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+    </style>
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<!-- Tailwind Config -->
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "secondary-container": "#00a572",
+                        "on-secondary-container": "#00311f",
+                        "tertiary-fixed": "#ffdcc6",
+                        "secondary-fixed-dim": "#4edea3",
+                        "on-surface-variant": "#c2c6d6",
+                        "on-background": "#dce2f7",
+                        "on-primary-container": "#00285d",
+                        "outline": "#8c909f",
+                        "on-tertiary": "#502400",
+                        "error": "#ffb4ab",
+                        "tertiary": "#ffb786",
+                        "secondary-fixed": "#6ffbbe",
+                        "secondary": "#4edea3",
+                        "inverse-surface": "#dce2f7",
+                        "on-tertiary-container": "#461f00",
+                        "error-container": "#93000a",
+                        "on-primary-fixed": "#001a42",
+                        "tertiary-fixed-dim": "#ffb786",
+                        "surface-tint": "#adc6ff",
+                        "on-primary-fixed-variant": "#004395",
+                        "inverse-on-surface": "#293040",
+                        "on-primary": "#002e6a",
+                        "tertiary-container": "#df7412",
+                        "on-tertiary-fixed-variant": "#723600",
+                        "primary-container": "#4d8eff",
+                        "surface-container": "#191f2f",
+                        "primary": "#adc6ff",
+                        "surface-container-highest": "#2e3545",
+                        "on-error": "#690005",
+                        "surface-container-high": "#232a3a",
+                        "surface-container-low": "#141b2b",
+                        "surface-bright": "#323949",
+                        "primary-fixed": "#d8e2ff",
+                        "primary-fixed-dim": "#adc6ff",
+                        "surface-container-lowest": "#070e1d",
+                        "outline-variant": "#424754",
+                        "surface-dim": "#0c1322",
+                        "on-secondary-fixed": "#002113",
+                        "on-tertiary-fixed": "#311400",
+                        "on-secondary": "#003824",
+                        "inverse-primary": "#005ac2",
+                        "on-error-container": "#ffdad6",
+                        "surface-variant": "#2e3545",
+                        "on-surface": "#dce2f7",
+                        "on-secondary-fixed-variant": "#005236",
+                        "surface": "#0c1322",
+                        "background": "#0c1322"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "spacing": {
+                        "gutter": "1px",
+                        "topbar_height": "56px",
+                        "bottombar_height": "48px",
+                        "container_padding": "12px",
+                        "sidebar_width": "280px"
+                    },
+                    "fontFamily": {
+                        "ui-compact": ["Hanken Grotesk"],
+                        "body-md": ["Hanken Grotesk"],
+                        "label-md": ["JetBrains Mono"],
+                        "headline-sm": ["Hanken Grotesk"]
+                    },
+                    "fontSize": {
+                        "ui-compact": ["13px", {"lineHeight": "18px", "fontWeight": "500"}],
+                        "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                        "label-md": ["12px", {"lineHeight": "16px", "letterSpacing": "0.02em", "fontWeight": "500"}],
+                        "headline-sm": ["18px", {"lineHeight": "24px", "fontWeight": "600"}]
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-background text-on-surface h-screen w-screen overflow-hidden flex flex-col font-body-md text-body-md select-none">
+<!-- Task Header (Top Bar) -->
+<header class="h-topbar_height w-full bg-surface-container border-b border-outline-variant flex items-center justify-between px-4 shrink-0 z-20">
+<div class="flex items-center gap-4">
+<button class="flex items-center gap-2 px-2 py-1 rounded hover:bg-surface-container-high transition-colors text-on-surface-variant hover:text-on-surface">
+<span class="material-symbols-outlined text-[18px]">arrow_back</span>
+<span class="font-ui-compact text-ui-compact">Tệp</span>
+</button>
+</div>
+<div class="flex items-center gap-6">
+<div class="flex items-center gap-2">
+<span class="font-label-md text-label-md text-on-surface">BM_00342</span>
+</div>
+<div class="h-4 w-px bg-outline-variant"></div>
+<div class="font-ui-compact text-ui-compact text-on-surface-variant">
+                42 / 180
+            </div>
+</div>
+<div class="flex items-center gap-2 text-secondary font-ui-compact text-ui-compact">
+<span class="material-symbols-outlined text-[16px]">check_circle</span>
+<span>Đã lưu</span>
+</div>
+</header>
+<!-- Main Workspace Area -->
+<div class="flex-1 flex overflow-hidden w-full relative">
+<!-- Left Sidebar (File Queue) -->
+<aside class="w-sidebar_width h-full bg-surface-container-low border-r border-outline-variant flex flex-col shrink-0 z-10">
+<div class="px-4 py-3 border-b border-outline-variant">
+<h2 class="font-ui-compact text-ui-compact text-on-surface-variant uppercase tracking-wider">Hàng đợi tệp</h2>
+</div>
+<div class="flex-1 overflow-y-auto py-2">
+<!-- Queue Items -->
+<div class="flex items-center h-[32px] px-4 cursor-pointer hover:bg-surface-container-high group transition-colors">
+<div class="w-2 h-2 rounded-full bg-surface-variant mr-3 group-hover:bg-outline"></div>
+<span class="font-label-md text-label-md text-on-surface-variant">BM_00340</span>
+</div>
+<div class="flex items-center h-[32px] px-4 cursor-pointer hover:bg-surface-container-high group transition-colors">
+<div class="w-2 h-2 rounded-full bg-surface-variant mr-3 group-hover:bg-outline"></div>
+<span class="font-label-md text-label-md text-on-surface-variant">BM_00341</span>
+</div>
+<!-- Active Item -->
+<div class="flex items-center h-[32px] px-4 cursor-pointer bg-surface border-l-[3px] border-primary transition-colors">
+<div class="w-2 h-2 rounded-full bg-primary mr-3 shadow-[0_0_8px_rgba(173,198,255,0.4)]"></div>
+<span class="font-label-md text-label-md text-primary font-bold">BM_00342</span>
+<span class="ml-auto font-label-md text-label-md text-on-surface-variant text-[10px] bg-surface-container px-1.5 py-0.5 rounded">Đang sửa</span>
+</div>
+<div class="flex items-center h-[32px] px-4 cursor-pointer hover:bg-surface-container-high group transition-colors">
+<div class="w-2 h-2 rounded-full bg-surface-variant mr-3 group-hover:bg-outline"></div>
+<span class="font-label-md text-label-md text-on-surface-variant">BM_00343</span>
+</div>
+<div class="flex items-center h-[32px] px-4 cursor-pointer hover:bg-surface-container-high group transition-colors">
+<div class="w-2 h-2 rounded-full bg-surface-variant mr-3 group-hover:bg-outline"></div>
+<span class="font-label-md text-label-md text-on-surface-variant">BM_00344</span>
+</div>
+</div>
+</aside>
+<!-- Main Canvas -->
+<main class="flex-1 relative bg-surface-container-lowest overflow-hidden flex items-center justify-center">
+<!-- Source Image Placeholder -->
+<div class="absolute inset-0 w-full h-full bg-cover bg-center opacity-80 mix-blend-screen" data-alt="A high-resolution aerial topographical map showing detailed natural ridges and valleys. The color palette is dark and technical, resembling satellite radar data or a digital elevation model. High contrast, precise lines, monochromatic with subtle hints of blue and green to indicate elevation changes. Professional GIS software aesthetic." style="background-image: url('https://lh3.googleusercontent.com/aida-public/AB6AXuDYAgMK7zuDopPZnqlxuJDlfbnudBz9hmcrh08o9fupxOZTfRHbHhZzje7XGNUH7NHudtlAgYZIveDguaMgAj_GYnnkZySz6nsiWXatL4eqiF3QqnLWzg10U9JyivrY55lM-BaQeMLsGHiirhd1BFUPLlBCcqkQ6TRRSMaf-ZqPipjPeOaxjiEuC4VrRf9FF2UvHIanKOhzZWsIeOMux0u9HFymHqyhciRQLcxtRq1YiClyU9NhcLA')">
+</div>
+<!-- Simulated Mask Overlay (visual purely) -->
+<div class="absolute inset-0 w-full h-full opacity-30 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCI+PGRlZnM+PHBhdHRlcm4gaWQ9InBhdCIgeD0iMCIgeT0iMCIgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBwYXR0ZXJuVW5pdHM9InVzZXJTcGFjZU9uVXNlIj48cGF0aCBkPSJNMCAwTDQwIDQwWk00MCAwTDAgNDBaIiBzdHJva2U9IiNhZGM2ZmYiIHN0cm9rZS13aWR0aD0iMC41IiBmaWxsPSJub25lIi8+PC9wYXR0ZXJuPjwvZGVmcz48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSJ1cmwoI3BhdCkiLz48L3N2Zz4=')] mix-blend-overlay pointer-events-none"></div>
+<!-- Floating Viewport Toolbar (Bottom Center) -->
+<div class="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center bg-surface/80 backdrop-blur-md border border-outline-variant rounded-full px-2 py-1.5 shadow-lg z-10">
+<button class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-surface-container-high text-on-surface transition-colors">
+<span class="material-symbols-outlined text-[18px]">remove</span>
+</button>
+<div class="px-3 font-label-md text-label-md text-on-surface min-w-[60px] text-center">
+                    100%
+                </div>
+<button class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-surface-container-high text-on-surface transition-colors">
+<span class="material-symbols-outlined text-[18px]">add</span>
+</button>
+<div class="w-px h-4 bg-outline-variant mx-1"></div>
+<button class="px-3 h-8 flex items-center justify-center rounded-full hover:bg-surface-container-high font-ui-compact text-ui-compact text-on-surface transition-colors">
+                    Fit
+                </button>
+<button class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-surface-container-high text-on-surface transition-colors">
+<span class="material-symbols-outlined text-[18px]">fullscreen</span>
+</button>
+</div>
+<!-- Layer Controls (Top Left of Canvas) -->
+<div class="absolute top-4 left-4 flex flex-col gap-2 z-10">
+<button class="flex items-center gap-2 bg-surface/80 backdrop-blur-md border border-outline-variant rounded lg px-3 py-1.5 hover:bg-surface transition-colors group">
+<span class="material-symbols-outlined text-[18px] text-primary group-hover:text-primary-container transition-colors">visibility</span>
+<span class="font-ui-compact text-ui-compact text-on-surface">Vùng chọn đề xuất</span>
+</button>
+<button class="flex items-center gap-2 bg-surface/80 backdrop-blur-md border border-outline-variant rounded lg px-3 py-1.5 hover:bg-surface transition-colors opacity-60 hover:opacity-100">
+<span class="material-symbols-outlined text-[18px] text-on-surface-variant">visibility_off</span>
+<span class="font-ui-compact text-ui-compact text-on-surface-variant">Vùng chọn của tôi</span>
+</button>
+</div>
+</main>
+<!-- Right Sidebar (Annotation Panel) -->
+<aside class="w-sidebar_width h-full bg-surface-container-low border-l border-outline-variant flex flex-col shrink-0 z-10">
+<!-- Tabs -->
+<div class="flex border-b border-outline-variant bg-surface-container">
+<button class="flex-1 py-3 text-center border-b-2 border-primary text-primary font-ui-compact text-ui-compact font-bold transition-colors">
+                    ① Vùng chọn
+                </button>
+<button class="flex-1 py-3 text-center border-b-2 border-transparent text-on-surface-variant hover:text-on-surface font-ui-compact text-ui-compact transition-colors">
+                    ② Điểm ngắt
+                </button>
+</div>
+<div class="flex-1 overflow-y-auto p-4 flex flex-col gap-6">
+<!-- Primary Action Area -->
+<div class="bg-surface-container p-4 rounded-lg border border-outline-variant">
+<h3 class="font-body-md text-body-md text-on-surface mb-3">Vùng chọn đề xuất có chính xác không?</h3>
+<div class="flex flex-col gap-2">
+<button class="w-full flex items-center justify-center gap-2 bg-primary hover:bg-primary-container text-on-primary font-ui-compact text-ui-compact py-2 rounded transition-colors shadow-sm">
+<span class="material-symbols-outlined text-[18px]">check</span>
+                            Chấp nhận đề xuất
+                        </button>
+<button class="w-full flex items-center justify-center gap-2 border border-outline hover:border-outline-variant text-on-surface hover:bg-surface-container-high font-ui-compact text-ui-compact py-2 rounded transition-colors">
+                            Sửa vùng chọn
+                        </button>
+</div>
+</div>
+<!-- Tools Divider -->
+<div class="h-px w-full bg-outline-variant"></div>
+<!-- Mask Tools -->
+<div class="flex flex-col gap-5">
+<div class="flex items-center justify-between">
+<h4 class="font-ui-compact text-ui-compact text-on-surface-variant uppercase tracking-wider">Công cụ Đa giác</h4>
+<div class="flex gap-2 text-on-surface-variant">
+<button class="w-6 h-6 flex items-center justify-center hover:text-on-surface rounded hover:bg-surface-container-high"><span class="material-symbols-outlined text-[16px]">undo</span></button>
+<button class="w-6 h-6 flex items-center justify-center hover:text-on-surface rounded hover:bg-surface-container-high"><span class="material-symbols-outlined text-[16px]">redo</span></button>
+</div>
+</div>
+<!-- Polygon Controls -->
+<div class="flex flex-col gap-2">
+<button class="w-full flex items-center justify-center gap-2 bg-surface text-on-surface rounded shadow-sm border border-outline-variant font-ui-compact text-ui-compact py-2 hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined text-[18px]">polyline</span> Vẽ đa giác
+</button>
+<div class="flex gap-2">
+<button class="flex-1 flex items-center justify-center gap-1.5 py-1.5 text-on-surface-variant hover:text-on-surface bg-surface-container-high rounded border border-outline-variant font-ui-compact text-ui-compact transition-colors">
+<span class="material-symbols-outlined text-[16px]">done</span> Hoàn tất đa giác
+</button>
+<button class="flex-1 flex items-center justify-center gap-1.5 py-1.5 text-error hover:text-error-container bg-surface-container-high rounded border border-outline-variant font-ui-compact text-ui-compact transition-colors">
+<span class="material-symbols-outlined text-[16px]">delete</span> Xóa đa giác
+</button>
+</div>
+</div>
+<!-- Class Label -->
+<div class="flex flex-col gap-2 pt-2 border-t border-outline-variant">
+<label class="font-ui-compact text-ui-compact text-on-surface-variant">Chọn nhãn</label>
+<select class="w-full bg-surface border border-outline-variant rounded p-2 text-on-surface font-body-md text-body-md focus:border-primary focus:ring-1 focus:ring-primary outline-none">
+<option value="vung_hu_hai">Vùng hư hại</option>
+<option value="re_cay">Rễ cây</option>
+<option value="vet_nut">Vết nứt</option>
+</select>
+</div>
+<!-- Opacity -->
+<div class="flex flex-col gap-2 pt-2 border-t border-outline-variant">
+<div class="flex justify-between items-center">
+<label class="font-ui-compact text-ui-compact text-on-surface-variant">Độ mờ</label>
+<span class="font-label-md text-label-md text-on-surface bg-surface-container px-1.5 py-0.5 rounded border border-outline-variant">60%</span>
+</div>
+<input class="w-full h-1 bg-surface-variant rounded-lg appearance-none cursor-pointer accent-primary" max="100" min="0" type="range" value="60"/>
+</div>
+</div>
+<div class="mt-auto pt-4">
+<button class="w-full flex items-center justify-center gap-2 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-ui-compact text-ui-compact py-2 rounded transition-colors text-xs">
+<span class="material-symbols-outlined text-[16px]">restart_alt</span>
+                        Khôi phục đề xuất
+                    </button>
+</div>
+</div>
+</aside>
+</div>
+<!-- Bottom Bar (Actions) -->
+<footer class="h-bottombar_height w-full bg-surface-container border-t border-outline-variant flex items-center justify-between px-4 shrink-0 z-20">
+<button class="flex items-center gap-2 px-3 py-1.5 border border-outline hover:border-outline-variant rounded text-on-surface-variant hover:text-on-surface font-ui-compact text-ui-compact transition-colors">
+<span class="material-symbols-outlined text-[16px]">chevron_left</span>
+            Quay lại
+        </button>
+<button class="flex items-center gap-2 px-4 py-1.5 bg-primary hover:bg-primary-container text-on-primary rounded font-ui-compact text-ui-compact font-bold transition-colors shadow-sm">
+            Tiếp tục đến Điểm ngắt
+            <span class="material-symbols-outlined text-[16px]">chevron_right</span>
+</button>
+</footer>
+</body></html>

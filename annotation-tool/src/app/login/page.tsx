@@ -48,72 +48,49 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4">
-      <div
-        className="w-full max-w-md rounded-2xl p-8"
-        style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
-      >
-        {/* Logo */}
-        <div className="text-center mb-8">
-          <div
-            className="inline-flex items-center justify-center w-16 h-16 rounded-2xl mb-4"
-            style={{ background: 'linear-gradient(135deg, var(--accent), #a855f7)' }}
-          >
+    <main className="login-shell">
+      <section className="login-card">
+        <div className="login-heading">
+          <div className="login-logo">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
               <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
             </svg>
           </div>
-          <h1 className="text-2xl font-bold">Bitter Melon Annotation</h1>
-            <p style={{ color: 'var(--text-secondary)' }} className="mt-1">
-            Công cụ kiểm tra mặt nạ và đánh dấu điểm đứt gãy
-          </p>
+          <p className="eyebrow">Annotation workspace</p>
+          <h1>Bitter Melon Annotation</h1>
+          <p>Công cụ kiểm tra mặt nạ và đánh dấu điểm đứt gãy</p>
         </div>
 
-        <form onSubmit={handleLogin} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>
-              Tên đăng nhập
-            </label>
+        <form onSubmit={handleLogin} className="login-form">
+          <label htmlFor="username">
+            <span>Tên đăng nhập</span>
             <input
               id="username"
+              name="username"
               type="text"
+              autoComplete="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg outline-none transition-colors"
-              style={{
-                background: 'var(--bg-tertiary)',
-                border: '1px solid var(--border)',
-                color: 'var(--text-primary)',
-              }}
-              placeholder="Nhập tên..."
-              autoFocus
+              placeholder="Ví dụ: Nguyễn An…"
+              spellCheck={false}
             />
-          </div>
+          </label>
 
-          <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>
-              Mật khẩu
-            </label>
+          <label htmlFor="password">
+            <span>Mật khẩu</span>
             <input
               id="password"
+              name="password"
               type="password"
+              autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg outline-none transition-colors"
-              style={{
-                background: 'var(--bg-tertiary)',
-                border: '1px solid var(--border)',
-                color: 'var(--text-primary)',
-              }}
               placeholder="••••••"
             />
-          </div>
+          </label>
 
           {error && (
-            <p className="text-sm px-3 py-2 rounded-lg" style={{
-              background: error.startsWith('✓') ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)',
-              color: error.startsWith('✓') ? 'var(--success)' : 'var(--danger)',
-            }}>
+            <p role="status" aria-live="polite" className={`login-message ${error.startsWith('✓') ? 'success' : 'error'}`}>
               {error}
             </p>
           )}
@@ -122,25 +99,23 @@ export default function LoginPage() {
             id="login-btn"
             type="submit"
             disabled={loading || !username || !password}
-            className="w-full py-2.5 rounded-lg font-semibold transition-all cursor-pointer disabled:opacity-50"
-            style={{ background: 'var(--accent)', color: 'white' }}
+            className="button primary login-submit"
           >
-            {loading ? 'Đang đăng nhập...' : 'Đăng nhập'}
+            {loading ? 'Đang đăng nhập…' : 'Đăng nhập'}
           </button>
         </form>
 
-        <div className="mt-6 pt-6" style={{ borderTop: '1px solid var(--border)' }}>
+        {process.env.NODE_ENV === 'development' ? <div className="login-dev-tools">
           <button
             id="seed-btn"
             onClick={handleSeed}
             disabled={seeding}
-            className="w-full py-2 rounded-lg text-sm transition-all cursor-pointer disabled:opacity-50"
-            style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}
+            className="button ghost"
           >
-            {seeding ? 'Đang tạo dữ liệu...' : 'Tạo dữ liệu mẫu (chỉ môi trường dev)'}
+            {seeding ? 'Đang tạo dữ liệu…' : 'Tạo dữ liệu mẫu (chỉ môi trường dev)'}
           </button>
-        </div>
-      </div>
-    </div>
+        </div> : null}
+      </section>
+    </main>
   );
 }
