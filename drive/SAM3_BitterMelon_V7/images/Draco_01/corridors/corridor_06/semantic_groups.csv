@@ -1,0 +1,3 @@
+﻿group_local_id,semantic,envelope_x_span_ratio,total_x_coverage_ratio,n_components,any_strong_single,chain_main,sam_main_mean,sam_wart_mean,main_score,component_indices
+1,main_flesh_band,0.8950094161958568,1.579566854990584,19,True,True,0.30401110276579857,0.33110371516331244,1.097832591008199,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19]"
+2,wart_flesh,0.06732580037664783,0.06732580037664783,1,False,False,0.003536858595907688,0.0,0.0002829486876726151,[10]

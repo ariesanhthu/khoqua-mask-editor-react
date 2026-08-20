@@ -9,7 +9,7 @@ export async function GET() {
     driveCredential: driveValue.startsWith('{'),
     driveExportFolder: Boolean(process.env.GOOGLE_DRIVE_EXPORT_FOLDER_ID),
   };
-  const ready = Object.values(checks).every(Boolean);
+  const ready = checks.database && checks.blob && checks.authSecret;
   return NextResponse.json(
     { status: ready ? 'ready' : 'configuration_required', checks },
     { status: ready ? 200 : 503 },

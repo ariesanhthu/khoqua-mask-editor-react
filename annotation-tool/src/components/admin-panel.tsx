@@ -34,9 +34,9 @@ export default function AdminPanel({ projects, onChanged }: { projects: ProjectS
           });
         }}>
           <h3>Kết nối bộ dữ liệu</h3>
-          <p>Thư mục nguồn phải có `manifest.json`; thư mục đích nhận các bản xuất ground truth.</p>
+          <p>Nguồn có thể là reference private `blob:.../manifest.json`, URL Blob public, thư mục local hoặc Google Drive; thư mục đích nhận các bản xuất ground truth.</p>
           <label><span>Tên dự án</span><input name="project-name" autoComplete="off" required value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Ví dụ: Gán nhãn đợt 1…" /></label>
-          <label><span>Drive nguồn</span><input name="source-folder" autoComplete="off" spellCheck={false} required value={folder} onChange={(event) => setFolder(event.target.value)} placeholder="URL/ID thư mục chứa manifest.json…" /></label>
+          <label><span>Nguồn dataset</span><input name="source-folder" autoComplete="off" spellCheck={false} required value={folder} onChange={(event) => setFolder(event.target.value)} placeholder="blob:datasets/.../manifest.json, URL, local path hoặc Drive ID…" /></label>
           <label><span>Drive đích</span><input name="export-folder" autoComplete="off" spellCheck={false} required value={exportFolder} onChange={(event) => setExportFolder(event.target.value)} placeholder="URL/ID thư mục DATABASE-GT…" /></label>
           <button className="button primary" disabled={busy !== ''}>{busy === 'project' ? 'Đang tạo…' : 'Tạo dự án'}</button>
         </form>

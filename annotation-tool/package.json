@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dataset:upload": "node --env-file-if-exists=.env.local scripts/upload-blob-dataset.mjs",
+    "dataset:setup": "node --env-file-if-exists=.env.local scripts/setup-blob-dataset.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",

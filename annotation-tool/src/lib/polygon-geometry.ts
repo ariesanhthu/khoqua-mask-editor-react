@@ -20,7 +20,11 @@ const createId = () => crypto.randomUUID();
 const distance = (a: Pick<PolygonNode, 'x' | 'y'>, b: Pick<PolygonNode, 'x' | 'y'>) => Math.hypot(a.x - b.x, a.y - b.y);
 
 export function clonePolygons(polygons: AnnotationPolygon[]): AnnotationPolygon[] {
-  return polygons.map((polygon) => ({ ...polygon, nodes: polygon.nodes.map((node) => ({ ...node })) }));
+  return polygons.map((polygon) => ({
+    ...polygon,
+    ...(polygon.meta ? { meta: { ...polygon.meta } } : {}),
+    nodes: polygon.nodes.map((node) => ({ ...node })),
+  }));
 }
 
 export function polygonArea(nodes: Array<Pick<PolygonNode, 'x' | 'y'>>): number {
@@ -137,8 +141,8 @@ export function splitPolygonWithCut(polygon: AnnotationPolygon, cutPath: Polygon
 
   return {
     polygons: [
-      { id: createId(), label: polygon.label, nodes: firstNodes },
-      { id: createId(), label: polygon.label, nodes: secondNodes },
+      { id: createId(), label: polygon.label, nodes: firstNodes, meta: { ...polygon.meta, source: 'human' } },
+      { id: createId(), label: polygon.label, nodes: secondNodes, meta: { ...polygon.meta, source: 'human' } },
     ],
   };
 }

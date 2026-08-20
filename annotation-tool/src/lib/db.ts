@@ -134,8 +134,10 @@ async function initializeSchema(db: AppDatabase): Promise<void> {
       external_key TEXT NOT NULL,
       image_drive_file_id TEXT NOT NULL,
       prediction_drive_file_id TEXT NOT NULL,
+      prelabel_storage_ref TEXT,
       image_filename TEXT NOT NULL,
       prediction_filename TEXT NOT NULL,
+      prelabel_filename TEXT,
       width INTEGER,
       height INTEGER,
       asset_state TEXT NOT NULL DEFAULT 'READY',
@@ -197,6 +199,8 @@ async function initializeSchema(db: AppDatabase): Promise<void> {
     'CREATE INDEX IF NOT EXISTS idx_assignments_file_user ON assignments(dataset_file_id, user_id)',
     'CREATE INDEX IF NOT EXISTS idx_versions_file ON annotation_versions(dataset_file_id, version_number)',
     `ALTER TABLE projects ADD COLUMN IF NOT EXISTS export_drive_folder_id TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE dataset_files ADD COLUMN IF NOT EXISTS prelabel_storage_ref TEXT`,
+    `ALTER TABLE dataset_files ADD COLUMN IF NOT EXISTS prelabel_filename TEXT`,
   ];
 
   for (const statement of statements) await db.prepare(statement).run();

@@ -4,12 +4,14 @@ import { access, readFile } from 'fs/promises';
 import crypto from 'crypto';
 import path from 'path';
 import { importPKCS8, SignJWT } from 'jose';
+import { get as getBlob } from '@vercel/blob';
 import { getDb, generateId, nowISO } from './db';
 
 interface ManifestItem {
   id: string;
   image: string;
   prediction: string;
+  prelabel?: string;
   width?: number;
   height?: number;
 }
@@ -131,6 +133,23 @@ export async function fetchDriveAsset(fileId: string): Promise<Uint8Array> {
   return downloadDriveFile(fileId);
 }
 
+export async function fetchDatasetAsset(reference: string): Promise<Uint8Array> {
+  if (reference.startsWith('blob:')) {
+    const pathname = reference.slice('blob:'.length).replace(/^\/+/, '');
+    if (!pathname || pathname.includes('..')) throw new Error('Blob reference không hợp lệ.');
+    const result = await getBlob(pathname, { access: 'private', useCache: false });
+    if (!result || result.statusCode !== 200 || !result.stream) throw new Error('Không tải được private Blob asset.');
+    return new Uint8Array(await new Response(result.stream).arrayBuffer());
+  }
+  if (/^https:\/\//i.test(reference)) {
+    const response = await fetch(reference, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Không tải được asset nguồn (${response.status}).`);
+    return new Uint8Array(await response.arrayBuffer());
+  }
+  if (path.isAbsolute(reference)) return new Uint8Array(await readFile(reference));
+  return downloadDriveFile(reference);
+}
+
 export async function createDriveFolder(name: string, parentFolderId: string): Promise<string> {
   const token = await getDriveAccessToken();
   const response = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
@@ -185,6 +204,50 @@ async function loadManifest(folderValue: string): Promise<{
   manifestRef: string;
   resolve: (relativePath: string) => Promise<string>;
 }> {
+  if (folderValue.startsWith('blob:')) {
+    const manifestPath = folderValue.slice('blob:'.length).replace(/^\/+/, '');
+    if (!manifestPath.endsWith('/manifest.json') || manifestPath.includes('..')) {
+      throw new Error('Nguồn private Blob phải là reference blob:.../manifest.json hợp lệ.');
+    }
+    const manifest = JSON.parse(new TextDecoder().decode(await fetchDatasetAsset(folderValue))) as DatasetManifest;
+    const basePath = manifestPath.slice(0, -'manifest.json'.length);
+    return {
+      manifest,
+      manifestRef: folderValue,
+      resolve: async (relativePath) => {
+        if (!relativePath || path.isAbsolute(relativePath) || relativePath.split('/').includes('..')) {
+          throw new Error(`Đường dẫn asset không hợp lệ: ${relativePath}`);
+        }
+        return `blob:${basePath}${relativePath}`;
+      },
+    };
+  }
+
+  if (/^https:\/\//i.test(folderValue)) {
+    const manifestUrl = new URL(folderValue);
+    if (!manifestUrl.pathname.endsWith('/manifest.json')) {
+      throw new Error('Nguồn Vercel Blob phải là URL đầy đủ tới manifest.json.');
+    }
+    const response = await fetch(manifestUrl, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Không tải được manifest từ Vercel Blob (${response.status}).`);
+    const manifest = await response.json() as DatasetManifest;
+    const baseUrl = new URL('.', manifestUrl);
+    return {
+      manifest,
+      manifestRef: manifestUrl.toString(),
+      resolve: async (relativePath) => {
+        if (!relativePath || path.isAbsolute(relativePath) || relativePath.includes('..')) {
+          throw new Error(`Đường dẫn asset không hợp lệ: ${relativePath}`);
+        }
+        const resolved = new URL(relativePath, baseUrl);
+        if (resolved.origin !== baseUrl.origin || !resolved.pathname.startsWith(baseUrl.pathname)) {
+          throw new Error(`Asset nằm ngoài dataset Blob: ${relativePath}`);
+        }
+        return resolved.toString();
+      },
+    };
+  }
+
   const localRoot = path.resolve(folderValue);
   try {
     await access(localRoot);
@@ -280,23 +343,28 @@ export async function syncProjectFromDrive(projectId: string) {
   for (const item of manifest.items) {
     try {
       if (!item.id || !item.image || !item.prediction) throw new Error('Thiếu id, image hoặc prediction.');
-      const [imageRef, predictionRef] = await Promise.all([resolve(item.image), resolve(item.prediction)]);
+      const [imageRef, predictionRef, prelabelRef] = await Promise.all([
+        resolve(item.image),
+        resolve(item.prediction),
+        item.prelabel ? resolve(item.prelabel) : Promise.resolve(null),
+      ]);
       const existing = await db.prepare<{ id: string }>('SELECT id FROM dataset_files WHERE dataset_id = ? AND external_key = ?')
         .get(dataset.id, item.id);
       if (existing) {
-        await db.prepare(`UPDATE dataset_files SET image_drive_file_id = ?, prediction_drive_file_id = ?,
-          image_filename = ?, prediction_filename = ?, width = COALESCE(?, width), height = COALESCE(?, height), asset_state = 'READY', updated_at = ?
+        await db.prepare(`UPDATE dataset_files SET image_drive_file_id = ?, prediction_drive_file_id = ?, prelabel_storage_ref = ?,
+          image_filename = ?, prediction_filename = ?, prelabel_filename = ?, width = COALESCE(?, width), height = COALESCE(?, height), asset_state = 'READY', updated_at = ?
           WHERE id = ?`)
-          .run(imageRef, predictionRef, path.basename(item.image), path.basename(item.prediction),
-            item.width || null, item.height || null, now, existing.id);
+          .run(imageRef, predictionRef, prelabelRef, path.basename(item.image), path.basename(item.prediction),
+            item.prelabel ? path.basename(item.prelabel) : null, item.width || null, item.height || null, now, existing.id);
         updated += 1;
       } else {
         await db.prepare(`INSERT INTO dataset_files
-          (id, dataset_id, external_key, image_drive_file_id, prediction_drive_file_id,
-           image_filename, prediction_filename, width, height, annotation_state, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'UNSTARTED', ?, ?)`)
-          .run(generateId(), dataset.id, item.id, imageRef, predictionRef,
-            path.basename(item.image), path.basename(item.prediction), item.width || null, item.height || null, now, now);
+          (id, dataset_id, external_key, image_drive_file_id, prediction_drive_file_id, prelabel_storage_ref,
+           image_filename, prediction_filename, prelabel_filename, width, height, annotation_state, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UNSTARTED', ?, ?)`)
+          .run(generateId(), dataset.id, item.id, imageRef, predictionRef, prelabelRef,
+            path.basename(item.image), path.basename(item.prediction), item.prelabel ? path.basename(item.prelabel) : null,
+            item.width || null, item.height || null, now, now);
         added += 1;
       }
     } catch (error) {

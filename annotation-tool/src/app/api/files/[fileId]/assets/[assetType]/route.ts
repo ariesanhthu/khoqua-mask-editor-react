@@ -3,7 +3,7 @@ import { readFile } from 'fs/promises';
 import path from 'path';
 import { getDb } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { fetchDriveAsset } from '@/lib/drive-service';
+import { fetchDatasetAsset } from '@/lib/drive-service';
 import { readStoredMask } from '@/lib/storage';
 
 export const runtime = 'nodejs';
@@ -70,7 +70,7 @@ export async function GET(
     });
   } catch {
     try {
-      const bytes = await fetchDriveAsset(filePath);
+      const bytes = await fetchDatasetAsset(filePath);
       return new NextResponse(toArrayBuffer(bytes), {
         headers: { 'Content-Type': contentType, 'Cache-Control': 'private, max-age=3600' },
       });

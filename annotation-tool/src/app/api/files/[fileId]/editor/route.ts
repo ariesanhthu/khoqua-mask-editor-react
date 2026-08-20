@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { getDb } from '@/lib/db';
 import { getAnnotation } from '@/lib/annotation-service';
+import { loadPrelabelOperations } from '@/lib/prelabel-service';
 
 /**
  * GET /api/files/[fileId]/editor — Editor bootstrap data (spec 02 §15)
@@ -30,6 +31,13 @@ export async function GET(
   }
 
   const annotation = await getAnnotation(fileId);
+  const prelabelOperations = !annotation && file.prelabel_storage_ref
+    ? await loadPrelabelOperations(
+        file.prelabel_storage_ref as string,
+        Number(file.width || 1024),
+        Number(file.height || 768),
+      )
+    : undefined;
 
   return NextResponse.json({
     file: {
@@ -47,6 +55,7 @@ export async function GET(
         : {}),
     },
     annotation,
+    ...(prelabelOperations ? { prelabelOperations } : {}),
     lock: {
       sessionId: lock!.session_id,
       lockToken: '', // Never expose — client already has it from /lock

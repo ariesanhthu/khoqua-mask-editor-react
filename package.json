@@ -7,6 +7,10 @@
     "build": "npm --prefix annotation-tool run build",
     "start": "npm --prefix annotation-tool run start",
     "lint": "npm --prefix annotation-tool run lint",
-    "typecheck": "npm --prefix annotation-tool run typecheck"
+    "typecheck": "npm --prefix annotation-tool run typecheck",
+    "dataset:convert": "python scripts/convert_v7_prelabels.py",
+    "dataset:test": "python -m unittest discover -s scripts -p test_convert_v7_prelabels.py",
+    "dataset:upload": "npm --prefix annotation-tool run dataset:upload --",
+    "dataset:setup": "npm --prefix annotation-tool run dataset:setup --"
   }
 }

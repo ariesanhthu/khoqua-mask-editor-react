@@ -31,10 +31,21 @@ export interface PolygonNode {
   y: number;
 }
 
+export interface AnnotationPolygonMeta {
+  semantic?: 'main_flesh_band' | 'wart_flesh' | string;
+  mainGroupId?: string | number;
+  wartId?: string | number;
+  fragmentIndex?: number;
+  corridorId?: string | number;
+  primitiveId?: string | number;
+  source?: 'model' | 'human';
+}
+
 export interface AnnotationPolygon {
   id: string;
   label: string;
   nodes: PolygonNode[];
+  meta?: AnnotationPolygonMeta;
 }
 
 export interface SegmentationAnnotation {
@@ -95,6 +106,7 @@ export interface EditorBootstrap {
   file: { id: string; projectId: string; externalKey: string; width: number; height: number };
   assets: { imageUrl: string; predictionMaskUrl: string; currentMaskUrl?: string };
   annotation: Annotation | null;
+  prelabelOperations?: MaskOperation[];
   lock: { sessionId: string; lockToken: string; expiresAt: string };
 }
 

@@ -1,0 +1,94 @@
+{
+  "dataset_version": "2026-08-20",
+  "algorithm_version": "bitter-melon-v7",
+  "items": [
+    {
+      "id": "8582_01",
+      "image": "images/8582_01.jpg",
+      "prediction": "predictions/8582_01.png",
+      "prelabel": "prelabels/8582_01.json",
+      "width": 1456,
+      "height": 614
+    },
+    {
+      "id": "8769_01",
+      "image": "images/8769_01.jpg",
+      "prediction": "predictions/8769_01.png",
+      "prelabel": "prelabels/8769_01.json",
+      "width": 2912,
+      "height": 707
+    },
+    {
+      "id": "8884_01",
+      "image": "images/8884_01.jpg",
+      "prediction": "predictions/8884_01.png",
+      "prelabel": "prelabels/8884_01.json",
+      "width": 3144,
+      "height": 676
+    },
+    {
+      "id": "8964_01",
+      "image": "images/8964_01.jpg",
+      "prediction": "predictions/8964_01.png",
+      "prelabel": "prelabels/8964_01.json",
+      "width": 2067,
+      "height": 609
+    },
+    {
+      "id": "8993_01",
+      "image": "images/8993_01.jpg",
+      "prediction": "predictions/8993_01.png",
+      "prelabel": "prelabels/8993_01.json",
+      "width": 1120,
+      "height": 494
+    },
+    {
+      "id": "DC3_01",
+      "image": "images/DC3_01.jpg",
+      "prediction": "predictions/DC3_01.png",
+      "prelabel": "prelabels/DC3_01.json",
+      "width": 2355,
+      "height": 641
+    },
+    {
+      "id": "Draco_01",
+      "image": "images/Draco_01.jpg",
+      "prediction": "predictions/Draco_01.png",
+      "prelabel": "prelabels/Draco_01.json",
+      "width": 2174,
+      "height": 548
+    },
+    {
+      "id": "TVI8573_01",
+      "image": "images/TVI8573_01.jpg",
+      "prediction": "predictions/TVI8573_01.png",
+      "prelabel": "prelabels/TVI8573_01.json",
+      "width": 1687,
+      "height": 721
+    },
+    {
+      "id": "TVI8711_01",
+      "image": "images/TVI8711_01.jpg",
+      "prediction": "predictions/TVI8711_01.png",
+      "prelabel": "prelabels/TVI8711_01.json",
+      "width": 2291,
+      "height": 704
+    },
+    {
+      "id": "TVI8909_01",
+      "image": "images/TVI8909_01.jpg",
+      "prediction": "predictions/TVI8909_01.png",
+      "prelabel": "prelabels/TVI8909_01.json",
+      "width": 1617,
+      "height": 719
+    },
+    {
+      "id": "VIN005_01",
+      "image": "images/VIN005_01.jpg",
+      "prediction": "predictions/VIN005_01.png",
+      "prelabel": "prelabels/VIN005_01.json",
+      "width": 1681,
+      "height": 689
+    }
+  ]
+}

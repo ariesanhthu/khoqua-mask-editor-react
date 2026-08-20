@@ -152,12 +152,17 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     return () => window.removeEventListener('keydown', onToolShortcut);
   }, []);
 
-  const createServerSeed = useCallback((data: EditorBootstrap): EditorSeed => ({
-    key: Date.now(),
-    humanAction: data.annotation?.segmentation.humanAction || 'UNTOUCHED',
-    breakpoints: data.annotation?.breakpoints || emptyBreakpoints,
-    operations: data.annotation?.segmentation.maskOperations || [],
-  }), []);
+  const createServerSeed = useCallback((data: EditorBootstrap): EditorSeed => {
+    const annotation = data.annotation;
+    return {
+      key: Date.now(),
+      humanAction: annotation ? annotation.segmentation.humanAction : 'UNTOUCHED',
+      breakpoints: annotation ? annotation.breakpoints : emptyBreakpoints,
+      operations: annotation
+        ? annotation.segmentation.maskOperations ?? []
+        : data.prelabelOperations ?? [],
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -480,7 +485,11 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const maskConfirmed = snapshot.humanAction !== 'UNTOUCHED';
   const polygonCount = snapshot.polygons.length;
   const selectedPolygons = snapshot.polygons.filter((polygon) => selectedPolygonIds.includes(polygon.id));
-  const availableLabels = [...new Set(snapshot.polygons.map((polygon) => polygon.label).filter(Boolean))];
+  const availableLabels = [...new Set([
+    'main_flesh_band',
+    'wart_flesh',
+    ...snapshot.polygons.map((polygon) => polygon.label).filter(Boolean),
+  ])];
   const breakpointCount = snapshot.breakpoints.points.length;
   const breakpointConfirmed = snapshot.breakpoints.state !== 'NOT_ANNOTATED';
   const breakpointStatus = snapshot.breakpoints.state === 'CONFIRMED_NONE'

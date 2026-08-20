@@ -1,0 +1,72 @@
+{
+  "sam_status": "fallback_primitive",
+  "sam_prompt": "raised fleshy surface region on a bitter melon",
+  "sam_metrics": {
+    "sam_score": 0.90673828125,
+    "inside_corridor_ratio": 1.0,
+    "seed_overlap_ratio": 1.0,
+    "iou_seed": 0.39,
+    "groove_overlap": 0.0,
+    "glare_overlap": 0.3202888071537018,
+    "area_ratio": 2.5641025641025643,
+    "selector_score": 0.7411854891777039,
+    "accepted": false
+  },
+  "sam_error": null,
+  "features": {
+    "area_px": 195,
+    "bbox_xywh": [
+      729,
+      467,
+      22,
+      16
+    ],
+    "centroid_x": 738.1846153846154,
+    "centroid_y": 474.35897435897436,
+    "x_span": 22,
+    "y_span": 16,
+    "x_span_ratio": 0.015647226173541962,
+    "aspect_ratio": 1.375,
+    "circularity": 0.3035980638860841,
+    "solidity": 0.6794425087108014,
+    "orientation_vec": [
+      0.9443863496730033,
+      0.32883798830320665
+    ],
+    "skeleton_length": 45,
+    "mean_flesh_score": 0.6848689913749695,
+    "sam_main_audit": 0.773432195186615,
+    "sam_wart_audit": 0.4855908453464508,
+    "sam_groove_audit": 0.6357579231262207
+  },
+  "geometry": {
+    "positive": [
+      [
+        0.5078983516483516,
+        0.7728013029315961,
+        0.019917582417582416,
+        0.03745928338762215
+      ]
+    ],
+    "negative": [
+      [
+        0.5069949281487743,
+        0.7149837133550488,
+        0.018543956043956044,
+        0.008143322475570033
+      ],
+      [
+        0.5069949281487743,
+        0.9527687296416938,
+        0.018543956043956044,
+        0.008143322475570033
+      ]
+    ],
+    "positive_xyxy": [
+      725,
+      463,
+      754,
+      486
+    ]
+  }
+}
