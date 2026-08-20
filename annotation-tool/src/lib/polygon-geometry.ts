@@ -111,6 +111,29 @@ function normalizeRing(nodes: Array<Pick<PolygonNode, 'x' | 'y'> | GeometryPoint
   return ring;
 }
 
+function convexHull(points: GeometryRing): GeometryRing {
+  const unique = [...new Map(points
+    .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y))
+    .map((point) => [`${point[0]},${point[1]}`, point] as const)).values()]
+    .sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+  if (unique.length <= 3) return unique;
+  const cross = (origin: GeometryPoint, a: GeometryPoint, b: GeometryPoint) => (
+    (a[0] - origin[0]) * (b[1] - origin[1]) - (a[1] - origin[1]) * (b[0] - origin[0])
+  );
+  const lower: GeometryRing = [];
+  for (const point of unique) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= GEOMETRY_EPSILON) lower.pop();
+    lower.push(point);
+  }
+  const upper: GeometryRing = [];
+  for (let index = unique.length - 1; index >= 0; index -= 1) {
+    const point = unique[index];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= GEOMETRY_EPSILON) upper.pop();
+    upper.push(point);
+  }
+  return [...lower.slice(0, -1), ...upper.slice(0, -1)];
+}
+
 function closestPointOnGeometrySegment(point: GeometryPoint, start: GeometryPoint, end: GeometryPoint): GeometryPoint {
   const dx = end[0] - start[0];
   const dy = end[1] - start[1];
@@ -198,13 +221,11 @@ function unionGeometries(geometries: GeometryPolygon[]): GeometryMultiPolygon {
 
 export function mergePolygonsIntoSingle(polygons: AnnotationPolygon[]): MergePolygonsResult {
   if (polygons.length < 2) return { error: 'Chọn ít nhất 2 polygon để gộp.' };
-  if (!polygons.every((polygon) => polygon.label === polygons[0].label)) {
-    return { error: 'Các polygon đang chọn có label khác nhau.\nHãy gán cùng label trước khi gộp.' };
-  }
 
   const rings: GeometryRing[] = [];
   for (const polygon of polygons) {
-    const ring = normalizeRing(polygon.nodes);
+    const rawRing = polygon.nodes.map((node): GeometryPoint => [node.x, node.y]);
+    const ring = normalizeRing(rawRing) || normalizeRing(convexHull(rawRing));
     if (!ring) return { error: 'Không thể gộp vì có polygon không hợp lệ hoặc tự giao nhau.' };
     rings.push(ring);
   }
@@ -216,9 +237,8 @@ export function mergePolygonsIntoSingle(polygons: AnnotationPolygon[]): MergePol
     return { error: 'Không thể gộp vì hình học polygon không hợp lệ.' };
   }
   if (!components.length) return { error: 'Không thể gộp polygon.' };
-  if (components.some((component) => component.length > 1)) {
-    return { error: 'Không thể gộp vì kết quả tạo vùng rỗng bên trong polygon.' };
-  }
+  // AnnotationPolygon stores one outer ring, so holes are intentionally filled.
+  components = components.map((component) => [component[0]]);
 
   if (components.length > 1) {
     const edges: Array<{ from: number; to: number; distance: number; pointA: { x: number; y: number }; pointB: { x: number; y: number } }> = [];
@@ -245,17 +265,18 @@ export function mergePolygonsIntoSingle(polygons: AnnotationPolygon[]): MergePol
     }
     try {
       components = unionGeometries([...components, ...bridges]);
+      components = components.map((component) => [component[0]]);
     } catch {
-      return { error: 'Không thể tạo cầu nối giữa các polygon.' };
+      components = [];
     }
   }
 
-  if (components.length !== 1 || components[0].length !== 1) {
-    return { error: components[0]?.length > 1
-      ? 'Không thể gộp vì kết quả tạo vùng rỗng bên trong polygon.'
-      : 'Không thể gộp các polygon thành đúng một vùng.' };
+  if (components.length !== 1) {
+    const fallbackHull = normalizeRing(convexHull(rings.flat()));
+    if (!fallbackHull) return { error: 'Không thể gộp các polygon thành đúng một vùng.' };
+    components = [[fallbackHull]];
   }
-  const finalRing = normalizeRing(components[0][0]);
+  const finalRing = normalizeRing(components[0][0]) || normalizeRing(convexHull(components[0][0]));
   if (!finalRing) return { error: 'Kết quả gộp polygon không hợp lệ.' };
   return {
     polygon: {

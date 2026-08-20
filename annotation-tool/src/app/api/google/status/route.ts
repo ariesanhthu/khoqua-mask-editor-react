@@ -10,12 +10,12 @@ import {
 export const runtime = 'nodejs';
 
 export async function GET(request: Request) {
-  await requireAuth(request);
+  const user = await requireAuth(request);
   const connected = await isGoogleDriveConnected();
   return NextResponse.json({
     configured: googleOAuthConfigured(),
     connected,
-    accountEmail: connected ? await getGoogleDriveAccountEmail() : null,
+    accountEmail: connected && user.role === 'ADMIN' ? await getGoogleDriveAccountEmail() : null,
   });
 }
 

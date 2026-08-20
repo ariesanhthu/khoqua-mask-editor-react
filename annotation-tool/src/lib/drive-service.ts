@@ -92,14 +92,29 @@ export async function getDriveAccessToken(): Promise<string> {
 }
 
 class DriveHttpError extends Error {
-  constructor(readonly status: number) {
-    super(`Google Drive trả về lỗi ${status}.`);
+  constructor(readonly status: number, readonly reason?: string, message?: string) {
+    super(message || `Google Drive trả về lỗi ${status}.`);
   }
+}
+
+async function driveHttpError(response: Response): Promise<DriveHttpError> {
+  let reason: string | undefined;
+  let message: string | undefined;
+  try {
+    const payload = await response.json() as {
+      error?: { message?: string; errors?: Array<{ reason?: string }> };
+    };
+    reason = payload.error?.errors?.[0]?.reason;
+    message = payload.error?.message;
+  } catch {
+    // Google occasionally returns a non-JSON proxy error.
+  }
+  return new DriveHttpError(response.status, reason, message);
 }
 
 async function driveRequestWithToken<T>(url: string, accessToken: string): Promise<T> {
   const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-  if (!response.ok) throw new DriveHttpError(response.status);
+  if (!response.ok) throw await driveHttpError(response);
   return response.json() as Promise<T>;
 }
 
@@ -137,7 +152,7 @@ async function downloadDriveFileWithToken(fileId: string, accessToken: string): 
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   );
-  if (!response.ok) throw new DriveHttpError(response.status);
+  if (!response.ok) throw await driveHttpError(response);
   return new Uint8Array(await response.arrayBuffer());
 }
 
@@ -167,13 +182,54 @@ export async function fetchDatasetAsset(reference: string): Promise<Uint8Array> 
 }
 
 function destinationError(error: unknown): Error {
+  if (error instanceof DriveHttpError && error.reason === 'accessNotConfigured') {
+    return new Error('Google Drive API chưa được bật trong Google Cloud project của OAuth. Hãy bật Drive API rồi thử lại sau vài phút.');
+  }
   if (error instanceof DriveHttpError && error.status === 403) {
-    return new Error('Tài khoản Google đã kết nối không có quyền ghi vào thư mục Drive đích.');
+    const detail = error.reason ? ` (${error.reason})` : '';
+    return new Error(`Tài khoản Google đã kết nối không có quyền ghi vào thư mục Drive đích${detail}.`);
   }
   if (error instanceof DriveHttpError && error.status === 404) {
     return new Error('Không tìm thấy thư mục Drive đích hoặc tài khoản hiện tại không có quyền truy cập.');
   }
   return error instanceof Error ? error : new Error('Thao tác Google Drive không thành công.');
+}
+
+export async function inspectDriveDestination(folderValue: string): Promise<{
+  scopeIncludesDrive: boolean;
+  scopes: string[];
+  folder: {
+    id: string;
+    name: string;
+    mimeType: string;
+    capabilities?: { canEdit?: boolean; canAddChildren?: boolean };
+  };
+}> {
+  const accessToken = await getGoogleOAuthAccessToken();
+  const tokenInfoResponse = await fetch(
+    `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(accessToken)}`,
+    { cache: 'no-store' },
+  );
+  const tokenInfo = tokenInfoResponse.ok
+    ? await tokenInfoResponse.json() as { scope?: string }
+    : {};
+  const scopes = tokenInfo.scope?.split(/\s+/).filter(Boolean) || [];
+  const folderId = normalizeDriveFolderId(folderValue);
+  const query = new URLSearchParams({
+    fields: 'id,name,mimeType,capabilities(canEdit,canAddChildren)',
+    supportsAllDrives: 'true',
+  });
+  const folder = await driveRequestWithToken<{
+    id: string;
+    name: string;
+    mimeType: string;
+    capabilities?: { canEdit?: boolean; canAddChildren?: boolean };
+  }>(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}?${query}`, accessToken);
+  return {
+    scopeIncludesDrive: scopes.includes('https://www.googleapis.com/auth/drive'),
+    scopes,
+    folder,
+  };
 }
 
 async function createDriveFolderWithToken(
@@ -190,7 +246,7 @@ async function createDriveFolderWithToken(
       parents: [normalizeDriveFolderId(parentFolderId)],
     }),
   });
-  if (!response.ok) throw new DriveHttpError(response.status);
+  if (!response.ok) throw await driveHttpError(response);
   return ((await response.json()) as { id: string }).id;
 }
 
@@ -261,7 +317,7 @@ async function uploadDriveMultipartWithToken(
     },
     body,
   });
-  if (!response.ok) throw new DriveHttpError(response.status);
+  if (!response.ok) throw await driveHttpError(response);
   return ((await response.json()) as { id: string }).id;
 }
 

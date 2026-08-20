@@ -157,7 +157,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
         <div className="progress-pill"><strong>{files.length}</strong><span>tệp hiển thị</span></div>
       </section>
 
-      {selectedProject && (user.role === 'ADMIN' || user.role === 'REVIEWER') ? (
+      {selectedProject ? (
         <section className="project-data-actions panel" aria-label="Đồng bộ và xuất dữ liệu">
           <div>
             <p className="eyebrow">Dữ liệu dự án</p>
@@ -167,7 +167,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
               Google Drive: {googleDriveStatus.connected ? 'Đã kết nối' : 'Chưa kết nối'}
               {googleDriveStatus.connected && googleDriveStatus.accountEmail ? ` · ${googleDriveStatus.accountEmail}` : ''}
             </small>
-            {!googleDriveStatus.connected && user.role === 'REVIEWER' ? (
+            {!googleDriveStatus.connected && user.role !== 'ADMIN' ? (
               <small>Google Drive chưa được quản trị viên kết nối.</small>
             ) : null}
           </div>

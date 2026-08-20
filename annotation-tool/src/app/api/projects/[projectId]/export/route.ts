@@ -6,10 +6,7 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 export async function POST(request: Request, { params }: { params: Promise<{ projectId: string }> }) {
-  const user = await requireAuth(request);
-  if (user.role !== 'ADMIN' && user.role !== 'REVIEWER') {
-    return NextResponse.json({ code: 'FORBIDDEN', message: 'Reviewer or admin access required' }, { status: 403 });
-  }
+  await requireAuth(request);
   const { projectId } = await params;
   try {
     const result = await syncProjectAnnotationsToDrive(projectId);
@@ -24,10 +21,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
 }
 
 export async function GET(request: Request, { params }: { params: Promise<{ projectId: string }> }) {
-  const user = await requireAuth(request);
-  if (user.role !== 'ADMIN' && user.role !== 'REVIEWER') {
-    return NextResponse.json({ code: 'FORBIDDEN', message: 'Reviewer or admin access required' }, { status: 403 });
-  }
+  await requireAuth(request);
   const { projectId } = await params;
   try {
     const result = await createProjectExportArchive(projectId);

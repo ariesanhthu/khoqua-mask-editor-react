@@ -76,31 +76,27 @@ describe('mergePolygonsIntoSingle', () => {
     ]));
   });
 
-  it('rejects mixed labels', () => {
+  it('merges mixed labels and keeps the first polygon label', () => {
     const result = mergePolygonsIntoSingle([
       rectangle('a', 0, 0, 10, 10, 'one'), rectangle('b', 5, 0, 15, 10, 'two'),
     ]);
-    expect(result.polygon).toBeUndefined();
-    expect(result.error).toContain('label khác nhau');
+    expect(result.polygon?.label).toBe('one');
   });
 
-  it('rejects a self-intersecting input ring', () => {
-    const result = mergePolygonsIntoSingle([
+  it('repairs a self-intersecting input ring before merging', () => {
+    expectValid(mergePolygonsIntoSingle([
       polygon('bow', [[0, 0], [10, 10], [0, 10], [10, 0]]),
       rectangle('valid', 20, 0, 30, 10),
-    ]);
-    expect(result.polygon).toBeUndefined();
-    expect(result.error).toContain('không hợp lệ');
+    ]));
   });
 
-  it('rejects a union that produces a hole', () => {
-    const result = mergePolygonsIntoSingle([
+  it('fills holes because the annotation model stores one outer ring', () => {
+    const merged = expectValid(mergePolygonsIntoSingle([
       rectangle('top', 0, 0, 30, 5),
       rectangle('bottom', 0, 25, 30, 30),
       rectangle('left', 0, 5, 5, 25),
       rectangle('right', 25, 5, 30, 25),
-    ]);
-    expect(result.polygon).toBeUndefined();
-    expect(result.error).toContain('vùng rỗng');
+    ]));
+    expect(Math.abs(polygonArea(merged.nodes))).toBeCloseTo(900);
   });
 });

@@ -560,6 +560,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               <ToolbarButton active={tool === 'polygon'} label="Vẽ polygon (P)" icon="polygon" onClick={() => selectTool('polygon', 'mask')} />
               <ToolbarButton active={tool === 'point'} label="Đánh dấu điểm ngắt (M)" icon="pin" onClick={() => selectTool('point', 'breakpoints')} />
               <ToolbarButton active={tool === 'cut'} label="Cắt polygon" icon="scissors" onClick={() => selectTool('cut', 'mask')} />
+              <ToolbarButton disabled={selectedPolygonIds.length < 2} label="Gộp polygon đã chọn" icon="merge" onClick={() => canvasRef.current?.groupSelectedPolygons()} />
               <span className="toolbar-divider" />
               <ToolbarButton label="Hoàn tác (Ctrl + Z)" icon="undo" onClick={() => canvasRef.current?.undo()} />
               <ToolbarButton label="Làm lại (Ctrl + Y)" icon="redo" onClick={() => canvasRef.current?.redo()} />
@@ -593,7 +594,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               <section className="instruction-block">
                 <h2>Hướng dẫn</h2>
                 {tool === 'select'
-                  ? <p>Kéo các điểm để chỉnh polygon. Nhấp đúp lên polygon để thêm một điểm mới vào cạnh gần nhất.</p>
+                  ? <p>Chuột phải trong polygon để chọn toàn bộ node; giữ và kéo chuột phải để di chuyển cả vùng. Shift/Ctrl + chuột phải chọn thêm polygon để Merge hoặc kéo cả nhóm.</p>
                   : tool === 'polygon'
                     ? <p>Nhấp để vẽ polygon mới. Nhấp đúp hoặc nhấn <kbd>Enter</kbd> để hoàn tất.</p>
                     : tool === 'cut'
@@ -662,7 +663,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         <div className="shortcut-header"><div><span className="help-mark">?</span><span><h2 id="shortcut-title">Trợ giúp &amp; phím tắt</h2><p>Thao tác nhanh hơn trên vùng chú thích</p></span></div><button aria-label="Đóng trợ giúp" onClick={() => setHelpOpen(false)}>×</button></div>
         <div className="shortcut-content">
           <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" /><Shortcut keys={['M']} label="Đánh dấu điểm ngắt" /><Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'Z']} label="Hoàn tác" /><Shortcut keys={['Ctrl', 'Y']} label="Làm lại" /></section>
-          <section className="usage-tips"><h3>Mẹo sử dụng</h3><p><Icon name="cursor" />Ở chế độ V, nhấp đúp lên polygon để thêm điểm.</p><p><Icon name="polygon" />Chế độ P chỉ dùng để vẽ một polygon mới.</p><p><Icon name="layers" />Ẩn lớp phủ khi cần quan sát ảnh gốc.</p><p><Icon name="hand" />Dùng con lăn để zoom quanh vị trí con trỏ.</p></section>
+          <section className="usage-tips"><h3>Mẹo sử dụng</h3><p><Icon name="cursor" />Ở chế độ V, kéo khung qua các node để chọn nhiều polygon.</p><p><Icon name="polygon" />Chế độ P chỉ dùng để vẽ một polygon mới.</p><p><Icon name="layers" />Ẩn lớp phủ khi cần quan sát ảnh gốc.</p><p><Icon name="hand" />Dùng con lăn để zoom; Shift + con lăn để cuộn ngang.</p></section>
         </div>
       </section></div> : null}
       {conflict && conflictMinimized ? <button className="conflict-chip" onClick={() => setConflictMinimized(false)}>Có xung đột — mở lựa chọn xử lý</button> : null}
@@ -679,10 +680,10 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   );
 }
 
-type IconName = 'chevron-left' | 'chevron-right' | 'cursor' | 'files' | 'fit' | 'folder' | 'hand' | 'layers' | 'pin' | 'polygon' | 'redo' | 'scissors' | 'trash' | 'undo';
+type IconName = 'chevron-left' | 'chevron-right' | 'cursor' | 'files' | 'fit' | 'folder' | 'hand' | 'layers' | 'merge' | 'pin' | 'polygon' | 'redo' | 'scissors' | 'trash' | 'undo';
 
-function ToolbarButton({ active = false, danger = false, icon, label, onClick }: { active?: boolean; danger?: boolean; icon: IconName; label: string; onClick(): void }) {
-  return <button type="button" aria-label={label} aria-pressed={active || undefined} className={`${active ? 'active' : ''} ${danger ? 'danger' : ''}`} title={label} onClick={onClick}><Icon name={icon} /></button>;
+function ToolbarButton({ active = false, danger = false, disabled = false, icon, label, onClick }: { active?: boolean; danger?: boolean; disabled?: boolean; icon: IconName; label: string; onClick(): void }) {
+  return <button type="button" aria-label={label} aria-pressed={active || undefined} className={`${active ? 'active' : ''} ${danger ? 'danger' : ''}`} disabled={disabled} title={label} onClick={onClick}><Icon name={icon} /></button>;
 }
 
 function Shortcut({ keys, label }: { keys: string[]; label: string }) {
@@ -699,6 +700,7 @@ function Icon({ name }: { name: IconName }) {
     folder: <path d="M3 6h7l2 2h9v10H3z" />,
     hand: <path d="M7 11V7a1.5 1.5 0 0 1 3 0v3-5a1.5 1.5 0 0 1 3 0v5-4a1.5 1.5 0 0 1 3 0v5-2a1.5 1.5 0 0 1 3 0v5c0 4-2.6 7-6.5 7H12c-2.3 0-3.7-1.1-5-3l-2.2-3.4A1.6 1.6 0 0 1 7 12.5L9 15" />,
     layers: <><path d="m12 3 9 5-9 5-9-5 9-5Z" /><path d="m3 12 9 5 9-5M3 16l9 5 9-5" /></>,
+    merge: <><path d="M4 5h7v7H4zM13 12h7v7h-7z" /><path d="m9 15 6-6m-2 0h2v2" /></>,
     pin: <><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z" /><circle cx="12" cy="10" r="2" /></>,
     polygon: <path d="m7 4 10 2 3 10-8 5-9-7 4-10Z" />,
     redo: <><path d="m17 7 4 4-4 4" /><path d="M3 18v-2a5 5 0 0 1 5-5h13" /></>,
