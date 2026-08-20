@@ -1,10 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import type { ProjectSummary } from '@/types';
-import { createProject, createUser, exportProject, syncProject } from '@/lib/api-client';
+import { createProject, createUser } from '@/lib/api-client';
 
-export default function AdminPanel({ projects, onChanged }: { projects: ProjectSummary[]; onChanged: () => Promise<void> }) {
+export default function AdminPanel({ onChanged }: { onChanged: () => Promise<void> }) {
   const [projectName, setProjectName] = useState('');
   const [folder, setFolder] = useState('');
   const [exportFolder, setExportFolder] = useState('https://drive.google.com/drive/folders/147cVK2C7EZiupfMJQntP5Nc6tkkhqchN');
@@ -13,10 +12,9 @@ export default function AdminPanel({ projects, onChanged }: { projects: ProjectS
   const [role, setRole] = useState('ANNOTATOR');
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
-  const [exportUrl, setExportUrl] = useState('');
 
   const run = async (key: string, action: () => Promise<void>) => {
-    setBusy(key); setMessage(''); setExportUrl('');
+    setBusy(key); setMessage('');
     try { await action(); } catch (error) {
       setMessage((error as { message?: string }).message || 'Thao tác không thành công.');
     } finally { setBusy(''); }
@@ -25,7 +23,7 @@ export default function AdminPanel({ projects, onChanged }: { projects: ProjectS
   return (
     <section className="admin-section">
       <div className="section-heading"><p className="eyebrow">Quản trị</p><h2>Dữ liệu và người dùng</h2></div>
-      {message ? <p role="status" aria-live="polite" className="notice">{message}{exportUrl ? <> <a href={exportUrl} target="_blank" rel="noreferrer">Mở thư mục Drive</a></> : null}</p> : null}
+      {message ? <p role="status" aria-live="polite" className="notice">{message}</p> : null}
       <div className="admin-grid">
         <form className="panel admin-card" onSubmit={(event) => {
           event.preventDefault();
@@ -40,20 +38,6 @@ export default function AdminPanel({ projects, onChanged }: { projects: ProjectS
           <label><span>Drive đích</span><input name="export-folder" autoComplete="off" spellCheck={false} required value={exportFolder} onChange={(event) => setExportFolder(event.target.value)} placeholder="URL/ID thư mục DATABASE-GT…" /></label>
           <button className="button primary" disabled={busy !== ''}>{busy === 'project' ? 'Đang tạo…' : 'Tạo dự án'}</button>
         </form>
-
-        <div className="panel admin-card">
-          <h3>Đồng bộ manifest</h3><p>Chỉ cập nhật chỉ mục nguồn; không thay đổi nhãn đã lưu.</p>
-          <div className="sync-list">{projects.map((project) => (
-            <div key={project.id} className="admin-project-actions">
-              <button className="button secondary" disabled={busy !== ''} onClick={() => void run(project.id, async () => {
-                const result = await syncProject(project.id); setMessage(`Đồng bộ ${project.name}: thêm ${result.added}, cập nhật ${result.updated}, lỗi ${result.missing}.`); await onChanged();
-              })}>{busy === project.id ? 'Đang đồng bộ…' : `Đồng bộ ${project.name}`}</button>
-              <button className="button ghost" disabled={busy !== ''} onClick={() => void run(`export-${project.id}`, async () => {
-                const result = await exportProject(project.id); setMessage(`Đã xuất ${result.exported} nhãn vào Google Drive.`); setExportUrl(result.driveFolderUrl);
-              })}>{busy === `export-${project.id}` ? 'Đang xuất…' : 'Xuất nhãn'}</button>
-            </div>
-          ))}</div>
-        </div>
 
         <form className="panel admin-card" onSubmit={(event) => {
           event.preventDefault();

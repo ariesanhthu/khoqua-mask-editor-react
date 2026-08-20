@@ -3,7 +3,7 @@
 import { useCallback, useDeferredValue, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { CurrentUser, FileListItem, ProjectSummary } from '@/types';
-import { getFiles, getProjects, logout } from '@/lib/api-client';
+import { exportProject, getFiles, getProjects, logout, projectExportDownloadUrl, syncProject } from '@/lib/api-client';
 import AdminPanel from './admin-panel';
 
 type Filter = 'ALL' | 'AVAILABLE' | 'DOING' | 'DONE' | 'DRAFT' | 'MINE';
@@ -28,6 +28,9 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
   const [openingId, setOpeningId] = useState('');
+  const [projectAction, setProjectAction] = useState('');
+  const [projectMessage, setProjectMessage] = useState('');
+  const [driveUrl, setDriveUrl] = useState('');
 
   const loadProjects = useCallback(async () => {
     const result = await getProjects();
@@ -93,6 +96,21 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
     router.push(`/editor/${file.id}`);
   };
 
+  const runProjectAction = async (key: string, action: () => Promise<void>) => {
+    setProjectAction(key);
+    setProjectMessage('');
+    setDriveUrl('');
+    try {
+      await action();
+    } catch (error) {
+      setProjectMessage((error as { message?: string }).message || 'Thao tác không thành công.');
+    } finally {
+      setProjectAction('');
+    }
+  };
+
+  const selectedProject = projects.find((project) => project.id === projectId);
+
   return (
     <main className="dashboard-shell">
       <header className="app-header">
@@ -123,6 +141,35 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
         </label>
         <div className="progress-pill"><strong>{files.length}</strong><span>tệp hiển thị</span></div>
       </section>
+
+      {selectedProject && (user.role === 'ADMIN' || user.role === 'REVIEWER') ? (
+        <section className="project-data-actions panel" aria-label="Đồng bộ và xuất dữ liệu">
+          <div>
+            <p className="eyebrow">Dữ liệu dự án</p>
+            <strong>{selectedProject.name}</strong>
+            <small>Drive chỉ nhận những mask có revision hoặc version mới hơn manifest hiện tại.</small>
+          </div>
+          <div className="project-action-buttons">
+            {user.role === 'ADMIN' ? (
+              <button className="button secondary" disabled={projectAction !== ''} onClick={() => void runProjectAction('source', async () => {
+                const result = await syncProject(projectId);
+                setProjectMessage(`Đã đọc manifest nguồn: thêm ${result.added}, cập nhật ${result.updated}, lỗi ${result.missing}.`);
+                await Promise.all([loadProjects(), loadFiles(true)]);
+              })}>{projectAction === 'source' ? 'Đang đồng bộ…' : 'Đồng bộ nguồn'}</button>
+            ) : null}
+            <button className="button primary" disabled={projectAction !== ''} onClick={() => void runProjectAction('drive', async () => {
+              const result = await exportProject(projectId);
+              setProjectMessage(`Drive: cập nhật ${result.updated}, bỏ qua ${result.skipped} file không đổi, lỗi ${result.errors.length}.`);
+              setDriveUrl(result.driveFolderUrl);
+            })}>{projectAction === 'drive' ? 'Đang cập nhật…' : 'Cập nhật Drive'}</button>
+            <a className="button ghost download-button" href={projectExportDownloadUrl(projectId)} download>Tải ZIP về máy</a>
+          </div>
+        </section>
+      ) : null}
+
+      {projectMessage ? <p role="status" aria-live="polite" className="notice project-action-notice">
+        {projectMessage}{driveUrl ? <> <a href={driveUrl} target="_blank" rel="noreferrer">Mở thư mục Drive</a></> : null}
+      </p> : null}
 
       <nav className="filter-tabs" aria-label="Lọc danh sách tệp">
         {filters.map((item) => (
@@ -156,7 +203,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
       </section>
 
       {!loading && projects.length === 0 ? <div className="empty-state panel"><h2>Chưa có dự án</h2><p>Quản trị viên có thể tạo dự án và đồng bộ manifest bên dưới.</p></div> : null}
-      {user.role === 'ADMIN' ? <AdminPanel projects={projects} onChanged={loadProjects} /> : null}
+      {user.role === 'ADMIN' ? <AdminPanel onChanged={loadProjects} /> : null}
     </main>
   );
 }

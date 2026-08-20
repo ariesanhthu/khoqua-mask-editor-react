@@ -70,9 +70,13 @@ export async function syncProject(projectId: string) {
 }
 
 export async function exportProject(projectId: string) {
-  return apiFetch<{ exportName: string; driveFolderId: string; driveFolderUrl: string; exported: number; errors: Array<{ id: string; message: string }> }>(
+  return apiFetch<{ driveFolderId: string; driveFolderUrl: string; exported: number; updated: number; skipped: number; errors: Array<{ id: string; message: string }> }>(
     `/api/projects/${projectId}/export`, { method: 'POST' },
   );
+}
+
+export function projectExportDownloadUrl(projectId: string) {
+  return `/api/projects/${encodeURIComponent(projectId)}/export`;
 }
 
 export async function createUser(data: { displayName: string; email?: string; password: string; role: string }) {

@@ -1,6 +1,20 @@
 import type { AnnotationPolygon, PolygonNode } from '@/types';
+import polygonClipping from 'polygon-clipping';
 
 const EPSILON = 1e-6;
+const GEOMETRY_EPSILON = 1e-6;
+const MIN_BRIDGE_WIDTH = 2;
+const MAX_BRIDGE_WIDTH = 8;
+
+type GeometryPoint = [number, number];
+type GeometryRing = GeometryPoint[];
+type GeometryPolygon = GeometryRing[];
+type GeometryMultiPolygon = GeometryPolygon[];
+
+export interface MergePolygonsResult {
+  polygon?: AnnotationPolygon;
+  error?: string;
+}
 
 interface Intersection {
   edgeIndex: number;
@@ -18,6 +32,239 @@ export interface SplitPolygonResult {
 
 const createId = () => crypto.randomUUID();
 const distance = (a: Pick<PolygonNode, 'x' | 'y'>, b: Pick<PolygonNode, 'x' | 'y'>) => Math.hypot(a.x - b.x, a.y - b.y);
+
+const pointsEqual = (a: GeometryPoint, b: GeometryPoint) => Math.hypot(a[0] - b[0], a[1] - b[1]) <= GEOMETRY_EPSILON;
+
+function ringArea(ring: GeometryRing): number {
+  let area = 0;
+  for (let index = 0; index < ring.length; index += 1) {
+    const current = ring[index];
+    const next = ring[(index + 1) % ring.length];
+    area += current[0] * next[1] - next[0] * current[1];
+  }
+  return area / 2;
+}
+
+function orientation(a: GeometryPoint, b: GeometryPoint, c: GeometryPoint): number {
+  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+
+function pointOnSegment(point: GeometryPoint, start: GeometryPoint, end: GeometryPoint): boolean {
+  return Math.abs(orientation(start, end, point)) <= GEOMETRY_EPSILON
+    && point[0] >= Math.min(start[0], end[0]) - GEOMETRY_EPSILON
+    && point[0] <= Math.max(start[0], end[0]) + GEOMETRY_EPSILON
+    && point[1] >= Math.min(start[1], end[1]) - GEOMETRY_EPSILON
+    && point[1] <= Math.max(start[1], end[1]) + GEOMETRY_EPSILON;
+}
+
+function segmentsIntersect(a: GeometryPoint, b: GeometryPoint, c: GeometryPoint, d: GeometryPoint): boolean {
+  const abC = orientation(a, b, c);
+  const abD = orientation(a, b, d);
+  const cdA = orientation(c, d, a);
+  const cdB = orientation(c, d, b);
+  if (((abC > GEOMETRY_EPSILON && abD < -GEOMETRY_EPSILON) || (abC < -GEOMETRY_EPSILON && abD > GEOMETRY_EPSILON))
+    && ((cdA > GEOMETRY_EPSILON && cdB < -GEOMETRY_EPSILON) || (cdA < -GEOMETRY_EPSILON && cdB > GEOMETRY_EPSILON))) return true;
+  return (Math.abs(abC) <= GEOMETRY_EPSILON && pointOnSegment(c, a, b))
+    || (Math.abs(abD) <= GEOMETRY_EPSILON && pointOnSegment(d, a, b))
+    || (Math.abs(cdA) <= GEOMETRY_EPSILON && pointOnSegment(a, c, d))
+    || (Math.abs(cdB) <= GEOMETRY_EPSILON && pointOnSegment(b, c, d));
+}
+
+function ringSelfIntersects(ring: GeometryRing): boolean {
+  for (let first = 0; first < ring.length; first += 1) {
+    const firstNext = (first + 1) % ring.length;
+    for (let second = first + 1; second < ring.length; second += 1) {
+      const secondNext = (second + 1) % ring.length;
+      if (first === second || firstNext === second || secondNext === first) continue;
+      if (segmentsIntersect(ring[first], ring[firstNext], ring[second], ring[secondNext])) return true;
+    }
+  }
+  return false;
+}
+
+function normalizeRing(nodes: Array<Pick<PolygonNode, 'x' | 'y'> | GeometryPoint>): GeometryRing | null {
+  const coordinates = nodes.map((node): GeometryPoint => Array.isArray(node) ? [node[0], node[1]] : [node.x, node.y]);
+  if (coordinates.length < 3 || coordinates.some(([x, y]) => !Number.isFinite(x) || !Number.isFinite(y))) return null;
+  let ring: GeometryRing = coordinates;
+  if (ring.length > 1 && pointsEqual(ring[0], ring[ring.length - 1])) ring = ring.slice(0, -1);
+  ring = ring.filter((point, index) => index === 0 || !pointsEqual(point, ring[index - 1]));
+  if (ring.length > 1 && pointsEqual(ring[0], ring[ring.length - 1])) ring.pop();
+
+  let changed = true;
+  while (changed && ring.length >= 3) {
+    changed = false;
+    ring = ring.filter((current, index) => {
+      const previous = ring[(index - 1 + ring.length) % ring.length];
+      const next = ring[(index + 1) % ring.length];
+      const base = Math.hypot(next[0] - previous[0], next[1] - previous[1]);
+      const collinear = Math.abs(orientation(previous, current, next)) <= GEOMETRY_EPSILON * Math.max(1, base);
+      const between = (current[0] - previous[0]) * (current[0] - next[0])
+        + (current[1] - previous[1]) * (current[1] - next[1]) <= GEOMETRY_EPSILON;
+      if (pointsEqual(previous, current) || (collinear && between)) {
+        changed = true;
+        return false;
+      }
+      return true;
+    });
+  }
+  if (ring.length < 3 || Math.abs(ringArea(ring)) <= GEOMETRY_EPSILON || ringSelfIntersects(ring)) return null;
+  return ring;
+}
+
+function closestPointOnGeometrySegment(point: GeometryPoint, start: GeometryPoint, end: GeometryPoint): GeometryPoint {
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared <= GEOMETRY_EPSILON * GEOMETRY_EPSILON) return [...start];
+  const t = Math.max(0, Math.min(1, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / lengthSquared));
+  return [start[0] + t * dx, start[1] + t * dy];
+}
+
+function closestBoundaryPoints(ringA: GeometryRing, ringB: GeometryRing) {
+  let best = { distance: Number.POSITIVE_INFINITY, pointA: { x: 0, y: 0 }, pointB: { x: 0, y: 0 } };
+  const consider = (pointA: GeometryPoint, pointB: GeometryPoint) => {
+    const candidateDistance = Math.hypot(pointA[0] - pointB[0], pointA[1] - pointB[1]);
+    if (candidateDistance < best.distance) best = {
+      distance: candidateDistance,
+      pointA: { x: pointA[0], y: pointA[1] },
+      pointB: { x: pointB[0], y: pointB[1] },
+    };
+  };
+  for (let aIndex = 0; aIndex < ringA.length; aIndex += 1) {
+    const a1 = ringA[aIndex];
+    const a2 = ringA[(aIndex + 1) % ringA.length];
+    for (let bIndex = 0; bIndex < ringB.length; bIndex += 1) {
+      const b1 = ringB[bIndex];
+      const b2 = ringB[(bIndex + 1) % ringB.length];
+      if (segmentsIntersect(a1, a2, b1, b2)) {
+        const candidates: GeometryPoint[] = [a1, a2, b1, b2];
+        const contact = candidates.find((point) => pointOnSegment(point, a1, a2) && pointOnSegment(point, b1, b2)) || a1;
+        return { distance: 0, pointA: { x: contact[0], y: contact[1] }, pointB: { x: contact[0], y: contact[1] } };
+      }
+      consider(a1, closestPointOnGeometrySegment(a1, b1, b2));
+      consider(a2, closestPointOnGeometrySegment(a2, b1, b2));
+      const b1Projection = closestPointOnGeometrySegment(b1, a1, a2);
+      consider(b1Projection, b1);
+      const b2Projection = closestPointOnGeometrySegment(b2, a1, a2);
+      consider(b2Projection, b2);
+    }
+  }
+  return best;
+}
+
+function ringThickness(ring: GeometryRing): number {
+  let perimeter = 0;
+  for (let index = 0; index < ring.length; index += 1) {
+    const next = ring[(index + 1) % ring.length];
+    perimeter += Math.hypot(next[0] - ring[index][0], next[1] - ring[index][1]);
+  }
+  return perimeter <= GEOMETRY_EPSILON ? MIN_BRIDGE_WIDTH : 2 * Math.abs(ringArea(ring)) / perimeter;
+}
+
+function createBridge(pointA: { x: number; y: number }, pointB: { x: number; y: number }, width: number): GeometryPolygon {
+  const dx = pointB.x - pointA.x;
+  const dy = pointB.y - pointA.y;
+  const length = Math.hypot(dx, dy);
+  const halfWidth = width / 2;
+  if (length <= GEOMETRY_EPSILON) {
+    return [[
+      [pointA.x, pointA.y - halfWidth],
+      [pointA.x + halfWidth, pointA.y],
+      [pointA.x, pointA.y + halfWidth],
+      [pointA.x - halfWidth, pointA.y],
+    ]];
+  }
+  const directionX = dx / length;
+  const directionY = dy / length;
+  const normalX = -directionY * halfWidth;
+  const normalY = directionX * halfWidth;
+  const extension = Math.min(halfWidth, 1);
+  const startX = pointA.x - directionX * extension;
+  const startY = pointA.y - directionY * extension;
+  const endX = pointB.x + directionX * extension;
+  const endY = pointB.y + directionY * extension;
+  return [[
+    [startX + normalX, startY + normalY],
+    [endX + normalX, endY + normalY],
+    [endX - normalX, endY - normalY],
+    [startX - normalX, startY - normalY],
+  ]];
+}
+
+function unionGeometries(geometries: GeometryPolygon[]): GeometryMultiPolygon {
+  const union = polygonClipping.union as unknown as (...items: GeometryPolygon[]) => GeometryMultiPolygon;
+  return union(...geometries);
+}
+
+export function mergePolygonsIntoSingle(polygons: AnnotationPolygon[]): MergePolygonsResult {
+  if (polygons.length < 2) return { error: 'Chọn ít nhất 2 polygon để gộp.' };
+  if (!polygons.every((polygon) => polygon.label === polygons[0].label)) {
+    return { error: 'Các polygon đang chọn có label khác nhau.\nHãy gán cùng label trước khi gộp.' };
+  }
+
+  const rings: GeometryRing[] = [];
+  for (const polygon of polygons) {
+    const ring = normalizeRing(polygon.nodes);
+    if (!ring) return { error: 'Không thể gộp vì có polygon không hợp lệ hoặc tự giao nhau.' };
+    rings.push(ring);
+  }
+
+  let components: GeometryMultiPolygon;
+  try {
+    components = unionGeometries(rings.map((ring) => [ring]));
+  } catch {
+    return { error: 'Không thể gộp vì hình học polygon không hợp lệ.' };
+  }
+  if (!components.length) return { error: 'Không thể gộp polygon.' };
+  if (components.some((component) => component.length > 1)) {
+    return { error: 'Không thể gộp vì kết quả tạo vùng rỗng bên trong polygon.' };
+  }
+
+  if (components.length > 1) {
+    const edges: Array<{ from: number; to: number; distance: number; pointA: { x: number; y: number }; pointB: { x: number; y: number } }> = [];
+    for (let from = 0; from < components.length; from += 1) {
+      for (let to = from + 1; to < components.length; to += 1) {
+        edges.push({ from, to, ...closestBoundaryPoints(components[from][0], components[to][0]) });
+      }
+    }
+    edges.sort((a, b) => a.distance - b.distance);
+    const parents = components.map((_, index) => index);
+    const find = (index: number): number => parents[index] === index ? index : (parents[index] = find(parents[index]));
+    const bridges: GeometryPolygon[] = [];
+    for (const edge of edges) {
+      const fromRoot = find(edge.from);
+      const toRoot = find(edge.to);
+      if (fromRoot === toRoot) continue;
+      parents[fromRoot] = toRoot;
+      const width = Math.max(MIN_BRIDGE_WIDTH, Math.min(
+        MAX_BRIDGE_WIDTH,
+        0.25 * Math.min(ringThickness(components[edge.from][0]), ringThickness(components[edge.to][0])),
+      ));
+      bridges.push(createBridge(edge.pointA, edge.pointB, width));
+      if (bridges.length === components.length - 1) break;
+    }
+    try {
+      components = unionGeometries([...components, ...bridges]);
+    } catch {
+      return { error: 'Không thể tạo cầu nối giữa các polygon.' };
+    }
+  }
+
+  if (components.length !== 1 || components[0].length !== 1) {
+    return { error: components[0]?.length > 1
+      ? 'Không thể gộp vì kết quả tạo vùng rỗng bên trong polygon.'
+      : 'Không thể gộp các polygon thành đúng một vùng.' };
+  }
+  const finalRing = normalizeRing(components[0][0]);
+  if (!finalRing) return { error: 'Kết quả gộp polygon không hợp lệ.' };
+  return {
+    polygon: {
+      id: createId(),
+      label: polygons[0].label,
+      nodes: finalRing.map(([x, y]) => ({ id: createId(), x, y })),
+    },
+  };
+}
 
 export function clonePolygons(polygons: AnnotationPolygon[]): AnnotationPolygon[] {
   return polygons.map((polygon) => ({

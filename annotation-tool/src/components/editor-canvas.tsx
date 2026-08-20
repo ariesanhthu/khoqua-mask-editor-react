@@ -16,7 +16,7 @@ import type {
   MaskOperation,
   PolygonNode,
 } from '@/types';
-import { clonePolygons, pointInPolygon, splitPolygonWithCut } from '@/lib/polygon-geometry';
+import { clonePolygons, mergePolygonsIntoSingle, pointInPolygon, splitPolygonWithCut } from '@/lib/polygon-geometry';
 
 export type EditorTool = 'polygon' | 'select' | 'cut' | 'point' | 'pan';
 
@@ -42,6 +42,7 @@ export interface EditorCanvasHandle {
   beginPolygonEdit(): number;
   selectPolygon(polygonId: string): void;
   updateSelectedPolygonLabel(label: string): boolean;
+  groupSelectedPolygons(): boolean;
   fit(): void;
   zoomBy(factor: number): void;
 }
@@ -1069,6 +1070,28 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     return true;
   }, [commitPolygons, onMessage]);
 
+  const groupSelectedPolygons = useCallback(() => {
+    const selectedIds = selectedPolygonIdsRef.current;
+    const selected = polygonsRef.current.filter((polygon) => selectedIds.has(polygon.id));
+    const result = mergePolygonsIntoSingle(selected);
+    if (!result.polygon) {
+      onMessage(result.error || 'Không thể gộp polygon.');
+      return false;
+    }
+
+    const merged = result.polygon;
+    const firstSelectedIndex = polygonsRef.current.findIndex((polygon) => selectedIds.has(polygon.id));
+    const next = polygonsRef.current.flatMap((polygon, index) => {
+      if (index === firstSelectedIndex) return [merged];
+      return selectedIds.has(polygon.id) ? [] : [polygon];
+    });
+    selectedNodeIdsRef.current.clear();
+    selectedPolygonIdsRef.current = new Set([merged.id]);
+    commitPolygons(next);
+    onMessage(`Đã gộp ${selected.length} polygon thành 1 vùng.`);
+    return true;
+  }, [commitPolygons, onMessage]);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target;
@@ -1173,6 +1196,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     beginPolygonEdit,
     selectPolygon,
     updateSelectedPolygonLabel,
+    groupSelectedPolygons,
     confirmNoBreakpoint: () => {
       pointUndoRef.current.push(breakpointsRef.current.points.map((point) => ({ ...point })));
       pointRedoRef.current = [];
@@ -1195,7 +1219,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       onZoomChange?.(next);
       render();
     },
-  }), [applyCut, beginPolygonEdit, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, fit, height, notifyChange, notifySelection, onZoomChange, rebuildTint, redo, render, selectPolygon, undo, updateSelectedPolygonLabel, width]);
+  }), [applyCut, beginPolygonEdit, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, fit, groupSelectedPolygons, height, notifyChange, notifySelection, onZoomChange, rebuildTint, redo, render, selectPolygon, undo, updateSelectedPolygonLabel, width]);
 
   const onWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
     event.preventDefault();

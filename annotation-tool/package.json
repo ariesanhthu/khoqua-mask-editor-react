@@ -9,14 +9,17 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "dataset:upload": "node --env-file-if-exists=.env.local scripts/upload-blob-dataset.mjs",
-    "dataset:setup": "node --env-file-if-exists=.env.local scripts/setup-blob-dataset.mjs"
+    "dataset:setup": "node --env-file-if-exists=.env.local scripts/setup-blob-dataset.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
     "@vercel/blob": "^2.7.0",
     "dexie": "^4.4.4",
     "jose": "^6.2.8",
+    "jszip": "^3.10.1",
     "next": "16.3.0",
+    "polygon-clipping": "^0.15.7",
     "postgres": "^3.4.9",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -31,6 +34,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.11"
   }
 }

@@ -165,18 +165,37 @@ export async function createDriveFolder(name: string, parentFolderId: string): P
   return ((await response.json()) as { id: string }).id;
 }
 
-export async function uploadDriveFile(
+export async function ensureDriveFolder(name: string, parentFolderId: string): Promise<string> {
+  const normalizedParentId = normalizeDriveFolderId(parentFolderId);
+  const existing = (await listDriveChildren(normalizedParentId)).find((entry) => (
+    entry.name === name && entry.mimeType === 'application/vnd.google-apps.folder'
+  ));
+  return existing?.id || createDriveFolder(name, normalizedParentId);
+}
+
+export async function readDriveTextFile(name: string, parentFolderId: string): Promise<string | null> {
+  const existing = (await listDriveChildren(normalizeDriveFolderId(parentFolderId))).find((entry) => (
+    entry.name === name && entry.mimeType !== 'application/vnd.google-apps.folder'
+  ));
+  return existing ? new TextDecoder().decode(await downloadDriveFile(existing.id)) : null;
+}
+
+async function uploadDriveMultipart(
   name: string,
   parentFolderId: string,
   bytes: Uint8Array,
   contentType: string,
+  existingFileId?: string,
 ): Promise<string> {
   const token = await getDriveAccessToken();
   const boundary = `annotation-${crypto.randomUUID()}`;
   const encoder = new TextEncoder();
+  const metadataValue = existingFileId
+    ? { name }
+    : { name, parents: [normalizeDriveFolderId(parentFolderId)] };
   const metadata = encoder.encode(
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
-    `${JSON.stringify({ name, parents: [normalizeDriveFolderId(parentFolderId)] })}\r\n` +
+    `${JSON.stringify(metadataValue)}\r\n` +
     `--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n`,
   );
   const suffix = encoder.encode(`\r\n--${boundary}--`);
@@ -184,19 +203,44 @@ export async function uploadDriveFile(
   body.set(metadata, 0);
   body.set(bytes, metadata.length);
   body.set(suffix, metadata.length + bytes.length);
-  const response = await fetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': `multipart/related; boundary=${boundary}`,
-      },
-      body,
+  const endpoint = existingFileId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=multipart&supportsAllDrives=true`
+    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true';
+  const response = await fetch(endpoint, {
+    method: existingFileId ? 'PATCH' : 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`,
     },
-  );
-  if (!response.ok) throw new Error(`Không tải được kết quả lên Drive (${response.status}).`);
+    body,
+  });
+  if (!response.ok) throw new Error(`Không cập nhật được kết quả lên Drive (${response.status}).`);
   return ((await response.json()) as { id: string }).id;
+}
+
+export async function uploadDriveFile(
+  name: string,
+  parentFolderId: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<string> {
+  return uploadDriveMultipart(name, parentFolderId, bytes, contentType);
+}
+
+export async function upsertDriveFile(
+  name: string,
+  parentFolderId: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<{ id: string; created: boolean }> {
+  const normalizedParentId = normalizeDriveFolderId(parentFolderId);
+  const existing = (await listDriveChildren(normalizedParentId)).find((entry) => (
+    entry.name === name && entry.mimeType !== 'application/vnd.google-apps.folder'
+  ));
+  return {
+    id: await uploadDriveMultipart(name, normalizedParentId, bytes, contentType, existing?.id),
+    created: !existing,
+  };
 }
 
 async function loadManifest(folderValue: string): Promise<{

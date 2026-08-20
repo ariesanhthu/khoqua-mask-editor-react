@@ -621,6 +621,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
                     selectTool('select', 'mask');
                   }}
                   onApply={(label) => canvasRef.current?.updateSelectedPolygonLabel(label) || false}
+                  onGroup={() => canvasRef.current?.groupSelectedPolygons() || false}
                 />
                 <label className="range-field"><span>Độ mờ <strong>{Math.round(opacity * 100)}%</strong></span><input type="range" min="0.1" max="1" step="0.05" value={opacity} onChange={(event) => { const value = Number(event.target.value); setOpacity(value); localStorage.setItem('mask-opacity', String(value)); }} /></label>
               </section>
@@ -711,12 +712,14 @@ function Icon({ name }: { name: IconName }) {
 function PolygonLabelEditor({
   availableLabels,
   onApply,
+  onGroup,
   onSelect,
   polygons,
   selectedPolygons,
 }: {
   availableLabels: string[];
   onApply(label: string): boolean;
+  onGroup(): boolean;
   onSelect(polygonId: string): void;
   polygons: AnnotationPolygon[];
   selectedPolygons: AnnotationPolygon[];
@@ -760,6 +763,14 @@ function PolygonLabelEditor({
         </datalist>
       </label>
       <button className="button label-apply" disabled={!selectedPolygons.length || !label.trim()}>Áp dụng label</button>
+      <button
+        type="button"
+        className="button polygon-group"
+        disabled={selectedPolygons.length < 2 || !selectedPolygons.every((polygon) => polygon.label === selectedPolygons[0]?.label)}
+        onClick={() => onGroup()}
+      >
+        {selectedPolygons.length >= 2 ? `Gộp ${selectedPolygons.length} polygon` : 'Gộp polygon'}
+      </button>
     </form>
   );
 }
