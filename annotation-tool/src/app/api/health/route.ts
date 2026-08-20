@@ -8,6 +8,11 @@ export async function GET() {
     authSecret: Boolean(process.env.SECRET_KEY && process.env.SECRET_KEY.length >= 32),
     driveCredential: driveValue.startsWith('{'),
     driveExportFolder: Boolean(process.env.GOOGLE_DRIVE_EXPORT_FOLDER_ID),
+    googleOAuthConfig: Boolean(
+      process.env.GOOGLE_OAUTH_CLIENT_ID
+      && process.env.GOOGLE_OAUTH_CLIENT_SECRET
+      && process.env.GOOGLE_OAUTH_REDIRECT_URI,
+    ),
   };
   const ready = checks.database && checks.blob && checks.authSecret;
   return NextResponse.json(

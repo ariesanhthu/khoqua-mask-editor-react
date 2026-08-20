@@ -3,7 +3,17 @@
 import { useCallback, useDeferredValue, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { CurrentUser, FileListItem, ProjectSummary } from '@/types';
-import { exportProject, getFiles, getProjects, logout, projectExportDownloadUrl, syncProject } from '@/lib/api-client';
+import {
+  disconnectGoogleDrive,
+  exportProject,
+  getFiles,
+  getGoogleDriveConnectionStatus,
+  getProjects,
+  logout,
+  projectExportDownloadUrl,
+  syncProject,
+  type GoogleDriveConnectionStatus,
+} from '@/lib/api-client';
 import AdminPanel from './admin-panel';
 
 type Filter = 'ALL' | 'AVAILABLE' | 'DOING' | 'DONE' | 'DRAFT' | 'MINE';
@@ -31,6 +41,10 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
   const [projectAction, setProjectAction] = useState('');
   const [projectMessage, setProjectMessage] = useState('');
   const [driveUrl, setDriveUrl] = useState('');
+  const [googleDriveStatus, setGoogleDriveStatus] = useState<GoogleDriveConnectionStatus>({
+    configured: false,
+    connected: false,
+  });
 
   const loadProjects = useCallback(async () => {
     const result = await getProjects();
@@ -49,7 +63,8 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void loadProjects().catch(() => router.replace('/login'));
+      void Promise.all([loadProjects(), getGoogleDriveConnectionStatus().then(setGoogleDriveStatus)])
+        .catch(() => router.replace('/login'));
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadProjects, router]);
@@ -148,8 +163,27 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
             <p className="eyebrow">Dữ liệu dự án</p>
             <strong>{selectedProject.name}</strong>
             <small>Drive chỉ nhận những mask có revision hoặc version mới hơn manifest hiện tại.</small>
+            <small>
+              Google Drive: {googleDriveStatus.connected ? 'Đã kết nối' : 'Chưa kết nối'}
+              {googleDriveStatus.connected && googleDriveStatus.accountEmail ? ` · ${googleDriveStatus.accountEmail}` : ''}
+            </small>
+            {!googleDriveStatus.connected && user.role === 'REVIEWER' ? (
+              <small>Google Drive chưa được quản trị viên kết nối.</small>
+            ) : null}
           </div>
           <div className="project-action-buttons">
+            {user.role === 'ADMIN' && !googleDriveStatus.connected ? (
+              googleDriveStatus.configured
+                ? <a className="button ghost download-button" href="/api/google/connect">Kết nối Google Drive</a>
+                : <button className="button ghost" disabled>Kết nối Google Drive</button>
+            ) : null}
+            {user.role === 'ADMIN' && googleDriveStatus.connected ? (
+              <button className="button ghost" disabled={projectAction !== ''} onClick={() => void runProjectAction('disconnect-drive', async () => {
+                await disconnectGoogleDrive();
+                setGoogleDriveStatus((current) => ({ ...current, connected: false, accountEmail: null }));
+                setProjectMessage('Đã ngắt kết nối Google Drive.');
+              })}>{projectAction === 'disconnect-drive' ? 'Đang ngắt…' : 'Ngắt kết nối'}</button>
+            ) : null}
             {user.role === 'ADMIN' ? (
               <button className="button secondary" disabled={projectAction !== ''} onClick={() => void runProjectAction('source', async () => {
                 const result = await syncProject(projectId);
@@ -157,7 +191,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
                 await Promise.all([loadProjects(), loadFiles(true)]);
               })}>{projectAction === 'source' ? 'Đang đồng bộ…' : 'Đồng bộ nguồn'}</button>
             ) : null}
-            <button className="button primary" disabled={projectAction !== ''} onClick={() => void runProjectAction('drive', async () => {
+            <button className="button primary" disabled={projectAction !== '' || !googleDriveStatus.connected} onClick={() => void runProjectAction('drive', async () => {
               const result = await exportProject(projectId);
               setProjectMessage(`Drive: cập nhật ${result.updated}, bỏ qua ${result.skipped} file không đổi, lỗi ${result.errors.length}.`);
               setDriveUrl(result.driveFolderUrl);

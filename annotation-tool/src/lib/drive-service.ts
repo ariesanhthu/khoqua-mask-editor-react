@@ -6,6 +6,7 @@ import path from 'path';
 import { importPKCS8, SignJWT } from 'jose';
 import { get as getBlob } from '@vercel/blob';
 import { getDb, generateId, nowISO } from './db';
+import { getGoogleOAuthAccessToken } from './google-oauth';
 
 interface ManifestItem {
   id: string;
@@ -90,14 +91,22 @@ export async function getDriveAccessToken(): Promise<string> {
   return payload.access_token;
 }
 
-async function driveRequest<T>(url: string): Promise<T> {
-  const token = await getDriveAccessToken();
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!response.ok) throw new Error(`Google Drive trả về lỗi ${response.status}.`);
+class DriveHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`Google Drive trả về lỗi ${status}.`);
+  }
+}
+
+async function driveRequestWithToken<T>(url: string, accessToken: string): Promise<T> {
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  if (!response.ok) throw new DriveHttpError(response.status);
   return response.json() as Promise<T>;
 }
 
-async function listDriveChildren(folderId: string): Promise<Array<{ id: string; name: string; mimeType: string }>> {
+async function listDriveChildrenWithToken(
+  folderId: string,
+  accessToken: string,
+): Promise<Array<{ id: string; name: string; mimeType: string }>> {
   const files: Array<{ id: string; name: string; mimeType: string }> = [];
   let pageToken: string | undefined;
   do {
@@ -109,24 +118,31 @@ async function listDriveChildren(folderId: string): Promise<Array<{ id: string; 
       includeItemsFromAllDrives: 'true',
     });
     if (pageToken) query.set('pageToken', pageToken);
-    const result = await driveRequest<{
+    const result = await driveRequestWithToken<{
       nextPageToken?: string;
       files: Array<{ id: string; name: string; mimeType: string }>;
-    }>(`https://www.googleapis.com/drive/v3/files?${query}`);
+    }>(`https://www.googleapis.com/drive/v3/files?${query}`, accessToken);
     files.push(...result.files);
     pageToken = result.nextPageToken;
   } while (pageToken);
   return files;
 }
 
-async function downloadDriveFile(fileId: string): Promise<Uint8Array> {
-  const token = await getDriveAccessToken();
+async function listDriveChildren(folderId: string) {
+  return listDriveChildrenWithToken(folderId, await getDriveAccessToken());
+}
+
+async function downloadDriveFileWithToken(fileId: string, accessToken: string): Promise<Uint8Array> {
   const response = await fetch(
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
-    { headers: { Authorization: `Bearer ${token}` } },
+    { headers: { Authorization: `Bearer ${accessToken}` } },
   );
-  if (!response.ok) throw new Error(`Không tải được tệp Google Drive (${response.status}).`);
+  if (!response.ok) throw new DriveHttpError(response.status);
   return new Uint8Array(await response.arrayBuffer());
+}
+
+async function downloadDriveFile(fileId: string): Promise<Uint8Array> {
+  return downloadDriveFileWithToken(fileId, await getDriveAccessToken());
 }
 
 export async function fetchDriveAsset(fileId: string): Promise<Uint8Array> {
@@ -150,44 +166,75 @@ export async function fetchDatasetAsset(reference: string): Promise<Uint8Array> 
   return downloadDriveFile(reference);
 }
 
-export async function createDriveFolder(name: string, parentFolderId: string): Promise<string> {
-  const token = await getDriveAccessToken();
+function destinationError(error: unknown): Error {
+  if (error instanceof DriveHttpError && error.status === 403) {
+    return new Error('Tài khoản Google đã kết nối không có quyền ghi vào thư mục Drive đích.');
+  }
+  if (error instanceof DriveHttpError && error.status === 404) {
+    return new Error('Không tìm thấy thư mục Drive đích hoặc tài khoản hiện tại không có quyền truy cập.');
+  }
+  return error instanceof Error ? error : new Error('Thao tác Google Drive không thành công.');
+}
+
+async function createDriveFolderWithToken(
+  name: string,
+  parentFolderId: string,
+  accessToken: string,
+): Promise<string> {
   const response = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       name,
       mimeType: 'application/vnd.google-apps.folder',
       parents: [normalizeDriveFolderId(parentFolderId)],
     }),
   });
-  if (!response.ok) throw new Error(`Không tạo được thư mục Drive (${response.status}).`);
+  if (!response.ok) throw new DriveHttpError(response.status);
   return ((await response.json()) as { id: string }).id;
 }
 
+export async function createDriveFolder(name: string, parentFolderId: string): Promise<string> {
+  try {
+    return await createDriveFolderWithToken(name, parentFolderId, await getGoogleOAuthAccessToken());
+  } catch (error) {
+    throw destinationError(error);
+  }
+}
+
 export async function ensureDriveFolder(name: string, parentFolderId: string): Promise<string> {
-  const normalizedParentId = normalizeDriveFolderId(parentFolderId);
-  const existing = (await listDriveChildren(normalizedParentId)).find((entry) => (
-    entry.name === name && entry.mimeType === 'application/vnd.google-apps.folder'
-  ));
-  return existing?.id || createDriveFolder(name, normalizedParentId);
+  try {
+    const token = await getGoogleOAuthAccessToken();
+    const normalizedParentId = normalizeDriveFolderId(parentFolderId);
+    const existing = (await listDriveChildrenWithToken(normalizedParentId, token)).find((entry) => (
+      entry.name === name && entry.mimeType === 'application/vnd.google-apps.folder'
+    ));
+    return existing?.id || createDriveFolderWithToken(name, normalizedParentId, token);
+  } catch (error) {
+    throw destinationError(error);
+  }
 }
 
 export async function readDriveTextFile(name: string, parentFolderId: string): Promise<string | null> {
-  const existing = (await listDriveChildren(normalizeDriveFolderId(parentFolderId))).find((entry) => (
-    entry.name === name && entry.mimeType !== 'application/vnd.google-apps.folder'
-  ));
-  return existing ? new TextDecoder().decode(await downloadDriveFile(existing.id)) : null;
+  try {
+    const token = await getGoogleOAuthAccessToken();
+    const existing = (await listDriveChildrenWithToken(normalizeDriveFolderId(parentFolderId), token)).find((entry) => (
+      entry.name === name && entry.mimeType !== 'application/vnd.google-apps.folder'
+    ));
+    return existing ? new TextDecoder().decode(await downloadDriveFileWithToken(existing.id, token)) : null;
+  } catch (error) {
+    throw destinationError(error);
+  }
 }
 
-async function uploadDriveMultipart(
+async function uploadDriveMultipartWithToken(
   name: string,
   parentFolderId: string,
   bytes: Uint8Array,
   contentType: string,
+  accessToken: string,
   existingFileId?: string,
 ): Promise<string> {
-  const token = await getDriveAccessToken();
   const boundary = `annotation-${crypto.randomUUID()}`;
   const encoder = new TextEncoder();
   const metadataValue = existingFileId
@@ -209,12 +256,12 @@ async function uploadDriveMultipart(
   const response = await fetch(endpoint, {
     method: existingFileId ? 'PATCH' : 'POST',
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${accessToken}`,
       'Content-Type': `multipart/related; boundary=${boundary}`,
     },
     body,
   });
-  if (!response.ok) throw new Error(`Không cập nhật được kết quả lên Drive (${response.status}).`);
+  if (!response.ok) throw new DriveHttpError(response.status);
   return ((await response.json()) as { id: string }).id;
 }
 
@@ -224,7 +271,13 @@ export async function uploadDriveFile(
   bytes: Uint8Array,
   contentType: string,
 ): Promise<string> {
-  return uploadDriveMultipart(name, parentFolderId, bytes, contentType);
+  try {
+    return await uploadDriveMultipartWithToken(
+      name, parentFolderId, bytes, contentType, await getGoogleOAuthAccessToken(),
+    );
+  } catch (error) {
+    throw destinationError(error);
+  }
 }
 
 export async function upsertDriveFile(
@@ -233,14 +286,19 @@ export async function upsertDriveFile(
   bytes: Uint8Array,
   contentType: string,
 ): Promise<{ id: string; created: boolean }> {
-  const normalizedParentId = normalizeDriveFolderId(parentFolderId);
-  const existing = (await listDriveChildren(normalizedParentId)).find((entry) => (
-    entry.name === name && entry.mimeType !== 'application/vnd.google-apps.folder'
-  ));
-  return {
-    id: await uploadDriveMultipart(name, normalizedParentId, bytes, contentType, existing?.id),
-    created: !existing,
-  };
+  try {
+    const token = await getGoogleOAuthAccessToken();
+    const normalizedParentId = normalizeDriveFolderId(parentFolderId);
+    const existing = (await listDriveChildrenWithToken(normalizedParentId, token)).find((entry) => (
+      entry.name === name && entry.mimeType !== 'application/vnd.google-apps.folder'
+    ));
+    return {
+      id: await uploadDriveMultipartWithToken(name, normalizedParentId, bytes, contentType, token, existing?.id),
+      created: !existing,
+    };
+  } catch (error) {
+    throw destinationError(error);
+  }
 }
 
 async function loadManifest(folderValue: string): Promise<{

@@ -117,6 +117,13 @@ async function initializeSchema(db: AppDatabase): Promise<void> {
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
     )`,
+    `CREATE TABLE IF NOT EXISTS oauth_credentials (
+      provider TEXT PRIMARY KEY,
+      encrypted_refresh_token TEXT NOT NULL,
+      account_email TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS datasets (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id),

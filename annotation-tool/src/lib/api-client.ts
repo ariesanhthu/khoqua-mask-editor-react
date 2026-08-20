@@ -79,6 +79,20 @@ export function projectExportDownloadUrl(projectId: string) {
   return `/api/projects/${encodeURIComponent(projectId)}/export`;
 }
 
+export interface GoogleDriveConnectionStatus {
+  configured: boolean;
+  connected: boolean;
+  accountEmail?: string | null;
+}
+
+export function getGoogleDriveConnectionStatus() {
+  return apiFetch<GoogleDriveConnectionStatus>('/api/google/status');
+}
+
+export async function disconnectGoogleDrive(): Promise<void> {
+  await apiFetch<{ connected: false }>('/api/google/status', { method: 'DELETE' });
+}
+
 export async function createUser(data: { displayName: string; email?: string; password: string; role: string }) {
   return apiFetch<CurrentUser>('/api/users', { method: 'POST', body: JSON.stringify(data) });
 }
