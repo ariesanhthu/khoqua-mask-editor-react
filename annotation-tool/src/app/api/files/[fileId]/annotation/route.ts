@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { saveDraft } from '@/lib/annotation-service';
 import { getDb } from '@/lib/db';
+import { validWartPoints } from '@/lib/wart-points';
 
 function hasPersistableOperations(value: unknown): boolean {
   if (!Array.isArray(value) || value.length === 0) return false;
@@ -34,7 +35,8 @@ export async function PATCH(
   if (!Number.isInteger(baseRevision) || !segmentation || !breakpoints ||
       !['UNTOUCHED', 'ACCEPTED', 'MODIFIED'].includes(segmentation.humanAction) ||
       !['NOT_ANNOTATED', 'ANNOTATED', 'CONFIRMED_NONE'].includes(breakpoints.state) ||
-      !Array.isArray(breakpoints.points)) {
+      !Array.isArray(breakpoints.points) ||
+      (segmentation.wartPoints !== undefined && !validWartPoints(segmentation.wartPoints))) {
     return NextResponse.json(
       { code: 'INVALID_ANNOTATION', message: 'Annotation payload is invalid' },
       { status: 400 }

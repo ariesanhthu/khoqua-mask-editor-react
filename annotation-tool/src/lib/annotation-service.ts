@@ -128,9 +128,10 @@ function normalizeSegmentation(
       ? previous.maskOperations
       : undefined;
   return {
+    wartPoints: segmentation.wartPoints ?? previous.wartPoints,
     sourcePredictionDriveFileId: file.prediction_drive_file_id,
     humanAction: segmentation.humanAction,
-    ...(segmentation.maskUploadRef || previous.maskStorageKey
+    ...(segmentation.humanAction === 'MODIFIED' && (segmentation.maskUploadRef || previous.maskStorageKey)
       ? { maskStorageKey: segmentation.maskUploadRef || previous.maskStorageKey }
       : {}),
     ...(maskOperations

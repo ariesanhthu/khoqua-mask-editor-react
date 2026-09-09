@@ -49,6 +49,7 @@ export interface AnnotationPolygon {
 }
 
 export interface SegmentationAnnotation {
+  wartPoints?: BreakpointAnnotation;
   sourcePredictionDriveFileId: string;
   humanAction: HumanAction;
   maskStorageKey?: string;
@@ -107,12 +108,14 @@ export interface EditorBootstrap {
   assets: { imageUrl: string; predictionMaskUrl: string; currentMaskUrl?: string };
   annotation: Annotation | null;
   prelabelOperations?: MaskOperation[];
-  lock: { sessionId: string; lockToken: string; expiresAt: string };
+  readOnly: boolean;
+  lockedBy?: string;
+  lock: { sessionId: string; lockToken: string; expiresAt: string } | null;
 }
 
 export interface SaveDraftRequest {
   baseRevision: number;
-  segmentation: { humanAction: HumanAction; maskUploadRef?: string; maskOperations?: MaskOperation[] };
+  segmentation: { wartPoints?: BreakpointAnnotation; humanAction: HumanAction; maskUploadRef?: string; maskOperations?: MaskOperation[] };
   breakpoints: BreakpointAnnotation;
 }
 
@@ -124,7 +127,7 @@ export interface SaveDraftResponse {
 export interface DoneRequest {
   baseRevision: number;
   annotation: {
-    segmentation: { humanAction: HumanAction; maskUploadRef?: string; maskOperations?: MaskOperation[] };
+    segmentation: { wartPoints?: BreakpointAnnotation; humanAction: HumanAction; maskUploadRef?: string; maskOperations?: MaskOperation[] };
     breakpoints: BreakpointAnnotation;
   };
 }
@@ -174,6 +177,7 @@ export interface LocalDraft {
   userId: string;
   baseServerRevision: number;
   humanAction: HumanAction;
+  wartPoints?: BreakpointAnnotation;
   maskSnapshotBlob?: Blob;
   maskOperations?: MaskOperation[];
   breakpoints: BreakpointAnnotation;

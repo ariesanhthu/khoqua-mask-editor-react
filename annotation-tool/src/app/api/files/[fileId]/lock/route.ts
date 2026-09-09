@@ -18,7 +18,7 @@ export async function POST(
     return NextResponse.json({ code: 'ASSET_NOT_FOUND', message: 'Source image or prediction is missing.' }, { status: 409 });
   }
 
-  const result = await acquireLock(fileId, user.userId);
+  const result = await acquireLock(fileId, user.userId, request.headers.get('X-Annotation-Lock-Token') || undefined);
   if (!result) {
     return NextResponse.json({ code: 'FILE_NOT_FOUND', message: 'File not found' }, { status: 404 });
   }

@@ -106,7 +106,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
       setMessage('Bạn đang ngoại tuyến. Hãy kết nối lại trước khi mở tệp khác.');
       return;
     }
-    if (file.lock.state === 'LOCKED' || file.assetState === 'ERROR') return;
+    if (file.assetState === 'ERROR') return;
     setOpeningId(file.id);
     router.push(`/editor/${file.id}`);
   };
@@ -162,7 +162,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
           <div>
             <p className="eyebrow">Dữ liệu dự án</p>
             <strong>{selectedProject.name}</strong>
-            <small>Drive chỉ nhận những mask có revision hoặc version mới hơn manifest hiện tại.</small>
+            <small>Bấm Cập nhật Drive để gửi bản nháp và bản hoàn tất đã lưu server, gồm mask và point u vấu.</small>
             <small>
               Google Drive: {googleDriveStatus.connected ? 'Đã kết nối' : 'Chưa kết nối'}
               {googleDriveStatus.connected && googleDriveStatus.accountEmail ? ` · ${googleDriveStatus.accountEmail}` : ''}
@@ -193,7 +193,9 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
             ) : null}
             <button className="button primary" disabled={projectAction !== '' || !googleDriveStatus.connected} onClick={() => void runProjectAction('drive', async () => {
               const result = await exportProject(projectId);
-              setProjectMessage(`Drive: cập nhật ${result.updated}, bỏ qua ${result.skipped} file không đổi, lỗi ${result.errors.length}.`);
+              setProjectMessage(result.errors.length
+                ? `Drive chưa đồng bộ đầy đủ: ${result.errors.map((error) => `${error.id}: ${error.message}`).join('; ')}`
+                : `Drive: cập nhật ${result.updated} tệp, ${result.skipped} tệp không đổi. Tổng ${result.exported} tệp đã lưu server. Kiểm tra point trong wart-points.jsonl.`);
               setDriveUrl(result.driveFolderUrl);
             })}>{projectAction === 'drive' ? 'Đang cập nhật…' : 'Cập nhật Drive'}</button>
             <a className="button ghost download-button" href={projectExportDownloadUrl(projectId)} download>Tải ZIP về máy</a>
@@ -227,8 +229,8 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
                 <div className="file-title-row"><h2>{file.externalKey}</h2><StateBadge state={file.annotationState} /></div>
                 <p>{assetError ? 'Thiếu ảnh nguồn hoặc mặt nạ gợi ý' : file.lock.state === 'LOCKED' ? `Đang được ${file.lock.displayName} chỉnh sửa` : 'Sẵn sàng chỉnh sửa'}</p>
                 {file.assignment ? <small>Phụ trách: {file.assignment.displayName}</small> : <small>Chưa phân công</small>}
-                <button className="button primary" disabled={locked || assetError || openingId === file.id} onClick={() => openFile(file)}>
-                  {openingId === file.id ? 'Đang mở…' : file.annotationState === 'DONE' ? 'Chỉnh sửa lại' : 'Bắt đầu'}
+                <button className="button primary" disabled={assetError || openingId === file.id} onClick={() => openFile(file)}>
+                  {openingId === file.id ? 'Đang mở…' : locked ? 'Chỉ xem' : file.annotationState === 'DONE' ? 'Chỉnh sửa lại' : 'Bắt đầu'}
                 </button>
               </div>
             </article>

@@ -48,6 +48,7 @@ export interface EditorCanvasHandle {
 }
 
 interface Props {
+  readOnly?: boolean;
   width: number;
   height: number;
   imageUrl: string;
@@ -129,6 +130,19 @@ function closestPointOnSegment(point: ImagePoint, start: ImagePoint, end: ImageP
 
 function distanceToSegment(point: ImagePoint, start: ImagePoint, end: ImagePoint) {
   return closestPointOnSegment(point, start, end).distance;
+}
+
+function closestPolygonEdge(polygon: AnnotationPolygon, point: ImagePoint) {
+  let closest: { edgeIndex: number; point: ImagePoint; distance: number } | null = null;
+  for (let edgeIndex = 0; edgeIndex < polygon.nodes.length; edgeIndex += 1) {
+    const candidate = closestPointOnSegment(
+      point,
+      polygon.nodes[edgeIndex],
+      polygon.nodes[(edgeIndex + 1) % polygon.nodes.length],
+    );
+    if (!closest || candidate.distance < closest.distance) closest = { edgeIndex, ...candidate };
+  }
+  return closest;
 }
 
 function simplifyOpenPath<T extends ImagePoint>(points: T[], tolerance: number): T[] {
@@ -323,7 +337,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   const pointUndoRef = useRef<BreakpointPoint[][]>([]);
   const pointRedoRef = useRef<BreakpointPoint[][]>([]);
   const selectedPointIdRef = useRef<string | null>(null);
-  const [humanAction, setHumanAction] = useState<HumanAction>(initialHumanAction);
   const humanActionRef = useRef(initialHumanAction);
   const displayRef = useRef({ showMask, maskOpacity });
   const toolRef = useRef(tool);
@@ -662,7 +675,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     polygonModeRef.current = true;
     operationsRef.current = polygonOperation(next);
     humanActionRef.current = 'MODIFIED';
-    setHumanAction('MODIFIED');
     render();
     notifyChange('MODIFIED', next);
     notifySelection();
@@ -767,7 +779,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   }, []);
 
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!readyRef.current) return;
+    if (!readyRef.current || (props.readOnly && tool !== 'pan')) return;
     const point = imagePoint(event);
     if (event.button === 2) {
       event.preventDefault();
@@ -880,18 +892,69 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   };
 
   const onDoubleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
-    if (tool !== 'polygon') return;
-    event.preventDefault();
-    // Hai lần pointer-down của double click đã thêm cùng một đỉnh hai lần.
-    // Giữ lần nhấp đầu làm đỉnh cuối và bỏ bản sao trước khi hoàn tất.
-    if (draftPolygonRef.current.length > 1) {
-      draftPolygonRef.current = draftPolygonRef.current.slice(0, -1);
+    if (props.readOnly) return;
+    if (tool === 'polygon') {
+      event.preventDefault();
+      // Hai lần pointer-down của double click đã thêm cùng một đỉnh hai lần.
+      // Giữ lần nhấp đầu làm đỉnh cuối và bỏ bản sao trước khi hoàn tất.
+      if (draftPolygonRef.current.length > 1) {
+        draftPolygonRef.current = draftPolygonRef.current.slice(0, -1);
+      }
+      if (draftPolygonRef.current.length >= 3) completePolygon();
+      else render();
+      return;
     }
-    if (draftPolygonRef.current.length >= 3) completePolygon();
-    else render();
+    if (tool !== 'select' || !readyRef.current) return;
+    event.preventDefault();
+    const point = imagePoint(event);
+    const hitTolerance = 14 / viewRef.current.scale;
+    let closest: { polygon: AnnotationPolygon; edgeIndex: number; point: ImagePoint; distance: number } | null = null;
+    for (let index = polygonsRef.current.length - 1; index >= 0; index -= 1) {
+      const polygon = polygonsRef.current[index];
+      const bounds = polygonBounds(polygon);
+      if (point.x < bounds.left - hitTolerance || point.x > bounds.right + hitTolerance
+          || point.y < bounds.top - hitTolerance || point.y > bounds.bottom + hitTolerance) continue;
+      const edge = closestPolygonEdge(polygon, point);
+      if (edge && edge.distance <= hitTolerance && (!closest || edge.distance < closest.distance)) {
+        closest = { polygon, ...edge };
+      }
+    }
+    if (!closest) {
+      onMessage('Hãy nhấp đúp gần đường biên polygon để thêm node.');
+      return;
+    }
+    const edgeStart = closest.polygon.nodes[closest.edgeIndex];
+    const edgeEnd = closest.polygon.nodes[(closest.edgeIndex + 1) % closest.polygon.nodes.length];
+    const endpointTolerance = 6 / viewRef.current.scale;
+    const existingNode = Math.hypot(closest.point.x - edgeStart.x, closest.point.y - edgeStart.y) <= endpointTolerance
+      ? edgeStart
+      : Math.hypot(closest.point.x - edgeEnd.x, closest.point.y - edgeEnd.y) <= endpointTolerance ? edgeEnd : null;
+    if (existingNode) {
+      selectedPolygonIdsRef.current = new Set([closest.polygon.id]);
+      selectedNodeIdsRef.current = new Set([existingNode.id]);
+      notifySelection();
+      render();
+      return;
+    }
+    const insertedNode = { id: crypto.randomUUID(), ...closest.point };
+    selectedPolygonIdsRef.current = new Set([closest.polygon.id]);
+    selectedNodeIdsRef.current = new Set([insertedNode.id]);
+    const next = polygonsRef.current.map((polygon) => polygon.id === closest!.polygon.id
+      ? {
+        ...polygon,
+        nodes: [
+          ...polygon.nodes.slice(0, closest!.edgeIndex + 1),
+          insertedNode,
+          ...polygon.nodes.slice(closest!.edgeIndex + 1),
+        ],
+      }
+      : polygon);
+    commitPolygons(next);
+    onMessage('Đã thêm node mới vào biên polygon.');
   };
 
   const onContextMenu = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (props.readOnly) { event.preventDefault(); return; }
     event.preventDefault();
     if (suppressContextMenuSelectionRef.current) {
       suppressContextMenuSelectionRef.current = false;
@@ -912,6 +975,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (props.readOnly && pointerRef.current?.mode !== 'pan') { pointerRef.current = null; return; }
     const active = pointerRef.current;
     if (!active) {
       if (tool === 'polygon' && draftPolygonRef.current.length) {
@@ -989,6 +1053,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   };
 
   const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (props.readOnly && pointerRef.current?.mode !== 'pan') { pointerRef.current = null; return; }
     const active = pointerRef.current;
     if (!active || active.id !== event.pointerId) return;
     pointerRef.current = null;
@@ -998,7 +1063,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         operationsRef.current = polygonOperation(polygonsRef.current);
         polygonModeRef.current = true;
         humanActionRef.current = 'MODIFIED';
-        setHumanAction('MODIFIED');
         notifyChange('MODIFIED');
       }
       return;
@@ -1059,7 +1123,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     selectedNodeIdsRef.current.clear();
     selectedPolygonIdsRef.current.clear();
     humanActionRef.current = 'MODIFIED';
-    setHumanAction('MODIFIED');
     render();
     notifyChange('MODIFIED', previous);
     notifySelection();
@@ -1085,7 +1148,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     selectedNodeIdsRef.current.clear();
     selectedPolygonIdsRef.current.clear();
     humanActionRef.current = 'MODIFIED';
-    setHumanAction('MODIFIED');
     render();
     notifyChange('MODIFIED', next);
     notifySelection();
@@ -1158,6 +1220,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (props.readOnly) return;
       const target = event.target;
       if (target instanceof HTMLElement
           && target.matches('input, select, textarea, [contenteditable="true"]')) return;
@@ -1185,7 +1248,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [applyCut, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, redo, tool, undo]);
+  }, [applyCut, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, props.readOnly, redo, tool, undo]);
 
   useImperativeHandle(ref, () => ({
     exportMask: async () => {
@@ -1209,6 +1272,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       return toBlob(maskRef.current);
     },
     resetToPrediction: () => {
+      if (props.readOnly) return;
       const mask = maskRef.current;
       const prediction = predictionRef.current;
       if (mask && prediction) {
@@ -1225,12 +1289,12 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       selectedNodeIdsRef.current.clear();
       selectedPolygonIdsRef.current.clear();
       humanActionRef.current = 'MODIFIED';
-      setHumanAction('MODIFIED');
       render();
       notifyChange('MODIFIED', []);
       notifySelection();
     },
     acceptPrediction: () => {
+      if (props.readOnly) return;
       const mask = maskRef.current;
       const prediction = predictionRef.current;
       if (mask && prediction) {
@@ -1245,23 +1309,23 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       selectedNodeIdsRef.current.clear();
       selectedPolygonIdsRef.current.clear();
       humanActionRef.current = 'ACCEPTED';
-      setHumanAction('ACCEPTED');
       render();
       notifyChange('ACCEPTED', []);
       notifySelection();
     },
-    undo,
-    redo,
-    deleteSelectedPoint,
-    deleteSelection,
-    completePolygon,
+    undo: () => { if (!props.readOnly) undo(); },
+    redo: () => { if (!props.readOnly) redo(); },
+    deleteSelectedPoint: () => { if (!props.readOnly) deleteSelectedPoint(); },
+    deleteSelection: () => { if (!props.readOnly) deleteSelection(); },
+    completePolygon: () => !props.readOnly && completePolygon(),
     cancelCurrentPath,
-    applyCut,
-    beginPolygonEdit,
+    applyCut: () => !props.readOnly && applyCut(),
+    beginPolygonEdit: () => props.readOnly ? 0 : beginPolygonEdit(),
     selectPolygon,
-    updateSelectedPolygonLabel,
-    groupSelectedPolygons,
+    updateSelectedPolygonLabel: (label) => !props.readOnly && updateSelectedPolygonLabel(label),
+    groupSelectedPolygons: () => !props.readOnly && groupSelectedPolygons(),
     confirmNoBreakpoint: () => {
+      if (props.readOnly) return;
       pointUndoRef.current.push(breakpointsRef.current.points.map((point) => ({ ...point })));
       pointRedoRef.current = [];
       selectedPointIdRef.current = null;
@@ -1285,8 +1349,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       surface.style.height = `${surfaceHeight}px`;
       stage.style.width = `${viewport.clientWidth}px`;
       stage.style.height = `${viewport.clientHeight}px`;
-      const originX = (surfaceWidth - width * next) / 2;
-      const originY = (surfaceHeight - height * next) / 2;
+      const originX = (surface.offsetWidth - width * next) / 2;
+      const originY = (surface.offsetHeight - height * next) / 2;
       viewport.scrollLeft = originX + imageX * next - viewport.clientWidth / 2;
       viewport.scrollTop = originY + imageY * next - viewport.clientHeight / 2;
       viewRef.current = { scale: next, x: originX - viewport.scrollLeft, y: originY - viewport.scrollTop };
@@ -1294,7 +1358,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       onZoomChange?.(next);
       render();
     },
-  }), [applyCut, beginPolygonEdit, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, fit, groupSelectedPolygons, height, notifyChange, notifySelection, onZoomChange, rebuildTint, redo, render, selectPolygon, undo, updateSelectedPolygonLabel, width]);
+  }), [applyCut, beginPolygonEdit, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, fit, groupSelectedPolygons, height, notifyChange, notifySelection, onZoomChange, props.readOnly, rebuildTint, redo, render, selectPolygon, undo, updateSelectedPolygonLabel, width]);
 
   const onWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
     event.preventDefault();
@@ -1311,7 +1375,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (!surface) return;
     const stage = event.currentTarget;
     const rect = stage.getBoundingClientRect();
-    const viewportRect = viewport.getBoundingClientRect();
     const view = viewRef.current;
     const mouseX = event.clientX - rect.left;
     const mouseY = event.clientY - rect.top;
@@ -1324,10 +1387,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     surface.style.height = `${surfaceHeight}px`;
     stage.style.width = `${viewport.clientWidth}px`;
     stage.style.height = `${viewport.clientHeight}px`;
-    const originX = (surfaceWidth - width * next) / 2;
-    const originY = (surfaceHeight - height * next) / 2;
-    viewport.scrollLeft = originX + imageX * next - (event.clientX - viewportRect.left);
-    viewport.scrollTop = originY + imageY * next - (event.clientY - viewportRect.top);
+    const originX = (surface.offsetWidth - width * next) / 2;
+    const originY = (surface.offsetHeight - height * next) / 2;
+    viewport.scrollLeft = originX + imageX * next - mouseX;
+    viewport.scrollTop = originY + imageY * next - mouseY;
     viewRef.current = { scale: next, x: originX - viewport.scrollLeft, y: originY - viewport.scrollTop };
     fittedRef.current = true;
     onZoomChange?.(next);
@@ -1336,10 +1399,11 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
 
   const onViewportScroll = () => {
     const viewport = viewportRef.current;
-    if (!viewport) return;
+    const surface = surfaceRef.current;
+    if (!viewport || !surface) return;
     const view = viewRef.current;
-    view.x = (viewport.scrollWidth - width * view.scale) / 2 - viewport.scrollLeft;
-    view.y = (viewport.scrollHeight - height * view.scale) / 2 - viewport.scrollTop;
+    view.x = (surface.offsetWidth - width * view.scale) / 2 - viewport.scrollLeft;
+    view.y = (surface.offsetHeight - height * view.scale) / 2 - viewport.scrollTop;
     render();
   };
 
@@ -1359,19 +1423,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           onContextMenu={onContextMenu}
           onWheel={onWheel}
         />
-      </div>
-      <div className="canvas-hint">
-        {tool === 'polygon'
-          ? 'Nhấp để thêm điểm · Nhấp đúp hoặc nhấn Enter để hoàn tất'
-          : tool === 'select'
-            ? 'Chuột phải chọn polygon · Giữ chuột phải để kéo cả vùng · Shift/Ctrl để chọn thêm · Delete để xóa'
-            : tool === 'cut'
-              ? 'Kéo một đường cắt qua đa giác · Enter để tách vùng'
-              : humanAction === 'ACCEPTED'
-                ? 'Đã chấp nhận mặt nạ gợi ý'
-                : humanAction === 'MODIFIED'
-                  ? 'Vùng chọn đã chỉnh sửa'
-                  : 'Chưa xác nhận vùng chọn'}
       </div>
     </div>
   );

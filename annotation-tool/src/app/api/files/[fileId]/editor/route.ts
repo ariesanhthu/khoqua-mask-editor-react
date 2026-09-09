@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { getDb } from '@/lib/db';
 import { getAnnotation } from '@/lib/annotation-service';
+import { hashToken } from '@/lib/db';
 import { loadPrelabelOperations } from '@/lib/prelabel-service';
 
 /**
@@ -24,11 +25,9 @@ export async function GET(
   // Check lock ownership
   const lock = await db.prepare('SELECT * FROM file_locks WHERE dataset_file_id = ?').get(fileId);
   const isLocked = lock && new Date(lock.expires_at as string) > new Date();
-  const isOwner = isLocked && lock!.user_id === user.userId;
-
-  if (!isOwner) {
-    return NextResponse.json({ code: 'LOCK_LOST', message: 'You do not own the edit lock' }, { status: 409 });
-  }
+  const token = request.headers.get('X-Annotation-Lock-Token') || '';
+  const isOwner = Boolean(isLocked && lock!.user_id === user.userId && lock!.lock_token_hash === hashToken(token));
+  const owner = isLocked ? await db.prepare('SELECT display_name FROM users WHERE id = ?').get(lock!.user_id) : null;
 
   const annotation = await getAnnotation(fileId);
   const prelabelOperations = !annotation && file.prelabel_storage_ref
@@ -56,10 +55,12 @@ export async function GET(
     },
     annotation,
     ...(prelabelOperations ? { prelabelOperations } : {}),
-    lock: {
+    readOnly: !isOwner,
+    lockedBy: owner?.display_name,
+    lock: isOwner ? {
       sessionId: lock!.session_id,
       lockToken: '', // Never expose — client already has it from /lock
       expiresAt: lock!.expires_at,
-    },
+    } : null,
   });
 }

@@ -23,7 +23,7 @@ interface LockDenied {
   expiresAt: string;
 }
 
-export async function acquireLock(fileId: string, userId: string): Promise<LockResult | LockDenied | null> {
+export async function acquireLock(fileId: string, userId: string, existingToken?: string): Promise<LockResult | LockDenied | null> {
   const db = await getDb();
   return db.transaction(async (tx) => {
     const file = await tx.prepare('SELECT * FROM dataset_files WHERE id = ? FOR UPDATE').get(fileId);
@@ -36,7 +36,11 @@ export async function acquireLock(fileId: string, userId: string): Promise<LockR
 
     if (existingLock) {
       const lockExpiry = new Date(existingLock.expires_at as string);
-      if (lockExpiry > now && existingLock.user_id !== userId) {
+      if (lockExpiry > now && existingToken && existingLock.user_id === userId && existingLock.lock_token_hash === hashToken(existingToken)) {
+        return { denied: false, sessionId: existingLock.session_id as string, lockToken: existingToken,
+          expiresAt: existingLock.expires_at as string, baseRevision: Number(file.latest_revision) };
+      }
+      if (lockExpiry > now) {
         const lockedUser = await tx.prepare('SELECT display_name FROM users WHERE id = ?').get(existingLock.user_id);
         return {
           denied: true,

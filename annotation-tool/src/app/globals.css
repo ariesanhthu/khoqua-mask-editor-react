@@ -477,6 +477,22 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
 .editor-shell .queue-card strong { overflow: hidden; color: var(--editor-primary-dark); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .editor-shell .queue-card small { display: block; margin: 7px 0 0 16px; color: var(--editor-muted); font-size: 11px; }
 .editor-shell .queue-dot { width: 8px; height: 8px; background: #12b76a; box-shadow: none; }
+.editor-shell .sidebar-instructions {
+  min-height: 0;
+  margin-top: 16px;
+  padding: 14px;
+  overflow-y: auto;
+  color: #5b3a00;
+  background: #fff4c2;
+  border: 1px solid #e6bd4a;
+  border-radius: 14px;
+  box-shadow: 0 4px 14px rgba(119,78,0,.08);
+}
+.editor-shell .sidebar-instructions h2 { margin: 0 0 8px; color: #4a2f00; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; }
+.editor-shell .sidebar-instructions p { margin: 0; color: #5b3a00; font-size: 11px; font-weight: 500; line-height: 1.6; }
+.editor-shell .sidebar-instructions .button { min-height: 36px; margin-top: 12px; }
+.editor-shell .sidebar-instructions .context-actions .button { margin-top: 0; }
+.editor-shell .sidebar-instructions kbd { color: #4a2f00; background: #fffdf2; border-color: #d7ad3d; }
 .sidebar-account-area { display: grid; gap: 10px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--editor-border); }
 .help-button,.user-profile {
   display: flex;
@@ -507,6 +523,7 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
 .left-collapsed .workspace-nav button { display: grid; grid-template-columns: 1fr; justify-items: center; padding-inline: 0; }
 .left-collapsed .queue-card { display: grid; width: 42px; height: 42px; place-items: center; padding: 0; }
 .left-collapsed .queue-card > div { display: block; }
+.left-collapsed .sidebar-instructions { display: none !important; }
 .left-collapsed .sidebar-account-area { width: 100%; }
 .left-collapsed .help-button,.left-collapsed .user-profile { justify-content: center; padding: 7px 0; border-color: transparent; }
 .left-collapsed .online-dot { display: none; }
@@ -517,12 +534,20 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
   position: absolute;
   z-index: 1;
   inset: 24px 78px 24px 24px;
-  overflow: hidden;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable both-edges;
+  scrollbar-color: #98a2b3 #eef0f4;
+  scrollbar-width: auto;
   background: #f1f3f7;
   border: 1px solid var(--editor-border);
   border-radius: 18px;
   box-shadow: 0 1px 3px rgba(16,24,40,.06), 0 12px 32px rgba(16,24,40,.06);
 }
+.editor-shell .canvas-viewport::-webkit-scrollbar { width: 12px; height: 12px; }
+.editor-shell .canvas-viewport::-webkit-scrollbar-track { background: #eef0f4; }
+.editor-shell .canvas-viewport::-webkit-scrollbar-thumb { background: #98a2b3; border: 3px solid #eef0f4; border-radius: 999px; }
+.editor-shell .canvas-viewport::-webkit-scrollbar-thumb:hover { background: #667085; }
 .editor-shell .canvas-scroll-surface { position: relative; min-width: 100%; min-height: 100%; }
 .editor-shell .canvas-viewport canvas { position: sticky; top: 0; left: 0; width: 100%; height: 100%; }
 .editor-shell .canvas-hint {
@@ -704,3 +729,17 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
   .layer-toggle span { display: none; }
   .shortcut-content { grid-template-columns: 1fr; }
 }
+/* File switching uses the existing sidebar and scrolls independently of the canvas. */
+.editor-shell .file-queue { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px; }
+.editor-shell .file-queue button { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 10px; border: 1px solid var(--editor-border, #e4e7ec); border-radius: 8px; background: transparent; color: var(--editor-text, #344054); }
+.editor-shell .file-queue button[aria-current="page"] { border-color: #7c5cfa; background: #f0ebff; }
+.editor-shell .file-queue strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.editor-shell .file-queue small,.editor-shell .file-queue span { font-size: 11px; color: var(--editor-muted, #667085); }
+.editor-shell .queue-pagination { display: flex; justify-content: space-between; align-items: center; padding: 6px 16px; font-size: 12px; }
+.editor-shell .queue-pagination button { border: 0; border-radius: 6px; padding: 4px 10px; }
+.editor-shell fieldset.control-panel-scroll { min-width: 0; margin: 0; border: 0; }
+.editor-shell fieldset.floating-toolbar { min-width: 0; margin: 0; }
+.editor-shell fieldset:disabled button,.editor-shell fieldset:disabled input { cursor: default; opacity: .5; }
+.editor-shell.left-collapsed .file-queue { padding: 6px 3px; }
+.editor-shell.left-collapsed .file-queue button { padding: 6px 3px; }
+.editor-shell.left-collapsed .file-queue small,.editor-shell.left-collapsed .file-queue span { display: none; }

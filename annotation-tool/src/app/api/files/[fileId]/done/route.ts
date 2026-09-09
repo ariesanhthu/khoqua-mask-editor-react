@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { submitDone } from '@/lib/annotation-service';
 import { getDb } from '@/lib/db';
+import { validWartPoints } from '@/lib/wart-points';
 
 function hasPersistableOperations(value: unknown): boolean {
   if (!Array.isArray(value) || value.length === 0) return false;
@@ -33,13 +34,14 @@ export async function POST(
   const breakpoints = annotation?.breakpoints;
   if (!Number.isInteger(baseRevision) || !segmentation || !breakpoints ||
       !['ACCEPTED', 'MODIFIED'].includes(segmentation.humanAction) ||
-      !['ANNOTATED', 'CONFIRMED_NONE'].includes(breakpoints.state) ||
+      !['NOT_ANNOTATED', 'ANNOTATED', 'CONFIRMED_NONE'].includes(breakpoints.state) ||
+      !validWartPoints(segmentation.wartPoints, true) ||
       !Array.isArray(breakpoints.points) ||
       (breakpoints.state === 'ANNOTATED' && breakpoints.points.length === 0) ||
       (breakpoints.state === 'CONFIRMED_NONE' && breakpoints.points.length !== 0) ||
-      (segmentation.maskOperations !== undefined && !hasPersistableOperations(segmentation.maskOperations))) {
+      (segmentation.maskOperations?.length > 0 && !hasPersistableOperations(segmentation.maskOperations))) {
     return NextResponse.json(
-      { code: 'INVALID_ANNOTATION', message: 'Complete the mask and breakpoint tasks before finishing.' },
+      { code: 'INVALID_ANNOTATION', message: 'Complete the mask and wart point tasks before finishing.' },
       { status: 400 }
     );
   }

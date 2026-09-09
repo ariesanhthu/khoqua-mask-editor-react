@@ -9,10 +9,9 @@ import type {
   SaveDraftResponse, DoneRequest, DoneResponse, ApiError, CurrentUser, ProjectSummary,
 } from '@/types';
 
-let _lockToken: string | null = null;
-
-export function setLockToken(token: string) { _lockToken = token; }
-export function getLockToken() { return _lockToken; }
+const lockTokens = new Map<string, string>();
+const lockRequests = new Map<string, Promise<LockAcquireResponse>>();
+function getLockToken(fileId: string) { return lockTokens.get(fileId); }
 
 async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
@@ -20,7 +19,8 @@ async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
     ...(options.headers as Record<string, string> || {}),
   };
 
-  if (_lockToken) headers['X-Annotation-Lock-Token'] = _lockToken;
+  const token = getLockToken(url.match(/\/api\/files\/([^/]+)/)?.[1] || '');
+  if (token) headers['X-Annotation-Lock-Token'] = token;
 
   const res = await fetch(url, { ...options, headers, credentials: 'same-origin' });
 
@@ -107,9 +107,13 @@ export async function getFiles(projectId: string, params?: Record<string, string
 // ─── Lock ───────────────────────────────────────────────
 
 export async function acquireLock(fileId: string) {
-  const result = await apiFetch<LockAcquireResponse>(`/api/files/${fileId}/lock`, { method: 'POST' });
-  setLockToken(result.lockToken);
-  return result;
+  const pending = lockRequests.get(fileId);
+  if (pending) return pending;
+  const request = apiFetch<LockAcquireResponse>(`/api/files/${fileId}/lock`, { method: 'POST' })
+    .then((result) => { lockTokens.set(fileId, result.lockToken); return result; })
+    .finally(() => lockRequests.delete(fileId));
+  lockRequests.set(fileId, request);
+  return request;
 }
 
 export async function sendHeartbeat(fileId: string) {
@@ -120,7 +124,7 @@ export async function releaseLock(fileId: string) {
   try {
     await apiFetch<{ released: boolean }>(`/api/files/${fileId}/lock`, { method: 'DELETE' });
   } finally {
-    _lockToken = null;
+    lockTokens.delete(fileId);
   }
 }
 
@@ -132,7 +136,8 @@ export async function getEditorData(fileId: string) {
 
 export async function uploadMask(fileId: string, mask: Blob) {
   const headers: Record<string, string> = {};
-  if (_lockToken) headers['X-Annotation-Lock-Token'] = _lockToken;
+  const token = getLockToken(fileId);
+  if (token) headers['X-Annotation-Lock-Token'] = token;
   const response = await fetch(`/api/files/${fileId}/mask`, {
     method: 'POST', body: mask, headers, credentials: 'same-origin',
   });

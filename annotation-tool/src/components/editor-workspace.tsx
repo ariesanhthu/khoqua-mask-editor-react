@@ -7,6 +7,7 @@ import type {
   ApiError,
   BreakpointAnnotation,
   EditorBootstrap,
+  FileListItem,
   HumanAction,
   LocalDraft,
   MaskOperation,
@@ -29,8 +30,8 @@ import EditorCanvas, {
   type EditorTool,
 } from './editor-canvas';
 
-type SaveStatus = 'SAVED' | 'SAVING' | 'OFFLINE' | 'SYNCING' | 'CONFLICT';
-type WorkspaceStep = 'mask' | 'breakpoints';
+type SaveStatus = 'LOCAL' | 'SAVED' | 'SAVING' | 'OFFLINE' | 'SYNCING' | 'CONFLICT';
+type WorkspaceStep = 'mask' | 'warts';
 
 interface EditorSeed {
   key: number;
@@ -86,12 +87,20 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const [seed, setSeed] = useState<EditorSeed | null>(null);
   const [loadError, setLoadError] = useState('');
   const [ready, setReady] = useState(false);
+  const [readOnly, setReadOnly] = useState(true);
+  const [queue, setQueue] = useState<FileListItem[]>([]);
+  const [queuePage, setQueuePage] = useState(1);
+  const [queueTotal, setQueueTotal] = useState(0);
+  const [queueError, setQueueError] = useState('');
+  const [navigating, setNavigating] = useState(false);
+  const legacyBreakpointsRef = useRef<BreakpointAnnotation>(emptyBreakpoints);
+  const changeToolRef = useRef<(tool: EditorTool, step?: WorkspaceStep) => void>(() => undefined);
   const [tool, setTool] = useState<EditorTool>(() => {
     if (typeof window === 'undefined') return 'select';
     const stored = localStorage.getItem('editor-tool') as EditorTool | null;
     return stored && ['polygon', 'select', 'cut', 'point', 'pan'].includes(stored) ? stored : 'select';
   });
-  const [workspaceStep, setWorkspaceStep] = useState<WorkspaceStep>(() => tool === 'point' ? 'breakpoints' : 'mask');
+  const [workspaceStep, setWorkspaceStep] = useState<WorkspaceStep>(() => tool === 'point' ? 'warts' : 'mask');
   const [opacity, setOpacity] = useState(() => {
     if (typeof window === 'undefined') return 0.5;
     const stored = Number(localStorage.getItem('mask-opacity'));
@@ -108,7 +117,6 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   });
   const snapshotRef = useRef(snapshot);
   const revisionRef = useRef(0);
-  const projectIdRef = useRef('');
   const [status, setStatus] = useState<SaveStatus>('SAVED');
   const [toast, setToast] = useState('');
   const [conflict, setConflict] = useState<{ serverRevision: number; localDraft: LocalDraft } | null>(null);
@@ -116,7 +124,6 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const conflictRef = useRef(false);
   const dirtyVersionRef = useRef(0);
   const syncedVersionRef = useRef(0);
-  const localTimerRef = useRef<number | null>(null);
   const syncPromiseRef = useRef<Promise<boolean> | null>(null);
   const transitioningFileRef = useRef(false);
 
@@ -129,21 +136,13 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       if (key === 'escape') {
         setHelpOpen(false);
       } else if (key === 'v') {
-        canvasRef.current?.beginPolygonEdit();
-        setTool('select');
-        setWorkspaceStep('mask');
-        localStorage.setItem('editor-tool', 'select');
+        changeToolRef.current('select', 'mask');
       } else if (key === 'h') {
-        setTool('pan');
-        localStorage.setItem('editor-tool', 'pan');
+        changeToolRef.current('pan');
       } else if (key === 'p') {
-        setTool('polygon');
-        setWorkspaceStep('mask');
-        localStorage.setItem('editor-tool', 'polygon');
+        changeToolRef.current('polygon', 'mask');
       } else if (key === 'm') {
-        setTool('point');
-        setWorkspaceStep('breakpoints');
-        localStorage.setItem('editor-tool', 'point');
+        changeToolRef.current('point', 'warts');
       } else if (event.key === '?') {
         setHelpOpen(true);
       }
@@ -157,7 +156,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     return {
       key: Date.now(),
       humanAction: annotation ? annotation.segmentation.humanAction : 'UNTOUCHED',
-      breakpoints: annotation ? annotation.breakpoints : emptyBreakpoints,
+      breakpoints: annotation?.segmentation.wartPoints ?? emptyBreakpoints,
       operations: annotation
         ? annotation.segmentation.maskOperations ?? []
         : data.prelabelOperations ?? [],
@@ -173,6 +172,9 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       await Promise.resolve();
       if (cancelled) return;
       setReady(false);
+      setReadOnly(true);
+      setNavigating(false);
+      setQueuePage(1);
       setLoadError('');
       setBootstrap(null);
       setSeed(null);
@@ -189,20 +191,26 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       setWorkspaceStep('mask');
       setTool('pan');
       try {
-        const lock = await acquireLock(fileId);
+        let lock = null;
+        try { lock = await acquireLock(fileId); }
+        catch (error) { if ((error as ApiError).code !== 'FILE_LOCKED') throw error; }
         const data = await getEditorData(fileId);
         if (cancelled) return;
-        data.lock.lockToken = lock.lockToken;
-        revisionRef.current = lock.baseRevision;
-        projectIdRef.current = data.file.projectId;
-        const local = await getLocalDraft(data.file.projectId, fileId, userId);
+        const canEdit = Boolean(lock && !data.readOnly);
+        setReadOnly(!canEdit);
+        if (!canEdit) setToast(`Chỉ xem · ${data.lockedBy || 'Phiên khác'} đang chỉnh sửa.`);
+        revisionRef.current = lock?.baseRevision ?? data.annotation?.revision ?? 0;
+        legacyBreakpointsRef.current = data.annotation?.breakpoints ?? emptyBreakpoints;
+        const local = canEdit ? await getLocalDraft(data.file.projectId, fileId, userId) : undefined;
+        if (cancelled) return;
+        if (local && local.syncState !== 'SYNCED') legacyBreakpointsRef.current = local.breakpoints;
         const serverSeed = createServerSeed(data);
         setBootstrap(data);
 
-        if (local && local.baseServerRevision === lock.baseRevision && local.syncState !== 'SYNCED') {
+        if (local && local.baseServerRevision === revisionRef.current && local.syncState !== 'SYNCED') {
           const recovered: EditorSeed = {
             key: Date.now(), humanAction: local.humanAction,
-            breakpoints: local.breakpoints, operations: local.maskOperations || [],
+            breakpoints: local.wartPoints ?? emptyBreakpoints, operations: local.maskOperations || [],
             localMaskBlob: local.maskSnapshotBlob,
           };
           setSeed(recovered);
@@ -212,16 +220,16 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
           dirtyVersionRef.current = 1;
           setToast('Đã khôi phục phần việc chưa đồng bộ trên thiết bị này.');
           setStatus(navigator.onLine ? 'SAVING' : 'OFFLINE');
-        } else if (local && local.baseServerRevision !== lock.baseRevision && local.syncState !== 'SYNCED') {
+        } else if (local && local.baseServerRevision !== revisionRef.current && local.syncState !== 'SYNCED') {
           const localSeed: EditorSeed = {
             key: Date.now(), humanAction: local.humanAction,
-            breakpoints: local.breakpoints, operations: local.maskOperations || [], localMaskBlob: local.maskSnapshotBlob,
+            breakpoints: local.wartPoints ?? emptyBreakpoints, operations: local.maskOperations || [], localMaskBlob: local.maskSnapshotBlob,
           };
           setSeed(localSeed);
           const localSnapshot = { humanAction: localSeed.humanAction, breakpoints: localSeed.breakpoints, maskOperations: localSeed.operations, polygons: polygonsFromOperations(localSeed.operations) };
           setSnapshot(localSnapshot);
           snapshotRef.current = localSnapshot;
-          conflictRef.current = true; setConflictMinimized(false); setConflict({ serverRevision: lock.baseRevision, localDraft: local }); setStatus('CONFLICT');
+          conflictRef.current = true; setConflictMinimized(false); setConflict({ serverRevision: revisionRef.current, localDraft: local }); setStatus('CONFLICT');
         } else {
           setSeed(serverSeed);
           const serverSnapshot = { humanAction: serverSeed.humanAction, breakpoints: serverSeed.breakpoints, maskOperations: serverSeed.operations, polygons: polygonsFromOperations(serverSeed.operations) };
@@ -238,7 +246,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   }, [createServerSeed, fileId, userId]);
 
   const persistLocal = useCallback(async (syncState: SyncState = 'DIRTY') => {
-    if (!bootstrap) return;
+    if (!bootstrap || readOnly || transitioningFileRef.current) return;
     const current = snapshotRef.current;
     await putLocalDraft({
       key: draftKey(bootstrap.file.projectId, fileId, userId),
@@ -248,14 +256,15 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       baseServerRevision: revisionRef.current,
       humanAction: current.humanAction,
       maskOperations: current.maskOperations,
-      breakpoints: current.breakpoints,
+      breakpoints: legacyBreakpointsRef.current,
+      wartPoints: current.breakpoints,
       updatedAt: Date.now(),
       syncState,
     });
-  }, [bootstrap, fileId, userId]);
+  }, [bootstrap, fileId, readOnly, userId]);
 
   const syncNow = useCallback(async (): Promise<boolean> => {
-    if (!bootstrap || !canvasRef.current || conflictRef.current) return false;
+    if (!bootstrap || !canvasRef.current || conflictRef.current || readOnly) return false;
     if (!navigator.onLine) {
       setStatus('OFFLINE');
       await persistLocal('DIRTY').catch(() => undefined);
@@ -269,13 +278,17 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       setStatus('SYNCING');
       try {
         const current = snapshotRef.current;
+        const maskUploadRef = current.humanAction === 'MODIFIED'
+          ? (await uploadMask(fileId, await canvasRef.current!.exportMask())).maskUploadRef : undefined;
         const result = await saveDraft(fileId, {
           baseRevision: revisionRef.current,
           segmentation: {
             humanAction: current.humanAction,
+            wartPoints: current.breakpoints,
+            maskUploadRef,
             maskOperations: current.maskOperations,
           },
-          breakpoints: current.breakpoints,
+          breakpoints: legacyBreakpointsRef.current,
         });
         revisionRef.current = result.revision;
         syncedVersionRef.current = syncingVersion;
@@ -291,7 +304,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
           if (local) { setConflictMinimized(false); setConflict({ serverRevision: Number(apiError.serverRevision ?? revisionRef.current), localDraft: local }); }
           setStatus('CONFLICT');
         } else {
-          setStatus(navigator.onLine ? 'SAVING' : 'OFFLINE');
+          setStatus(navigator.onLine ? 'LOCAL' : 'OFFLINE');
+          setToast(apiError.message || 'Chưa lưu được lên máy chủ. Bản nháp vẫn ở thiết bị.');
         }
         return false;
       } finally {
@@ -300,20 +314,24 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     })();
     syncPromiseRef.current = task;
     return task;
-  }, [bootstrap, fileId, persistLocal, userId]);
+  }, [bootstrap, fileId, persistLocal, readOnly, userId]);
 
   const onEditorChange = useCallback((next: EditorCanvasSnapshot) => {
     snapshotRef.current = next;
     setSnapshot(next);
     dirtyVersionRef.current += 1;
     if (!conflictRef.current) setStatus(navigator.onLine ? 'SAVING' : 'OFFLINE');
-    if (localTimerRef.current) window.clearTimeout(localTimerRef.current);
-    localTimerRef.current = window.setTimeout(() => void persistLocal('DIRTY'), 500);
-  }, [persistLocal]);
+
+  }, []);
 
   useEffect(() => {
-    if (!bootstrap) return;
-    const maximumInterval = window.setInterval(() => void syncNow(), 30_000);
+    if (!bootstrap || readOnly) return;
+    const maximumInterval = window.setInterval(() => {
+      if (dirtyVersionRef.current === syncedVersionRef.current || transitioningFileRef.current || syncPromiseRef.current) return;
+      void persistLocal(conflictRef.current ? 'CONFLICT' : 'DIRTY')
+        .then(() => { if (!conflictRef.current) setStatus('LOCAL'); })
+        .catch(() => setToast('Không lưu được bản nháp trên thiết bị. Hãy bấm Lưu để gửi máy chủ.'));
+    }, 30_000);
     const heartbeatInterval = window.setInterval(async () => {
       try { await sendHeartbeat(fileId); }
       catch {
@@ -323,57 +341,87 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         const local = await getLocalDraft(bootstrap.file.projectId, fileId, userId);
         if (local) { setConflictMinimized(false); setConflict({ serverRevision: revisionRef.current, localDraft: local }); }
       }
-    }, 90_000);
+    }, 30_000);
     const onOffline = () => setStatus('OFFLINE');
     const onOnline = () => { if (!conflictRef.current) setStatus('SAVING'); };
-    const onPageHide = () => { void persistLocal('DIRTY'); };
+    const onPageHide = () => { void persistLocal(conflictRef.current ? 'CONFLICT' : 'DIRTY'); };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden' && !transitioningFileRef.current) void syncNow();
+    };
     window.addEventListener('offline', onOffline); window.addEventListener('online', onOnline);
     window.addEventListener('pagehide', onPageHide);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       window.clearInterval(maximumInterval); window.clearInterval(heartbeatInterval);
-      if (localTimerRef.current) window.clearTimeout(localTimerRef.current);
       window.removeEventListener('offline', onOffline); window.removeEventListener('online', onOnline);
       window.removeEventListener('pagehide', onPageHide);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [bootstrap, fileId, persistLocal, syncNow, userId]);
+  }, [bootstrap, fileId, persistLocal, readOnly, syncNow, userId]);
 
-  const goBack = async () => {
-    await persistLocal('DIRTY').catch(() => undefined);
-    await syncNow().catch(() => false);
-    await releaseLock(fileId).catch(() => undefined);
-    router.push('/');
+  const navigateTo = async (destination: string) => {
+    if (transitioningFileRef.current || navigating) return;
+    setNavigating(true);
+    if (!readOnly) {
+      await persistLocal('DIRTY').catch(() => undefined);
+      if (!await syncNow()) {
+        setToast('Chưa lưu được lên máy chủ. Hãy xử lý lỗi trước khi đổi tệp.');
+        setNavigating(false);
+        return;
+      }
+    }
+    transitioningFileRef.current = true;
+    if (!readOnly) await releaseLock(fileId).catch(() => undefined);
+    router.push(destination);
   };
+  const goBack = () => navigateTo('/');
+
+  useEffect(() => {
+    if (!bootstrap) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const result = await getFiles(bootstrap.file.projectId, { page: String(queuePage), pageSize: '50' });
+        if (!cancelled) { setQueue(result.items); setQueueTotal(result.total); setQueueError(''); }
+      } catch { if (!cancelled) setQueueError('Chưa tải được danh sách tệp.'); }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 8000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [bootstrap, queuePage]);
 
   useEffect(() => {
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (status === 'SAVED') return;
+      if (readOnly || dirtyVersionRef.current === syncedVersionRef.current) return;
       event.preventDefault();
     };
     window.addEventListener('beforeunload', warnBeforeUnload);
     return () => window.removeEventListener('beforeunload', warnBeforeUnload);
-  }, [status]);
+  }, [readOnly, status]);
 
   const finish = async () => {
+    if (readOnly || navigating || transitioningFileRef.current || conflictRef.current) return;
     const current = snapshotRef.current;
     if (current.humanAction === 'UNTOUCHED') {
       setToast('Hãy chấp nhận mặt nạ gợi ý hoặc chỉnh sửa mặt nạ trước.'); return;
     }
     if (current.breakpoints.state === 'NOT_ANNOTATED') {
-      setToast('Hãy đánh dấu điểm đứt gãy hoặc xác nhận ảnh không có điểm đứt gãy.'); return;
+      setToast('Hãy đánh dấu u vấu hoặc xác nhận ảnh không có u vấu.'); return;
     }
-    transitioningFileRef.current = true;
+    setNavigating(true);
     setStatus('SYNCING');
     try {
       await persistLocal('DIRTY');
       const synchronized = await syncNow();
-      if (!synchronized && conflictRef.current) return;
+      if (!synchronized) { setNavigating(false); return; }
+      transitioningFileRef.current = true;
       let maskUploadRef: string | undefined;
       if (current.humanAction === 'MODIFIED') {
         maskUploadRef = (await uploadMask(fileId, await canvasRef.current!.exportMask())).maskUploadRef;
       }
       await submitDone(fileId, {
         baseRevision: revisionRef.current,
-        annotation: { segmentation: { humanAction: current.humanAction, maskUploadRef, maskOperations: current.maskOperations }, breakpoints: current.breakpoints },
+        annotation: { segmentation: { wartPoints: current.breakpoints, humanAction: current.humanAction, maskUploadRef, maskOperations: current.maskOperations }, breakpoints: legacyBreakpointsRef.current },
       });
       await deleteLocalDraft(bootstrap!.file.projectId, fileId, userId);
       setToast('Đang mở nhiệm vụ khả dụng tiếp theo…');
@@ -388,6 +436,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       else router.push('/');
     } catch (error) {
       transitioningFileRef.current = false;
+      setNavigating(false);
       const apiError = error as ApiError;
       setToast(apiError.message || 'Không thể hoàn tất. Phần việc vẫn được lưu trên thiết bị.');
       setStatus(apiError.code === 'REVISION_CONFLICT' || apiError.code === 'LOCK_LOST' ? 'CONFLICT' : 'SAVING');
@@ -396,9 +445,10 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
 
   const showLatest = async () => {
     if (!bootstrap) return;
-    const lock = await acquireLock(fileId);
     const latest = await getEditorData(fileId);
-    revisionRef.current = lock.baseRevision;
+    revisionRef.current = latest.annotation?.revision ?? 0;
+    legacyBreakpointsRef.current = latest.annotation?.breakpoints ?? emptyBreakpoints;
+    setReadOnly(latest.readOnly);
     setBootstrap(latest);
     await deleteLocalDraft(bootstrap.file.projectId, fileId, userId);
     const serverSeed = createServerSeed(latest);
@@ -411,48 +461,35 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
 
   const onCanvasReady = useCallback(() => setReady(true), []);
 
-  const saveConflictAsVersion = async () => {
-    if (!conflict || !canvasRef.current || !bootstrap) return;
-    setStatus('SYNCING');
-    try {
-      const lock = await acquireLock(fileId);
-      revisionRef.current = lock.baseRevision;
-      const current = snapshotRef.current;
-      const maskUploadRef = current.humanAction === 'MODIFIED'
-        ? (await uploadMask(fileId, await canvasRef.current.exportMask())).maskUploadRef
-        : undefined;
-      await submitDone(fileId, {
-        baseRevision: lock.baseRevision,
-        annotation: { segmentation: { humanAction: current.humanAction === 'UNTOUCHED' ? 'MODIFIED' : current.humanAction, maskUploadRef, maskOperations: current.maskOperations }, breakpoints: current.breakpoints },
-      });
-      await deleteLocalDraft(bootstrap.file.projectId, fileId, userId);
-      router.push('/');
-    } catch (error) {
-      setToast((error as ApiError).message || 'Chưa thể lưu phiên bản của bạn. Bản cục bộ vẫn được giữ nguyên.');
-      setStatus('CONFLICT');
-    }
+  const downloadConflict = () => {
+    if (!conflict) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(conflict.localDraft, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = `${fileId}-local-draft.json`; link.click();
+    URL.revokeObjectURL(url);
   };
+
+  const flushExplicitly = useCallback(async () => {
+    if (readOnly) return true;
+    await persistLocal('DIRTY').catch(() => undefined);
+    return syncNow();
+  }, [persistLocal, readOnly, syncNow]);
+
+  const selectTool = useCallback(async (nextTool: EditorTool, nextStep = workspaceStep) => {
+    if (navigating || status === 'SYNCING') return;
+    if (nextStep !== workspaceStep && !await flushExplicitly()) return;
+    if (!readOnly && !conflictRef.current && nextTool === 'select' && nextStep === 'mask') canvasRef.current?.beginPolygonEdit();
+    setTool(readOnly ? 'pan' : nextTool);
+    setWorkspaceStep(nextStep);
+    localStorage.setItem('editor-tool', nextTool);
+  }, [flushExplicitly, navigating, readOnly, status, workspaceStep]);
+  useEffect(() => { changeToolRef.current = (nextTool, nextStep) => { void selectTool(nextTool, nextStep); }; }, [selectTool]);
 
   if (loadError) return <div className="center-state"><div className="panel"><h1>Không thể mở tệp</h1><p>{loadError}</p><button className="button primary" onClick={() => router.push('/')}>Về danh sách</button></div></div>;
   if (!bootstrap || !seed) return <div className="center-state"><div className="loader" /><p>Đang xác nhận quyền chỉnh sửa…</p></div>;
 
-  const selectTool = (nextTool: EditorTool, nextStep = workspaceStep) => {
-    if (nextTool === 'select' && nextStep === 'mask') {
-      canvasRef.current?.beginPolygonEdit();
-    }
-    setTool(nextTool);
-    setWorkspaceStep(nextStep);
-    localStorage.setItem('editor-tool', nextTool);
-  };
-  const openMaskStep = () => selectTool(tool === 'point' ? 'select' : tool, 'mask');
-  const openBreakpointStep = () => selectTool('point', 'breakpoints');
-  const flushExplicitly = async () => {
-    await persistLocal('DIRTY').catch(() => undefined);
-    await syncNow().catch(() => false);
-  };
   const saveExplicitly = async () => {
-    await flushExplicitly();
-    setToast('Đã lưu thay đổi lên máy chủ.');
+    if (await flushExplicitly()) setToast('Đã lưu thay đổi lên máy chủ.');
   };
   const confirmPrediction = async () => {
     canvasRef.current?.acceptPrediction();
@@ -463,12 +500,10 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     selectTool('select', 'mask');
   };
   const continueToBreakpoints = async () => {
-    await flushExplicitly();
-    openBreakpointStep();
+    await selectTool('point', 'warts');
   };
   const returnToMaskStep = async () => {
-    await flushExplicitly();
-    openMaskStep();
+    await selectTool(tool === 'point' ? 'pan' : tool, 'mask');
   };
   const completePolygon = async () => {
     if (!canvasRef.current?.completePolygon()) return;
@@ -493,10 +528,10 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const breakpointCount = snapshot.breakpoints.points.length;
   const breakpointConfirmed = snapshot.breakpoints.state !== 'NOT_ANNOTATED';
   const breakpointStatus = snapshot.breakpoints.state === 'CONFIRMED_NONE'
-    ? 'Đã xác nhận không có điểm ngắt'
+    ? 'Đã xác nhận không có point u vấu'
     : breakpointCount > 0
-      ? `Đã đánh dấu ${breakpointCount} điểm ngắt`
-      : 'Chưa đánh dấu điểm ngắt';
+      ? `Đã đánh dấu ${breakpointCount} point u vấu`
+      : 'Chưa đánh dấu point u vấu';
   const initials = displayName.split(/\s+/).filter(Boolean).slice(-2).map((part) => part[0]).join('').toUpperCase() || 'U';
 
   return (
@@ -514,21 +549,20 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
             </div>
           </div>
           <button className="sidebar-primary-button" onClick={() => void goBack()}><Icon name="files" /><span className="sidebar-label">Hàng đợi tệp</span></button>
-          <nav className="workspace-nav" aria-label="Điều hướng tác vụ">
-            <p className="sidebar-label">Quy trình</p>
-            <button className={workspaceStep === 'mask' ? 'active' : ''} title="Vùng chọn" onClick={() => void returnToMaskStep()}>
-              <span className="nav-step">1</span>
-              <span className="sidebar-label"><strong>Vùng chọn</strong><small>{maskConfirmed ? 'Đã xác nhận' : 'Đang thực hiện'}</small></span>
-            </button>
-            <button className={workspaceStep === 'breakpoints' ? 'active' : ''} title="Điểm ngắt" onClick={() => void continueToBreakpoints()}>
-              <span className="nav-step">2</span>
-              <span className="sidebar-label"><strong>Điểm ngắt</strong><small>{breakpointConfirmed ? 'Đã xác nhận' : 'Chưa hoàn tất'}</small></span>
-            </button>
+          <nav className="file-queue" aria-label="Danh sách tệp">
+            {queueError ? <p role="status">{queueError}</p> : null}
+            {queue.map((file) => <button key={file.id} aria-current={file.id === fileId ? 'page' : undefined}
+              disabled={navigating || status === 'SYNCING' || file.assetState === 'ERROR'} title={file.externalKey}
+              onClick={() => { if (file.id !== fileId) void navigateTo(`/editor/${file.id}`); }}>
+              <strong>{file.externalKey}</strong>
+              <small>{file.id === fileId ? (readOnly ? 'Đang xem' : 'Đang sửa') : file.lock.state === 'LOCKED' ? `Chỉ xem · ${file.lock.displayName}` : file.assetState === 'ERROR' ? 'Thiếu dữ liệu' : 'Có thể làm'}</small>
+              <span>{({ UNSTARTED: 'Chưa làm', DRAFT: 'Bản nháp', DONE: 'Hoàn tất' })[file.annotationState]}</span>
+            </button>)}
           </nav>
-          <div className="queue-card" title={bootstrap.file.externalKey}>
-            <p className="sidebar-label">Tệp hiện tại</p>
-            <div><span className="queue-dot" /><strong className="sidebar-label">{bootstrap.file.externalKey}</strong></div>
-            <small className="sidebar-label">{bootstrap.file.width} × {bootstrap.file.height}px</small>
+          <div className="queue-pagination sidebar-label">
+            <button disabled={queuePage === 1} onClick={() => setQueuePage((page) => page - 1)}>‹</button>
+            <span>{queuePage} / {Math.max(1, Math.ceil(queueTotal / 50))}</span>
+            <button disabled={queuePage * 50 >= queueTotal} onClick={() => setQueuePage((page) => page + 1)}>›</button>
           </div>
           <div className="sidebar-account-area">
             <button className="help-button" title="Trợ giúp và phím tắt (?)" onClick={() => setHelpOpen(true)}><span>?</span><span className="sidebar-label"><strong>Trợ giúp phím tắt</strong><small>Xem phím tắt &amp; hướng dẫn</small></span></button>
@@ -543,8 +577,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         <section className="editor-main">
           <div className="canvas-statusbar">
             <span className="canvas-file"><span className="queue-dot" />{bootstrap.file.externalKey}</span>
-            <SaveIndicator status={status} />
-            <button disabled={status === 'SYNCING'} onClick={() => void saveExplicitly()}>Lưu</button>
+            {readOnly ? <span className="save-indicator">Chỉ xem · {bootstrap.lockedBy || 'Khóa không thuộc phiên này'}</span> : <SaveIndicator status={status} />}
+            <button disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} onClick={() => void saveExplicitly()}>Lưu</button>
           </div>
           {workspaceStep === 'mask' ? <button className={`layer-toggle ${showMask ? 'active' : ''}`} title={showMask ? 'Ẩn lớp phủ' : 'Hiện lớp phủ'} onClick={() => setShowMask((visible) => !visible)}><Icon name="layers" /> <span>{showMask ? 'Lớp phủ đang bật' : 'Lớp phủ đang ẩn'}</span></button> : null}
 
@@ -554,27 +588,27 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               <span>{Math.round(zoom * 100)}%</span>
               <button aria-label="Thu nhỏ" title="Thu nhỏ" onClick={() => canvasRef.current?.zoomBy(1 / 1.2)}>−</button>
             </div>
-            <div className="floating-toolbar" aria-label="Công cụ chú thích">
+            <fieldset className="floating-toolbar" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} aria-label="Công cụ chú thích">
               <ToolbarButton active={tool === 'select'} label="Chọn / chỉnh sửa (V)" icon="cursor" onClick={() => selectTool('select', 'mask')} />
               <ToolbarButton active={tool === 'pan'} label="Di chuyển ảnh (H)" icon="hand" onClick={() => selectTool('pan')} />
               <ToolbarButton active={tool === 'polygon'} label="Vẽ polygon (P)" icon="polygon" onClick={() => selectTool('polygon', 'mask')} />
-              <ToolbarButton active={tool === 'point'} label="Đánh dấu điểm ngắt (M)" icon="pin" onClick={() => selectTool('point', 'breakpoints')} />
+              <ToolbarButton active={tool === 'point'} label="Đánh dấu point u vấu (M)" icon="pin" onClick={() => selectTool('point', 'warts')} />
               <ToolbarButton active={tool === 'cut'} label="Cắt polygon" icon="scissors" onClick={() => selectTool('cut', 'mask')} />
               <ToolbarButton disabled={selectedPolygonIds.length < 2} label="Gộp polygon đã chọn" icon="merge" onClick={() => canvasRef.current?.groupSelectedPolygons()} />
               <span className="toolbar-divider" />
               <ToolbarButton label="Hoàn tác (Ctrl + Z)" icon="undo" onClick={() => canvasRef.current?.undo()} />
               <ToolbarButton label="Làm lại (Ctrl + Y)" icon="redo" onClick={() => canvasRef.current?.redo()} />
               <span className="toolbar-divider" />
-              <ToolbarButton label="Xóa lựa chọn (Delete)" icon="trash" danger onClick={() => workspaceStep === 'breakpoints' ? canvasRef.current?.deleteSelectedPoint() : canvasRef.current?.deleteSelection()} />
+              <ToolbarButton label="Xóa lựa chọn (Delete)" icon="trash" danger onClick={() => workspaceStep === 'warts' ? canvasRef.current?.deleteSelectedPoint() : canvasRef.current?.deleteSelection()} />
               <ToolbarButton label="Vừa khung hình" icon="fit" onClick={() => canvasRef.current?.fit()} />
-            </div>
+            </fieldset>
           </div>
 
           <EditorCanvas key={seed.key} ref={canvasRef} width={bootstrap.file.width} height={bootstrap.file.height}
             imageUrl={bootstrap.assets.imageUrl} predictionUrl={bootstrap.assets.predictionMaskUrl}
             currentMaskUrl={bootstrap.assets.currentMaskUrl} localMaskBlob={seed.localMaskBlob}
             initialHumanAction={seed.humanAction} initialBreakpoints={seed.breakpoints} initialOperations={seed.operations}
-            tool={tool} maskOpacity={opacity} showMask={showMask}
+            readOnly={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} tool={readOnly ? 'pan' : tool} maskOpacity={opacity} showMask={showMask}
             onChange={onEditorChange} onSelectionChange={setSelectedPolygonIds} onReady={onCanvasReady} onMessage={setToast} onZoomChange={setZoom} />
         </section>
 
@@ -584,25 +618,13 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
             <button role="tab" aria-selected={workspaceStep === 'mask'} className={workspaceStep === 'mask' ? 'active' : maskConfirmed ? 'complete' : ''} onClick={() => void returnToMaskStep()}>
               <span>{maskConfirmed ? '✓' : '1'}</span> Vùng chọn
             </button>
-            <button role="tab" aria-selected={workspaceStep === 'breakpoints'} className={workspaceStep === 'breakpoints' ? 'active' : breakpointConfirmed ? 'complete' : ''} onClick={() => void continueToBreakpoints()}>
-              <span>{breakpointConfirmed ? '✓' : '2'}</span> Điểm ngắt
+            <button role="tab" aria-selected={workspaceStep === 'warts'} className={workspaceStep === 'warts' ? 'active' : breakpointConfirmed ? 'complete' : ''} onClick={() => void continueToBreakpoints()}>
+              <span>{breakpointConfirmed ? '✓' : '2'}</span> Mật độ u vấu
             </button>
           </div>
 
-          <div className="control-panel-scroll">
+          <fieldset className="control-panel-scroll" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating}>
             {workspaceStep === 'mask' ? <>
-              <section className="instruction-block">
-                <h2>Hướng dẫn</h2>
-                {tool === 'select'
-                  ? <p>Chuột phải trong polygon để chọn toàn bộ node; giữ và kéo chuột phải để di chuyển cả vùng. Shift/Ctrl + chuột phải chọn thêm polygon để Merge hoặc kéo cả nhóm.</p>
-                  : tool === 'polygon'
-                    ? <p>Nhấp để vẽ polygon mới. Nhấp đúp hoặc nhấn <kbd>Enter</kbd> để hoàn tất.</p>
-                    : tool === 'cut'
-                      ? <p>Kéo một đường qua polygon đã chọn, sau đó nhấn <kbd>Enter</kbd> để cắt.</p>
-                      : <p>Chọn một công cụ trên thanh nổi để bắt đầu chỉnh sửa.</p>}
-                {tool === 'polygon' ? <div className="context-actions"><button className="button primary" onClick={() => void completePolygon()}>Hoàn tất polygon</button><button className="button ghost" onClick={() => canvasRef.current?.cancelCurrentPath()}>Hủy</button></div> : null}
-                {tool === 'cut' ? <button className="button primary wide" onClick={() => void applyCut()}>Thực hiện cắt</button> : null}
-              </section>
               {snapshot.humanAction === 'UNTOUCHED' && polygonCount === 0 ? <section className="decision-card">
                 <h2>Mask ban đầu đã sẵn sàng</h2>
                 <p>Giữ nguyên nếu mask đã đúng, hoặc chuyển sang polygon để chỉnh sửa trực tiếp trên cùng một lớp.</p>
@@ -611,6 +633,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               </section> : null}
 
               <section className="object-section">
+                {tool === 'polygon' ? <button className="button primary" onClick={() => void completePolygon()}>Hoàn tất polygon</button> : null}
+                {tool === 'cut' ? <button className="button primary" onClick={() => void applyCut()}>Thực hiện cắt</button> : null}
                 <div className="section-title-row"><p>Thông tin đối tượng</p><span>{polygonCount} vùng</span></div>
                 <PolygonLabelEditor
                   key={`${selectedPolygonIds.join(',')}:${selectedPolygons.map((polygon) => polygon.label).join(',')}`}
@@ -629,30 +653,25 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
 
               <button className="restore-button" onClick={() => canvasRef.current?.resetToPrediction()}>↻ Khôi phục mask ban đầu</button>
             </> : <>
-              <section className="instruction-block">
-                <h2>Hướng dẫn</h2>
-                <p>Nhấp vào ảnh để đánh dấu từng điểm ngắt của gờ. Kéo điểm để điều chỉnh vị trí, hoặc chọn điểm rồi nhấn Delete để xóa.</p>
-              </section>
-
-              <section className="breakpoint-card">
+              <section className="breakpoint-card"><h2>Mật độ u vấu</h2><p>Click vào tâm mỗi u vấu để tạo point. Kéo để chỉnh vị trí; chọn rồi nhấn Delete để xóa.</p>
                 <div className="breakpoint-status"><span>Trạng thái</span><strong className={breakpointConfirmed ? 'complete' : ''}><i />{breakpointStatus}</strong></div>
-                <button className={`button secondary wide ${tool === 'point' ? 'selected' : ''}`} onClick={() => selectTool('point', 'breakpoints')}>＋ Thêm điểm</button>
+                <button className={`button secondary wide ${tool === 'point' ? 'selected' : ''}`} onClick={() => selectTool('point', 'warts')}>＋ Thêm điểm</button>
                 <button className="button ghost wide" onClick={() => canvasRef.current?.deleteSelectedPoint()}>Xóa điểm đang chọn <kbd>Delete</kbd></button>
               </section>
 
               <button className={`no-breakpoint-option ${snapshot.breakpoints.state === 'CONFIRMED_NONE' ? 'selected' : ''}`} onClick={() => void confirmNoBreakpoint()}>
                 <span aria-hidden="true">{snapshot.breakpoints.state === 'CONFIRMED_NONE' ? '✓' : ''}</span>
-                <span><strong>Không có điểm ngắt trong ảnh này</strong><small>Kiểm tra kỹ bề mặt trước khi xác nhận</small></span>
+                <span><strong>Không có u vấu trong ảnh này</strong><small>Kiểm tra kỹ bề mặt trước khi xác nhận</small></span>
               </button>
             </>}
-          </div>
+          </fieldset>
           <div className="panel-actions">
           {workspaceStep === 'mask' ? <>
             <button className="button ghost" onClick={() => void goBack()}>‹ Quay lại</button>
-            <button className="button primary" disabled={!ready} onClick={() => void continueToBreakpoints()}>Tiếp tục đến Điểm ngắt <span aria-hidden="true">›</span></button>
+            <button className="button primary" disabled={!ready} onClick={() => void continueToBreakpoints()}>Tiếp tục đến Mật độ u vấu <span aria-hidden="true">›</span></button>
           </> : <>
             <button className="button ghost" onClick={() => void returnToMaskStep()}>Quay lại Vùng chọn</button>
-            <button className="button primary" disabled={!ready || status === 'SYNCING'} onClick={() => void finish()}>Hoàn tất &amp; Tiếp theo <span aria-hidden="true">→</span></button>
+            <button className="button primary" disabled={readOnly || !ready || status === 'SYNCING' || status === 'CONFLICT' || navigating} onClick={() => void finish()}>Hoàn tất &amp; Tiếp theo <span aria-hidden="true">→</span></button>
           </>}
           </div>
         </aside>}
@@ -662,7 +681,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       {helpOpen ? <div className="modal-backdrop help-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><section className="shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-title">
         <div className="shortcut-header"><div><span className="help-mark">?</span><span><h2 id="shortcut-title">Trợ giúp &amp; phím tắt</h2><p>Thao tác nhanh hơn trên vùng chú thích</p></span></div><button aria-label="Đóng trợ giúp" onClick={() => setHelpOpen(false)}>×</button></div>
         <div className="shortcut-content">
-          <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" /><Shortcut keys={['M']} label="Đánh dấu điểm ngắt" /><Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'Z']} label="Hoàn tác" /><Shortcut keys={['Ctrl', 'Y']} label="Làm lại" /></section>
+          <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" /><Shortcut keys={['M']} label="Đánh dấu point u vấu" /><Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'Z']} label="Hoàn tác" /><Shortcut keys={['Ctrl', 'Y']} label="Làm lại" /></section>
           <section className="usage-tips"><h3>Mẹo sử dụng</h3><p><Icon name="cursor" />Ở chế độ V, kéo khung qua các node để chọn nhiều polygon.</p><p><Icon name="polygon" />Chế độ P chỉ dùng để vẽ một polygon mới.</p><p><Icon name="layers" />Ẩn lớp phủ khi cần quan sát ảnh gốc.</p><p><Icon name="hand" />Dùng con lăn để zoom; Shift + con lăn để cuộn ngang.</p></section>
         </div>
       </section></div> : null}
@@ -673,7 +692,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         <div className="conflict-actions">
           <button className="button secondary" onClick={() => setConflictMinimized(true)}>Xem bản của tôi</button>
           <button className="button secondary" onClick={() => void showLatest()}>Bỏ bản của tôi, xem bản mới nhất</button>
-          <button className="button primary" onClick={() => void saveConflictAsVersion()}>Lưu bản của tôi thành phiên bản mới</button>
+          <button className="button primary" onClick={() => downloadConflict()}>Tải bản nháp về máy</button>
         </div>
       </div></div> : null}
     </main>
@@ -778,6 +797,6 @@ function PolygonLabelEditor({
 }
 
 function SaveIndicator({ status }: { status: SaveStatus }) {
-  const copy = { SAVED: 'Đã đồng bộ', SAVING: 'Đã lưu cục bộ · đồng bộ ≤30s', OFFLINE: 'Ngoại tuyến · đã lưu cục bộ', SYNCING: 'Đang đồng bộ…', CONFLICT: 'Có xung đột' };
+  const copy = { LOCAL: 'Đã lưu local · chưa gửi server', SAVED: 'Đã lưu server', SAVING: 'Có thay đổi · lưu local mỗi 30s', OFFLINE: 'Ngoại tuyến · chưa gửi server', SYNCING: 'Đang lưu server…', CONFLICT: 'Chỉ xem · có xung đột' };
   return <span className={`save-indicator ${status.toLowerCase()}`}><i aria-hidden="true" />{copy[status]}</span>;
 }
