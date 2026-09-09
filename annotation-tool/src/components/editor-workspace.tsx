@@ -45,6 +45,15 @@ interface EditorSeed {
 
 const emptyBreakpoints: BreakpointAnnotation = { state: 'NOT_ANNOTATED', points: [] };
 
+// So sanh noi dung ban nhap tren thiet bi voi du lieu may chu. Chenh lech revision
+// khong dong nghia voi xung dot: neu noi dung y het nhau thi ban nhap chi la rac con
+// sot lai tu phien truoc, khong can hoi nguoi dung.
+function draftMatchesServerSeed(draft: LocalDraft, seed: EditorSeed) {
+  if (draft.humanAction !== seed.humanAction) return false;
+  if (JSON.stringify(draft.maskOperations ?? []) !== JSON.stringify(seed.operations)) return false;
+  return JSON.stringify(draft.wartPoints ?? emptyBreakpoints) === JSON.stringify(seed.breakpoints);
+}
+
 function polygonsFromOperations(operations: MaskOperation[]): AnnotationPolygon[] {
   const polygonOperation = [...operations].reverse().find((operation) => operation.type === 'POLYGON_SET');
   return polygonOperation?.type === 'POLYGON_SET' ? polygonOperation.polygons : [];
@@ -205,10 +214,14 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         if (!canEdit) setToast(`Chỉ xem · ${data.lockedBy || 'Phiên khác'} đang chỉnh sửa.`);
         revisionRef.current = lock?.baseRevision ?? data.annotation?.revision ?? 0;
         legacyBreakpointsRef.current = data.annotation?.breakpoints ?? emptyBreakpoints;
-        const local = canEdit ? await getLocalDraft(data.file.projectId, fileId, userId) : undefined;
-        if (cancelled) return;
-        if (local && local.syncState !== 'SYNCED') legacyBreakpointsRef.current = local.breakpoints;
         const serverSeed = createServerSeed(data);
+        let local = canEdit ? await getLocalDraft(data.file.projectId, fileId, userId) : undefined;
+        if (cancelled) return;
+        if (local && local.syncState !== 'SYNCED' && draftMatchesServerSeed(local, serverSeed)) {
+          await deleteLocalDraft(data.file.projectId, fileId, userId).catch(() => undefined);
+          local = undefined;
+        }
+        if (local && local.syncState !== 'SYNCED') legacyBreakpointsRef.current = local.breakpoints;
         setBootstrap(data);
 
         if (local && local.baseServerRevision === revisionRef.current && local.syncState !== 'SYNCED') {
@@ -249,6 +262,13 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     return () => { cancelled = true; };
   }, [createServerSeed, fileId, userId]);
 
+  // Ban nhap chi nen mang co DIRTY khi that su con thay doi chua gui len may chu.
+  // Neu da dong bo xong ma van ghi DIRTY thi lan mo file sau se bao xung dot gia.
+  const pendingSyncState = useCallback((): SyncState => {
+    if (conflictRef.current) return 'CONFLICT';
+    return dirtyVersionRef.current === syncedVersionRef.current ? 'SYNCED' : 'DIRTY';
+  }, []);
+
   const persistLocal = useCallback(async (syncState: SyncState = 'DIRTY') => {
     if (!bootstrap || readOnly || transitioningFileRef.current) return;
     const current = snapshotRef.current;
@@ -275,7 +295,13 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       return false;
     }
     if (syncPromiseRef.current) return syncPromiseRef.current;
-    if (dirtyVersionRef.current === syncedVersionRef.current) return true;
+    if (dirtyVersionRef.current === syncedVersionRef.current) {
+      // Khong con gi de gui, nhung ban nhap tren thiet bi co the dang mang co DIRTY
+      // do persistLocal duoc goi truoc do (navigateTo, pagehide). Danh dau SYNCED lai
+      // de lan mo file sau khong bi coi la xung dot gia.
+      await persistLocal('SYNCED').catch(() => undefined);
+      return true;
+    }
 
     const syncingVersion = dirtyVersionRef.current;
     const task = (async () => {
@@ -348,7 +374,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     }, 30_000);
     const onOffline = () => setStatus('OFFLINE');
     const onOnline = () => { if (!conflictRef.current) setStatus('SAVING'); };
-    const onPageHide = () => { void persistLocal(conflictRef.current ? 'CONFLICT' : 'DIRTY'); };
+    const onPageHide = () => { void persistLocal(pendingSyncState()); };
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden' && !transitioningFileRef.current) void syncNow();
     };
@@ -361,13 +387,13 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [bootstrap, fileId, persistLocal, readOnly, syncNow, userId]);
+  }, [bootstrap, fileId, pendingSyncState, persistLocal, readOnly, syncNow, userId]);
 
   const navigateTo = async (destination: string) => {
     if (transitioningFileRef.current || navigating) return;
     setNavigating(true);
     if (!readOnly) {
-      await persistLocal('DIRTY').catch(() => undefined);
+      await persistLocal(pendingSyncState()).catch(() => undefined);
       if (!await syncNow()) {
         setToast('Chưa lưu được lên máy chủ. Hãy xử lý lỗi trước khi đổi tệp.');
         setNavigating(false);
@@ -477,9 +503,9 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
 
   const flushExplicitly = useCallback(async () => {
     if (readOnly) return true;
-    await persistLocal('DIRTY').catch(() => undefined);
+    await persistLocal(pendingSyncState()).catch(() => undefined);
     return syncNow();
-  }, [persistLocal, readOnly, syncNow]);
+  }, [pendingSyncState, persistLocal, readOnly, syncNow]);
 
   const selectTool = useCallback(async (nextTool: EditorTool, nextStep = workspaceStep) => {
     if (navigating || status === 'SYNCING') return;
