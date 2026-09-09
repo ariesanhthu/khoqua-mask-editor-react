@@ -39,6 +39,7 @@ export interface AnnotationPolygonMeta {
   corridorId?: string | number;
   primitiveId?: string | number;
   source?: 'model' | 'human';
+  locked?: boolean;
 }
 
 export interface AnnotationPolygon {

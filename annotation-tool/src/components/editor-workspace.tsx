@@ -24,6 +24,7 @@ import {
   uploadMask,
 } from '@/lib/api-client';
 import { deleteLocalDraft, draftKey, getLocalDraft, putLocalDraft } from '@/lib/local-drafts';
+import { labelsForKind, nextLabel, polygonLabelKind, type PolygonLabelKind } from '@/lib/polygon-labels';
 import EditorCanvas, {
   type EditorCanvasHandle,
   type EditorHistoryState,
@@ -529,11 +530,6 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const maskConfirmed = snapshot.humanAction !== 'UNTOUCHED';
   const polygonCount = snapshot.polygons.length;
   const selectedPolygons = snapshot.polygons.filter((polygon) => selectedPolygonIds.includes(polygon.id));
-  const availableLabels = [...new Set([
-    'main_flesh_band',
-    'wart_flesh',
-    ...snapshot.polygons.map((polygon) => polygon.label).filter(Boolean),
-  ])];
   /* Wart task temporarily hidden.
   const breakpointCount = snapshot.breakpoints.points.length;
   const breakpointConfirmed = snapshot.breakpoints.state !== 'NOT_ANNOTATED';
@@ -650,21 +646,23 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
                 <p aria-live="polite">{history.local
                   ? 'Đang sửa polygon: Ctrl+Z hoàn tác điểm; Ctrl+Y hoặc Ctrl+Shift+Z làm lại. Enter để hoàn tất, Esc để hủy. Undo/redo màu tím áp dụng cục bộ.'
                   : 'Ctrl+Z hoàn tác toàn cục; Ctrl+Y hoặc Ctrl+Shift+Z làm lại. Polygon vừa hoàn tất được hoàn tác/làm lại cả vùng.'}</p>
-                <p>Di chuột lên điểm để hiện dấu × đỏ, bấm chuột phải để xóa điểm. Polygon đã đóng cần ít nhất 3 điểm.</p>
+                <p>{tool === 'cut'
+                  ? 'Kéo qua hai biên polygon rồi thả chuột để tự nhận diện và tách. Chuột phải chọn/bỏ chọn polygon; Enter hoặc “Thực hiện cắt” áp dụng đường cắt đang giữ. Polygon khóa không bị cắt.'
+                  : 'Di chuột lên điểm để hiện dấu × đỏ, bấm chuột phải để xóa điểm. Polygon đã đóng cần ít nhất 3 điểm.'}</p>
                 {tool === 'polygon' ? <button className="button primary" onClick={() => void completePolygon()}>Hoàn tất polygon</button> : null}
                 {tool === 'cut' ? <button className="button primary" onClick={() => void applyCut()}>Thực hiện cắt</button> : null}
                 <div className="section-title-row"><p>Thông tin đối tượng</p><span>{polygonCount} vùng</span></div>
                 <PolygonLabelEditor
-                  key={`${selectedPolygonIds.join(',')}:${selectedPolygons.map((polygon) => polygon.label).join(',')}`}
+                  key={`${selectedPolygonIds.join(',')}:${selectedPolygons.map((polygon) => `${polygon.label}:${Boolean(polygon.meta?.locked)}`).join(',')}`}
                   polygons={snapshot.polygons}
                   selectedPolygons={selectedPolygons}
-                  availableLabels={availableLabels}
                   onSelect={(polygonId) => {
                     canvasRef.current?.selectPolygon(polygonId);
                     selectTool('select', 'mask');
                   }}
-                  onApply={(label) => canvasRef.current?.updateSelectedPolygonLabel(label) || false}
+                  onApply={(label, kind) => canvasRef.current?.updateSelectedPolygonLabel(label, kind) || false}
                   onGroup={() => canvasRef.current?.groupSelectedPolygons() || false}
+                  onToggleLock={() => canvasRef.current?.toggleSelectedPolygonLock() || false}
                 />
                 <label className="range-field"><span>Độ mờ <strong>{Math.round(opacity * 100)}%</strong></span><input type="range" min="0.1" max="1" step="0.05" value={opacity} onChange={(event) => { const value = Number(event.target.value); setOpacity(value); localStorage.setItem('mask-opacity', String(value)); }} /></label>
               </section>
@@ -756,17 +754,17 @@ function Icon({ name }: { name: IconName }) {
 }
 
 function PolygonLabelEditor({
-  availableLabels,
   onApply,
   onGroup,
   onSelect,
+  onToggleLock,
   polygons,
   selectedPolygons,
 }: {
-  availableLabels: string[];
-  onApply(label: string): boolean;
+  onApply(label: string, kind: PolygonLabelKind): boolean;
   onGroup(): boolean;
   onSelect(polygonId: string): void;
+  onToggleLock(): boolean;
   polygons: AnnotationPolygon[];
   selectedPolygons: AnnotationPolygon[];
 }) {
@@ -774,41 +772,68 @@ function PolygonLabelEditor({
     && selectedPolygons.every((polygon) => polygon.label === selectedPolygons[0].label)
     ? selectedPolygons[0].label
     : '';
-  const [label, setLabel] = useState(sharedLabel);
   const selectedId = selectedPolygons.length === 1 ? selectedPolygons[0].id : '';
+  const selectedKind = selectedPolygons.length > 0
+    && selectedPolygons.every((polygon) => polygonLabelKind(polygon) === polygonLabelKind(selectedPolygons[0]))
+    ? polygonLabelKind(selectedPolygons[0])
+    : null;
+  const ridgeLabels = labelsForKind(polygons, 'ridge');
+  const wartLabels = labelsForKind(polygons, 'wart');
+  const [activeKind, setActiveKind] = useState<PolygonLabelKind | null>(selectedKind);
+  const selectedPolygon = selectedPolygons.length === 1 ? selectedPolygons[0] : null;
+
+  const assign = (label: string, kind: PolygonLabelKind) => {
+    if (label && selectedPolygons.length) onApply(label, kind);
+  };
 
   return (
-    <form className="polygon-label-editor" onSubmit={(event) => {
-      event.preventDefault();
-      onApply(label);
-    }}>
+    <div className="polygon-label-editor">
       <div className="polygon-label-heading">
         <div><span aria-hidden="true">◆</span><strong>Label polygon</strong></div>
         <small>{selectedPolygons.length ? `${selectedPolygons.length} đang chọn` : 'Chưa chọn vùng'}</small>
       </div>
-      <label>
-        <span>Polygon ID</span>
-        <select value={selectedId} onChange={(event) => event.target.value && onSelect(event.target.value)}>
-          <option value="">{selectedPolygons.length > 1 ? `${selectedPolygons.length} polygon đang chọn` : 'Chọn polygon theo ID…'}</option>
-          {polygons.map((polygon, index) => (
-            <option key={polygon.id} value={polygon.id}>#{index + 1} · {polygon.id.slice(0, 8)} · {polygon.label}</option>
-          ))}
-        </select>
-      </label>
-      <label>
-        <span>Label</span>
-        <input
-          list="polygon-label-options"
-          maxLength={80}
-          placeholder="Chọn label cũ hoặc nhập label mới…"
-          value={label}
-          onChange={(event) => setLabel(event.target.value)}
-        />
-        <datalist id="polygon-label-options">
-          {availableLabels.map((option) => <option key={option} value={option} />)}
-        </datalist>
-      </label>
-      <button className="button label-apply" disabled={!selectedPolygons.length || !label.trim()}>Áp dụng label</button>
+      <div className="polygon-selection-row">
+        <label>
+          <span>Polygon</span>
+          <select value={selectedId} onChange={(event) => event.target.value && onSelect(event.target.value)}>
+            <option value="">{selectedPolygons.length > 1 ? `${selectedPolygons.length} polygon đang chọn` : 'Chọn polygon…'}</option>
+            {polygons.map((polygon, index) => (
+              <option key={polygon.id} value={polygon.id}>#{index + 1} · {polygon.label}</option>
+            ))}
+          </select>
+        </label>
+        {selectedPolygon ? <button
+          type="button"
+          className={`polygon-lock ${selectedPolygon.meta?.locked ? 'locked' : ''}`}
+          aria-pressed={selectedPolygon.meta?.locked === true}
+          title={selectedPolygon.meta?.locked ? 'Mở khóa polygon' : 'Khóa polygon'}
+          onClick={onToggleLock}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="5" y="10" width="14" height="11" rx="2" />
+            <path d={selectedPolygon.meta?.locked ? 'M8 10V7a4 4 0 0 1 8 0v3' : 'M8 10V7a4 4 0 0 1 7.5-2'} />
+            <path d="M12 14v3" />
+          </svg>
+          {selectedPolygon.meta?.locked ? 'Đã khóa' : 'Khóa'}
+        </button> : null}
+      </div>
+      <div className="label-kind-choice" role="group" aria-label="Chọn loại label">
+        <button type="button" className={activeKind === 'ridge' ? 'active ridge' : ''} onClick={() => setActiveKind('ridge')}>
+          <span aria-hidden="true">R</span><strong>Vết gợn</strong>
+        </button>
+        <button type="button" className={activeKind === 'wart' ? 'active wart' : ''} onClick={() => setActiveKind('wart')}>
+          <span aria-hidden="true">W</span><strong>U vấu</strong>
+        </button>
+      </div>
+      {activeKind ? <LabelGroup
+        kind={activeKind}
+        title={activeKind === 'ridge' ? 'Vết gợn' : 'U vấu'}
+        labels={activeKind === 'ridge' ? ridgeLabels : wartLabels}
+        value={selectedKind === activeKind ? sharedLabel : ''}
+        disabled={!selectedPolygons.length || selectedPolygons.some((polygon) => polygon.meta?.locked)}
+        onAssign={assign}
+        onCreate={() => assign(nextLabel(polygons, activeKind), activeKind)}
+      /> : <p className="label-kind-hint">Chọn loại label trước, sau đó chọn ID hoặc tạo mới.</p>}
       <button
         type="button"
         className="button polygon-group"
@@ -817,8 +842,42 @@ function PolygonLabelEditor({
       >
         {selectedPolygons.length >= 2 ? `Gộp ${selectedPolygons.length} polygon` : 'Gộp polygon'}
       </button>
-    </form>
+    </div>
   );
+}
+
+function LabelGroup({
+  disabled,
+  kind,
+  labels,
+  onAssign,
+  onCreate,
+  title,
+  value,
+}: {
+  disabled: boolean;
+  kind: PolygonLabelKind;
+  labels: string[];
+  onAssign(label: string, kind: PolygonLabelKind): void;
+  onCreate(): void;
+  title: string;
+  value: string;
+}) {
+  return <section className={`polygon-label-group ${kind}`}>
+    <div><strong>{title}</strong><small>{kind === 'ridge' ? 'r1, r2, r3…' : 'w1, w2, w3…'}</small></div>
+    <div className="polygon-label-controls">
+      <select
+        aria-label={`Chọn label ${title}`}
+        disabled={disabled || labels.length === 0}
+        value={value}
+        onChange={(event) => onAssign(event.target.value, kind)}
+      >
+        <option value="">{labels.length ? 'Chọn label…' : 'Chưa có label'}</option>
+        {labels.map((label) => <option key={label} value={label}>{label}</option>)}
+      </select>
+      <button type="button" className="button label-create" disabled={disabled} onClick={onCreate}>＋ Tạo mới</button>
+    </div>
+  </section>;
 }
 
 function SaveIndicator({ status }: { status: SaveStatus }) {

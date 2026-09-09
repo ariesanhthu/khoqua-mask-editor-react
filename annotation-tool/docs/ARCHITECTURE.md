@@ -165,6 +165,8 @@ Annotation cũ không có `wartPoints` mở ra với nhiệm vụ u vấu chưa 
 | `manifest.jsonl` | 0 bản ghi; modified `2026-09-08T05:37:38.370Z` |
 | Nội dung khác ở thư mục gốc | `breakpoints.jsonl`, `masks/`, `DATASET/` |
 
+Prelabel production dùng schema `bitter-melon-prelabel-1.1`: vết gợn mang label `r1`, `r2`, … và u vấu mang label `w1`, `w2`, … theo từng instance. Quy tắc mapping và thao tác UI được mô tả tại [`docs/prelabel-instance-labels.md`](../../docs/prelabel-instance-labels.md).
+
 **Nguyên nhân được xác định trong code cũ:** export lọc `df.annotation_state = 'DONE'`, trong khi toàn bộ annotation server đang là DRAFT. Vì vậy bấm Drive không đưa 10 bản nháp lên manifest. Không phải lỗi thiếu quyền ghi ở lần kiểm tra này. Thông tin trên là snapshot, không phải giám sát realtime.
 
 Các sửa đổi local:

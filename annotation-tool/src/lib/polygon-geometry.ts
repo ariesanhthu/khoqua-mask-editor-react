@@ -414,3 +414,26 @@ export function splitPolygonWithCut(polygon: AnnotationPolygon, cutPath: Polygon
     ],
   };
 }
+
+/** Resolve a manual target, or require exactly one editable polygon that the path can split. */
+export function resolvePolygonCut(
+  polygons: AnnotationPolygon[],
+  cutPath: PolygonNode[],
+  manualTargetId: string | null = null,
+): SplitPolygonResult & { targetId?: string } {
+  if (manualTargetId) {
+    const target = polygons.find((polygon) => polygon.id === manualTargetId);
+    if (!target) return { error: 'Polygon đã chọn không còn tồn tại. Hãy chọn lại.' };
+    if (target.meta?.locked) return { error: 'Polygon đang khóa. Mở khóa trước khi cắt.' };
+    return { ...splitPolygonWithCut(target, cutPath), targetId: target.id };
+  }
+  let candidate: (SplitPolygonResult & { targetId: string }) | undefined;
+  for (const polygon of polygons) {
+    if (polygon.meta?.locked) continue;
+    const result = splitPolygonWithCut(polygon, cutPath);
+    if (!result.polygons) continue;
+    if (candidate) return { error: 'Đường cắt đi qua nhiều polygon. Chuột phải chọn một polygon, rồi nhấn Enter để cắt.' };
+    candidate = { ...result, targetId: polygon.id };
+  }
+  return candidate ?? { error: 'Chưa nhận diện được polygon để tách. Kéo qua hai biên hoặc chuột phải chọn polygon, rồi nhấn Enter.' };
+}

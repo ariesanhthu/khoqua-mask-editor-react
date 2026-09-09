@@ -21,8 +21,8 @@ export async function loadPrelabelOperations(
     throw new Error('Prelabel JSON phải có kích thước từ 1 byte đến 50 MB.');
   }
   const payload = JSON.parse(new TextDecoder().decode(bytes)) as ProductionPrelabel;
-  if (payload.schemaVersion !== 'bitter-melon-prelabel-1.0' || payload.coordinateSpace !== 'image_pixels') {
-    throw new Error('Prelabel không đúng schema bitter-melon-prelabel-1.0.');
+  if (!['bitter-melon-prelabel-1.0', 'bitter-melon-prelabel-1.1'].includes(payload.schemaVersion) || payload.coordinateSpace !== 'image_pixels') {
+    throw new Error('Prelabel không đúng schema bitter-melon-prelabel-1.0/1.1.');
   }
   if (payload.width !== expectedWidth || payload.height !== expectedHeight) {
     throw new Error('Kích thước prelabel không khớp ảnh nguồn.');
@@ -39,8 +39,14 @@ export async function loadPrelabelOperations(
   const nodeIds = new Set<string>();
   const polygons = operation.polygons.map((value, polygonIndex) => {
     const polygon = value as Partial<AnnotationPolygon>;
+    const legacyId = polygon.label === 'main_flesh_band' ? polygon.meta?.mainGroupId : polygon.meta?.wartId;
+    const normalizedLabel = polygon.label === 'main_flesh_band'
+      ? `r${legacyId}`
+      : polygon.label === 'wart_flesh'
+        ? `w${legacyId}`
+        : polygon.label;
     if (!polygon.id || polygonIds.has(polygon.id) ||
-        !['main_flesh_band', 'wart_flesh'].includes(polygon.label || '') ||
+        !/^(r|w)[1-9]\d*$/.test(normalizedLabel || '') ||
         !Array.isArray(polygon.nodes) || polygon.nodes.length < 3) {
       throw new Error(`Polygon prelabel không hợp lệ tại vị trí ${polygonIndex}.`);
     }
@@ -52,7 +58,7 @@ export async function loadPrelabelOperations(
       }
       nodeIds.add(node.id);
     }
-    return polygon as AnnotationPolygon;
+    return { ...polygon, label: normalizedLabel } as AnnotationPolygon;
   });
 
   return [{ type: 'POLYGON_SET', polygons }];

@@ -6,4 +6,5 @@ annotation-tool/data/
 annotation-tool/annotation-storage/
 annotation-tool/.env*
 !annotation-tool/.env.example
+.vercel/
 *.tsbuildinfo

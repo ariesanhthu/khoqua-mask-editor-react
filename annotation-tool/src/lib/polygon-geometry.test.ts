@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergePolygonsIntoSingle, polygonArea } from './polygon-geometry';
+import { mergePolygonsIntoSingle, polygonArea, resolvePolygonCut } from './polygon-geometry';
 
 const polygon = (id: string, points: Array<[number, number]>, label = 'damage') => ({
   id,
@@ -10,6 +10,52 @@ const polygon = (id: string, points: Array<[number, number]>, label = 'damage') 
 const rectangle = (id: string, left: number, top: number, right: number, bottom: number, label = 'damage') => polygon(id, [
   [left, top], [right, top], [right, bottom], [left, bottom],
 ], label);
+
+describe('resolvePolygonCut', () => {
+  const target = rectangle('target', 10, 10, 30, 30, 'R1');
+  // Both samples are outside: detection must use segment intersections.
+  const path = polygon('cut', [[0, 20], [40, 20]]).nodes;
+
+  it('detects a polygon from an outside-to-outside drag and preserves area and label', () => {
+    const result = resolvePolygonCut([target], path);
+    expect(result.targetId).toBe('target');
+    expect(result.polygons).toHaveLength(2);
+    expect(result.polygons!.reduce((sum, item) => sum + Math.abs(polygonArea(item.nodes)), 0)).toBeCloseTo(400);
+    expect(result.polygons!.every((item) => item.label === 'R1')).toBe(true);
+    expect(target.nodes).toHaveLength(4);
+  });
+
+  it('requires manual selection when multiple polygons can be split', () => {
+    const result = resolvePolygonCut([target, rectangle('other', 12, 12, 28, 28)], path);
+    expect(result.polygons).toBeUndefined();
+    expect(result.error).toContain('nhiều polygon');
+  });
+
+  it('honors a manual target for an ambiguous path', () => {
+    const result = resolvePolygonCut([target, rectangle('other', 12, 12, 28, 28)], path, 'other');
+    expect(result.targetId).toBe('other');
+    expect(result.polygons).toHaveLength(2);
+  });
+
+  it('excludes locked polygons from detection and rejects manual cutting of them', () => {
+    const locked = { ...target, meta: { locked: true } };
+    expect(resolvePolygonCut([locked], path).polygons).toBeUndefined();
+    expect(resolvePolygonCut([locked], path, target.id).error).toContain('đang khóa');
+    expect(resolvePolygonCut([locked, rectangle('other', 12, 12, 28, 28)], path).targetId).toBe('other');
+  });
+
+  it('does not fall back to another polygon when the manual target is invalid', () => {
+    expect(resolvePolygonCut([target], path, 'missing').polygons).toBeUndefined();
+    const missed = rectangle('missed', 50, 50, 70, 70);
+    expect(resolvePolygonCut([target, missed], path, missed.id).polygons).toBeUndefined();
+  });
+
+  it('leaves polygons intact for incomplete or non-crossing paths', () => {
+    for (const points of [[], [[0, 0]], [[0, 0], [40, 0]], [[0, 20], [20, 20]]] as Array<Array<[number, number]>>) {
+      expect(resolvePolygonCut([target], polygon('path', points).nodes).polygons).toBeUndefined();
+    }
+  });
+});
 
 function expectValid(result: ReturnType<typeof mergePolygonsIntoSingle>) {
   expect(result.error).toBeUndefined();

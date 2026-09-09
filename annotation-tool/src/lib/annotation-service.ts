@@ -1,4 +1,5 @@
 import { generateId, getDb, hashToken, nowISO } from './db';
+import { normalizeMaskOperationLabels } from './polygon-labels';
 
 interface SaveResult { revision: number; savedAt: string }
 interface ConflictResult { conflict: true; serverRevision: number }
@@ -104,7 +105,7 @@ export async function getAnnotation(fileId: string): Promise<Record<string, unkn
   return {
     datasetFileId: row.dataset_file_id,
     revision: Number(row.revision),
-    segmentation: JSON.parse(row.segmentation_json as string),
+    segmentation: normalizeStoredSegmentation(JSON.parse(row.segmentation_json as string) as Record<string, unknown>),
     breakpoints: JSON.parse(row.breakpoints_json as string),
     lastEditedBy: row.last_edited_by,
     updatedAt: row.updated_at,
@@ -123,9 +124,9 @@ function normalizeSegmentation(
   previous: Record<string, unknown>,
 ) {
   const maskOperations = Array.isArray(segmentation.maskOperations)
-    ? segmentation.maskOperations
+    ? normalizeMaskOperationLabels(segmentation.maskOperations)
     : Array.isArray(previous.maskOperations)
-      ? previous.maskOperations
+      ? normalizeMaskOperationLabels(previous.maskOperations)
       : undefined;
   return {
     wartPoints: segmentation.wartPoints ?? previous.wartPoints,
@@ -138,4 +139,10 @@ function normalizeSegmentation(
       ? { maskOperations }
       : {}),
   };
+}
+
+function normalizeStoredSegmentation(segmentation: Record<string, unknown>): Record<string, unknown> {
+  return Array.isArray(segmentation.maskOperations)
+    ? { ...segmentation, maskOperations: normalizeMaskOperationLabels(segmentation.maskOperations) }
+    : segmentation;
 }

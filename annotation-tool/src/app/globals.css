@@ -324,6 +324,13 @@ input:focus-visible, select:focus-visible { border-color: var(--accent); box-sha
 .polygon-label-editor .label-apply:disabled { cursor: not-allowed; opacity: .42; }
 .polygon-label-editor .polygon-group { min-height: 34px; margin: 0; padding: 7px 10px; color: var(--text-secondary); background: transparent; border: 1px solid var(--border-light); border-radius: 7px; font-size: 9px; }
 .polygon-label-editor .polygon-group:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.polygon-label-group { display: grid; gap: 7px; padding: 10px; background: #111a2b; border: 1px solid var(--border-light); border-radius: 8px; }
+.polygon-label-group > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.polygon-label-group > div:first-child strong { color: var(--text-primary); font-size: 10px; }
+.polygon-label-group > div:first-child small { color: var(--text-muted); font-size: 8px; }
+.polygon-label-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+.polygon-label-editor .label-create { min-height: 34px; margin: 0; padding: 7px 9px; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 7px; font-size: 9px; font-weight: 800; white-space: nowrap; }
+.polygon-label-editor .label-create:hover:not(:disabled) { color: #102f62; background: var(--accent); }
 kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; border: 1px solid var(--border-light); border-bottom-width: 2px; border-radius: 4px; font-family: inherit; font-size: 8px; }
 .range-field { display: grid; gap: 9px; margin-top: 0; color: var(--text-muted); font-size: 10px; }.range-field span { display: flex; align-items: center; justify-content: space-between; }.range-field strong { padding: 2px 5px; color: var(--text-secondary); background: #20293c; border: 1px solid var(--border); border-radius: 5px; font-size: 9px; }.range-field input { height: 3px; padding: 0; accent-color: var(--accent); box-shadow: none; }
 .restore-button { margin-top: auto; padding: 8px; color: var(--text-muted); background: transparent; border: 0; border-radius: 7px; font-size: 10px; cursor: pointer; }.restore-button:hover { color: var(--text-primary); background: #1a2336; }
@@ -671,6 +678,31 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
 .editor-shell .polygon-label-editor .label-apply { min-height: 36px; color: #fff; background: var(--editor-primary); border-radius: 9px; }
 .editor-shell .polygon-label-editor .polygon-group { min-height: 36px; color: var(--editor-primary-dark); background: #fff; border-color: #cfc4ff; border-radius: 9px; }
 .editor-shell .polygon-label-editor .polygon-group:hover:not(:disabled) { color: #fff; background: var(--editor-primary); border-color: var(--editor-primary); }
+.editor-shell .polygon-label-group { background: #fff; border-color: var(--editor-border); }
+.editor-shell .polygon-label-group.ridge { border-left: 3px solid var(--editor-primary); }
+.editor-shell .polygon-label-group.wart { border-left: 3px solid #ef6b6b; }
+.editor-shell .polygon-label-group > div:first-child strong { color: var(--editor-text); font-size: 11px; }
+.editor-shell .polygon-label-group > div:first-child small { color: var(--editor-muted); font-size: 9px; }
+.editor-shell .polygon-label-editor .label-create { min-height: 38px; color: var(--editor-primary-dark); background: #f6f3ff; border-color: #cfc4ff; border-radius: 9px; }
+.editor-shell .polygon-label-editor .label-create:hover:not(:disabled) { color: #fff; background: var(--editor-primary); border-color: var(--editor-primary); }
+.editor-shell .polygon-label-group.wart .label-create { color: #b43d3d; background: #fff5f5; border-color: #f3b5b5; }
+.editor-shell .polygon-label-group.wart .label-create:hover:not(:disabled) { color: #fff; background: #dc5656; border-color: #dc5656; }
+.editor-shell .polygon-selection-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; }
+.editor-shell .polygon-lock { display: inline-flex; height: 38px; align-items: center; justify-content: center; gap: 5px; padding: 0 10px; color: var(--editor-body); background: #fff; border: 1px solid var(--editor-border); border-radius: 9px; font-size: 10px; font-weight: 750; white-space: nowrap; }
+.editor-shell .polygon-lock:hover { color: var(--editor-primary-dark); border-color: #cfc4ff; }
+.editor-shell .polygon-lock.locked { color: #344054; background: #eaecf0; border-color: #98a2b3; }
+.editor-shell .label-kind-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.editor-shell .label-kind-choice button { display: flex; min-height: 48px; align-items: center; gap: 8px; padding: 9px 10px; color: var(--editor-body); background: #fff; border: 1px solid var(--editor-border); border-radius: 10px; text-align: left; }
+.editor-shell .label-kind-choice button > span { display: grid; width: 27px; height: 27px; place-items: center; color: var(--editor-primary-dark); background: #f1edff; border-radius: 8px; font-size: 10px; font-weight: 850; }
+.editor-shell .label-kind-choice button strong { font-size: 10px; }
+.editor-shell .label-kind-choice button:hover,.editor-shell .label-kind-choice button.active.ridge { color: var(--editor-primary-dark); background: #f8f6ff; border-color: var(--editor-primary); box-shadow: 0 0 0 2px rgba(124,92,250,.09); }
+.editor-shell .label-kind-choice button.active.wart { color: #b42318; background: #fff5f5; border-color: #ef6b6b; box-shadow: 0 0 0 2px rgba(239,107,107,.09); }
+.editor-shell .label-kind-choice button.active.wart > span { color: #b42318; background: #fee4e2; }
+.editor-shell .label-kind-hint { margin: 0; padding: 11px; color: var(--editor-muted); background: #fff; border: 1px dashed var(--editor-border); border-radius: 9px; font-size: 10px; line-height: 1.45; text-align: center; }
+.editor-shell .polygon-label-group { padding: 11px; }
+.editor-shell .polygon-label-group > div:first-child { display: none; }
+.editor-shell .polygon-label-group.ridge,.editor-shell .polygon-label-group.wart { border-left-width: 1px; }
+.editor-shell .canvas-viewport canvas { touch-action: none; user-select: none; }
 .editor-shell kbd { display: inline-grid; min-width: 24px; min-height: 23px; place-items: center; padding: 2px 6px; color: var(--editor-body); background: #fff; border: 1px solid #d5dce8; border-bottom-width: 2px; border-radius: 6px; font-size: 9px; font-weight: 700; }
 .editor-shell .range-field { color: var(--editor-muted); font-size: 11px; }
 .editor-shell .range-field strong { color: var(--editor-primary-dark); background: #f6f3ff; border-color: #ded6ff; }

@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "dataset:upload": "node --env-file-if-exists=.env.local scripts/upload-blob-dataset.mjs",
     "dataset:setup": "node --env-file-if-exists=.env.local scripts/setup-blob-dataset.mjs",
+    "labels:migrate": "node --experimental-strip-types --env-file-if-exists=.env.local scripts/migrate-instance-labels.mjs",
     "test": "vitest run"
   },
   "dependencies": {
