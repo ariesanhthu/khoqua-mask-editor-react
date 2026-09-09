@@ -26,6 +26,7 @@ import {
 import { deleteLocalDraft, draftKey, getLocalDraft, putLocalDraft } from '@/lib/local-drafts';
 import EditorCanvas, {
   type EditorCanvasHandle,
+  type EditorHistoryState,
   type EditorCanvasSnapshot,
   type EditorTool,
 } from './editor-canvas';
@@ -98,9 +99,9 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const [tool, setTool] = useState<EditorTool>(() => {
     if (typeof window === 'undefined') return 'select';
     const stored = localStorage.getItem('editor-tool') as EditorTool | null;
-    return stored && ['polygon', 'select', 'cut', 'point', 'pan'].includes(stored) ? stored : 'select';
+    return stored && ['polygon', 'select', 'cut', 'pan'].includes(stored) ? stored : 'select';
   });
-  const [workspaceStep, setWorkspaceStep] = useState<WorkspaceStep>(() => tool === 'point' ? 'warts' : 'mask');
+  const [workspaceStep, setWorkspaceStep] = useState<WorkspaceStep>('mask');
   const [opacity, setOpacity] = useState(() => {
     if (typeof window === 'undefined') return 0.5;
     const stored = Number(localStorage.getItem('mask-opacity'));
@@ -110,6 +111,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [history, setHistory] = useState<EditorHistoryState>({ local: false, canUndo: false, canRedo: false });
+  const onPolygonComplete = useCallback(() => { setTool('select'); localStorage.setItem('editor-tool', 'select'); }, []);
   const [zoom, setZoom] = useState(1);
   const [selectedPolygonIds, setSelectedPolygonIds] = useState<string[]>([]);
   const [snapshot, setSnapshot] = useState<EditorCanvasSnapshot>({
@@ -142,7 +145,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       } else if (key === 'p') {
         changeToolRef.current('polygon', 'mask');
       } else if (key === 'm') {
-        changeToolRef.current('point', 'warts');
+        // Temporarily hidden: changeToolRef.current('point', 'warts');
       } else if (event.key === '?') {
         setHelpOpen(true);
       }
@@ -405,9 +408,11 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     if (current.humanAction === 'UNTOUCHED') {
       setToast('Hãy chấp nhận mặt nạ gợi ý hoặc chỉnh sửa mặt nạ trước.'); return;
     }
+    /* Wart task temporarily hidden; preserve its validation for re-enabling.
     if (current.breakpoints.state === 'NOT_ANNOTATED') {
       setToast('Hãy đánh dấu u vấu hoặc xác nhận ảnh không có u vấu.'); return;
     }
+    */
     setNavigating(true);
     setStatus('SYNCING');
     try {
@@ -499,9 +504,11 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     canvasRef.current?.beginPolygonEdit();
     selectTool('select', 'mask');
   };
+  /* Wart task temporarily hidden.
   const continueToBreakpoints = async () => {
     await selectTool('point', 'warts');
   };
+  */
   const returnToMaskStep = async () => {
     await selectTool(tool === 'point' ? 'pan' : tool, 'mask');
   };
@@ -513,10 +520,12 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     if (!canvasRef.current?.applyCut()) return;
     await flushExplicitly();
   };
+  /* Wart task temporarily hidden.
   const confirmNoBreakpoint = async () => {
     canvasRef.current?.confirmNoBreakpoint();
     await flushExplicitly();
   };
+  */
   const maskConfirmed = snapshot.humanAction !== 'UNTOUCHED';
   const polygonCount = snapshot.polygons.length;
   const selectedPolygons = snapshot.polygons.filter((polygon) => selectedPolygonIds.includes(polygon.id));
@@ -525,6 +534,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     'wart_flesh',
     ...snapshot.polygons.map((polygon) => polygon.label).filter(Boolean),
   ])];
+  /* Wart task temporarily hidden.
   const breakpointCount = snapshot.breakpoints.points.length;
   const breakpointConfirmed = snapshot.breakpoints.state !== 'NOT_ANNOTATED';
   const breakpointStatus = snapshot.breakpoints.state === 'CONFIRMED_NONE'
@@ -532,6 +542,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     : breakpointCount > 0
       ? `Đã đánh dấu ${breakpointCount} point u vấu`
       : 'Chưa đánh dấu point u vấu';
+  */
   const initials = displayName.split(/\s+/).filter(Boolean).slice(-2).map((part) => part[0]).join('').toUpperCase() || 'U';
 
   return (
@@ -592,12 +603,12 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               <ToolbarButton active={tool === 'select'} label="Chọn / chỉnh sửa (V)" icon="cursor" onClick={() => selectTool('select', 'mask')} />
               <ToolbarButton active={tool === 'pan'} label="Di chuyển ảnh (H)" icon="hand" onClick={() => selectTool('pan')} />
               <ToolbarButton active={tool === 'polygon'} label="Vẽ polygon (P)" icon="polygon" onClick={() => selectTool('polygon', 'mask')} />
-              <ToolbarButton active={tool === 'point'} label="Đánh dấu point u vấu (M)" icon="pin" onClick={() => selectTool('point', 'warts')} />
+              {/* Temporarily hidden: <ToolbarButton active={tool === 'point'} label="Đánh dấu point u vấu (M)" icon="pin" onClick={() => selectTool('point', 'warts')} /> */}
               <ToolbarButton active={tool === 'cut'} label="Cắt polygon" icon="scissors" onClick={() => selectTool('cut', 'mask')} />
               <ToolbarButton disabled={selectedPolygonIds.length < 2} label="Gộp polygon đã chọn" icon="merge" onClick={() => canvasRef.current?.groupSelectedPolygons()} />
               <span className="toolbar-divider" />
-              <ToolbarButton label="Hoàn tác (Ctrl + Z)" icon="undo" onClick={() => canvasRef.current?.undo()} />
-              <ToolbarButton label="Làm lại (Ctrl + Y)" icon="redo" onClick={() => canvasRef.current?.redo()} />
+              <ToolbarButton active={history.local} disabled={!history.canUndo} label={history.local ? "Hoàn tác điểm (Ctrl + Z) — cục bộ" : "Hoàn tác toàn cục (Ctrl + Z)"} icon="undo" onClick={() => canvasRef.current?.undo()} />
+              <ToolbarButton active={history.local} disabled={!history.canRedo} label={history.local ? "Làm lại điểm (Ctrl + Y / Ctrl + Shift + Z) — cục bộ" : "Làm lại toàn cục (Ctrl + Y / Ctrl + Shift + Z)"} icon="redo" onClick={() => canvasRef.current?.redo()} />
               <span className="toolbar-divider" />
               <ToolbarButton label="Xóa lựa chọn (Delete)" icon="trash" danger onClick={() => workspaceStep === 'warts' ? canvasRef.current?.deleteSelectedPoint() : canvasRef.current?.deleteSelection()} />
               <ToolbarButton label="Vừa khung hình" icon="fit" onClick={() => canvasRef.current?.fit()} />
@@ -609,18 +620,21 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
             currentMaskUrl={bootstrap.assets.currentMaskUrl} localMaskBlob={seed.localMaskBlob}
             initialHumanAction={seed.humanAction} initialBreakpoints={seed.breakpoints} initialOperations={seed.operations}
             readOnly={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} tool={readOnly ? 'pan' : tool} maskOpacity={opacity} showMask={showMask}
+            onHistoryChange={setHistory} onPolygonComplete={onPolygonComplete}
             onChange={onEditorChange} onSelectionChange={setSelectedPolygonIds} onReady={onCanvasReady} onMessage={setToast} onZoomChange={setZoom} />
         </section>
 
         {rightCollapsed ? <aside className="right-sidebar-rail"><button aria-label="Mở sidebar phải" title="Mở thiết lập nhiệm vụ" onClick={() => setRightCollapsed(false)}><Icon name="chevron-left" /></button></aside> : <aside className="control-panel">
           <div className="control-panel-title"><span>Thiết lập nhiệm vụ</span><button aria-label="Thu gọn sidebar phải" title="Thu gọn sidebar" onClick={() => setRightCollapsed(true)}><Icon name="chevron-right" /></button></div>
-          <div className="workflow-tabs" role="tablist" aria-label="Các bước chú thích">
+          <div className="workflow-tabs" style={{ gridTemplateColumns: '1fr' }} role="tablist" aria-label="Các bước chú thích">
             <button role="tab" aria-selected={workspaceStep === 'mask'} className={workspaceStep === 'mask' ? 'active' : maskConfirmed ? 'complete' : ''} onClick={() => void returnToMaskStep()}>
               <span>{maskConfirmed ? '✓' : '1'}</span> Vùng chọn
             </button>
+            {/* Wart step temporarily hidden.
             <button role="tab" aria-selected={workspaceStep === 'warts'} className={workspaceStep === 'warts' ? 'active' : breakpointConfirmed ? 'complete' : ''} onClick={() => void continueToBreakpoints()}>
               <span>{breakpointConfirmed ? '✓' : '2'}</span> Mật độ u vấu
             </button>
+            */}
           </div>
 
           <fieldset className="control-panel-scroll" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating}>
@@ -633,6 +647,10 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               </section> : null}
 
               <section className="object-section">
+                <p aria-live="polite">{history.local
+                  ? 'Đang sửa polygon: Ctrl+Z hoàn tác điểm; Ctrl+Y hoặc Ctrl+Shift+Z làm lại. Enter để hoàn tất, Esc để hủy. Undo/redo màu tím áp dụng cục bộ.'
+                  : 'Ctrl+Z hoàn tác toàn cục; Ctrl+Y hoặc Ctrl+Shift+Z làm lại. Polygon vừa hoàn tất được hoàn tác/làm lại cả vùng.'}</p>
+                <p>Di chuột lên điểm để hiện dấu × đỏ, bấm chuột phải để xóa điểm. Polygon đã đóng cần ít nhất 3 điểm.</p>
                 {tool === 'polygon' ? <button className="button primary" onClick={() => void completePolygon()}>Hoàn tất polygon</button> : null}
                 {tool === 'cut' ? <button className="button primary" onClick={() => void applyCut()}>Thực hiện cắt</button> : null}
                 <div className="section-title-row"><p>Thông tin đối tượng</p><span>{polygonCount} vùng</span></div>
@@ -652,6 +670,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               </section>
 
               <button className="restore-button" onClick={() => canvasRef.current?.resetToPrediction()}>↻ Khôi phục mask ban đầu</button>
+            </> : null}
+            {/* Wart panel temporarily hidden.
             </> : <>
               <section className="breakpoint-card"><h2>Mật độ u vấu</h2><p>Click vào tâm mỗi u vấu để tạo point. Kéo để chỉnh vị trí; chọn rồi nhấn Delete để xóa.</p>
                 <div className="breakpoint-status"><span>Trạng thái</span><strong className={breakpointConfirmed ? 'complete' : ''}><i />{breakpointStatus}</strong></div>
@@ -664,8 +684,12 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
                 <span><strong>Không có u vấu trong ảnh này</strong><small>Kiểm tra kỹ bề mặt trước khi xác nhận</small></span>
               </button>
             </>}
+            */}
           </fieldset>
           <div className="panel-actions">
+            <button className="button ghost" onClick={() => void goBack()}>‹ Quay lại</button>
+            <button className="button primary" disabled={readOnly || !ready || history.local || status === 'SYNCING' || status === 'CONFLICT' || navigating} onClick={() => void finish()}>Hoàn tất &amp; Tiếp theo <span aria-hidden="true">→</span></button>
+          {/* Original two-step actions temporarily hidden.
           {workspaceStep === 'mask' ? <>
             <button className="button ghost" onClick={() => void goBack()}>‹ Quay lại</button>
             <button className="button primary" disabled={!ready} onClick={() => void continueToBreakpoints()}>Tiếp tục đến Mật độ u vấu <span aria-hidden="true">›</span></button>
@@ -673,6 +697,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
             <button className="button ghost" onClick={() => void returnToMaskStep()}>Quay lại Vùng chọn</button>
             <button className="button primary" disabled={readOnly || !ready || status === 'SYNCING' || status === 'CONFLICT' || navigating} onClick={() => void finish()}>Hoàn tất &amp; Tiếp theo <span aria-hidden="true">→</span></button>
           </>}
+          */}
           </div>
         </aside>}
       </div>
@@ -681,7 +706,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       {helpOpen ? <div className="modal-backdrop help-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><section className="shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-title">
         <div className="shortcut-header"><div><span className="help-mark">?</span><span><h2 id="shortcut-title">Trợ giúp &amp; phím tắt</h2><p>Thao tác nhanh hơn trên vùng chú thích</p></span></div><button aria-label="Đóng trợ giúp" onClick={() => setHelpOpen(false)}>×</button></div>
         <div className="shortcut-content">
-          <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" /><Shortcut keys={['M']} label="Đánh dấu point u vấu" /><Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'Z']} label="Hoàn tác" /><Shortcut keys={['Ctrl', 'Y']} label="Làm lại" /></section>
+          <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" />{/* <Shortcut keys={['M']} label="Đánh dấu point u vấu" /> */}<Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'Z']} label={history.local ? "Hoàn tác điểm (cục bộ)" : "Hoàn tác toàn cục"} /><Shortcut keys={['Ctrl', 'Y']} label={history.local ? "Làm lại điểm (cục bộ)" : "Làm lại toàn cục"} /></section>
           <section className="usage-tips"><h3>Mẹo sử dụng</h3><p><Icon name="cursor" />Ở chế độ V, kéo khung qua các node để chọn nhiều polygon.</p><p><Icon name="polygon" />Chế độ P chỉ dùng để vẽ một polygon mới.</p><p><Icon name="layers" />Ẩn lớp phủ khi cần quan sát ảnh gốc.</p><p><Icon name="hand" />Dùng con lăn để zoom; Shift + con lăn để cuộn ngang.</p></section>
         </div>
       </section></div> : null}

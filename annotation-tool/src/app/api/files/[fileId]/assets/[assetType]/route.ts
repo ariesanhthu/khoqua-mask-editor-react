@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
-import { readFile } from 'fs/promises';
+import { access, readFile } from 'fs/promises';
 import path from 'path';
 import { getDb } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { fetchDatasetAsset } from '@/lib/drive-service';
 import { readStoredMask } from '@/lib/storage';
+import { getThumbnail } from '@/lib/thumbnails';
 
 export const runtime = 'nodejs';
 
@@ -24,6 +25,23 @@ export async function GET(
   const file = await db.prepare('SELECT * FROM dataset_files WHERE id = ?').get(fileId);
   if (!file) {
     return NextResponse.json({ code: 'FILE_NOT_FOUND', message: 'File not found' }, { status: 404 });
+  }
+
+  if (assetType === 'thumbnail') {
+    const reference = file.image_drive_file_id as string;
+    const localPath = path.isAbsolute(reference) ? reference : path.join(process.cwd(), 'data', reference);
+    try {
+      // Resolve the same original image as the editor; never return full-size bytes here.
+      const isLocal = await access(localPath).then(() => true, () => false);
+      const bytes = await getThumbnail(isLocal ? localPath : reference,
+        () => isLocal ? readFile(localPath) : fetchDatasetAsset(reference), String(file.updated_at));
+      return new NextResponse(toArrayBuffer(bytes), {
+        headers: { 'Content-Type': 'image/webp', 'Cache-Control': 'private, max-age=86400', 'Vary': 'Cookie' },
+      });
+    } catch {
+      return NextResponse.json({ code: 'ASSET_NOT_FOUND', message: 'Thumbnail unavailable' },
+        { status: 404, headers: { 'Cache-Control': 'no-store' } });
+    }
   }
 
   // Determine which file to serve

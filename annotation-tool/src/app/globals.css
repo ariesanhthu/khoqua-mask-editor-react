@@ -390,7 +390,10 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
   display: flex;
   min-width: 0;
   height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
   flex-direction: column;
+  overflow: hidden;
   padding: 24px 16px 16px;
   color: var(--editor-body);
   background: #fff;
@@ -729,13 +732,29 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
   .layer-toggle span { display: none; }
   .shortcut-content { grid-template-columns: 1fr; }
 }
-/* File switching uses the existing sidebar and scrolls independently of the canvas. */
-.editor-shell .file-queue { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px; }
-.editor-shell .file-queue button { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 10px; border: 1px solid var(--editor-border, #e4e7ec); border-radius: 8px; background: transparent; color: var(--editor-text, #344054); }
+/* Keep the file switcher bounded to the sidebar instead of growing the page. */
+.editor-shell .project-summary,.editor-shell .sidebar-primary-button,.editor-shell .queue-pagination,.editor-shell .sidebar-account-area { flex-shrink: 0; }
+.editor-shell .file-queue {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 5px 6px 0;
+  scrollbar-gutter: stable;
+  scrollbar-color: #c5cad4 transparent;
+  scrollbar-width: thin;
+}
+.editor-shell .file-queue button { flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 7px 9px; border: 1px solid var(--editor-border, #e4e7ec); border-radius: 8px; background: transparent; color: var(--editor-text, #344054); cursor: pointer; }
+.editor-shell .file-queue button:hover:not(:disabled) { background: #f8f9fc; border-color: #d8ceff; }
 .editor-shell .file-queue button[aria-current="page"] { border-color: #7c5cfa; background: #f0ebff; }
 .editor-shell .file-queue strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.editor-shell .file-queue small,.editor-shell .file-queue span { font-size: 11px; color: var(--editor-muted, #667085); }
-.editor-shell .queue-pagination { display: flex; justify-content: space-between; align-items: center; padding: 6px 16px; font-size: 12px; }
+.editor-shell .file-queue small,.editor-shell .file-queue span { font-size: 10px; line-height: 1.25; color: var(--editor-muted, #667085); }
+.editor-shell .queue-pagination { display: flex; justify-content: space-between; align-items: center; padding: 6px 5px 2px 0; font-size: 11px; }
 .editor-shell .queue-pagination button { border: 0; border-radius: 6px; padding: 4px 10px; }
 .editor-shell fieldset.control-panel-scroll { min-width: 0; margin: 0; border: 0; }
 .editor-shell fieldset.floating-toolbar { min-width: 0; margin: 0; }
@@ -743,3 +762,13 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
 .editor-shell.left-collapsed .file-queue { padding: 6px 3px; }
 .editor-shell.left-collapsed .file-queue button { padding: 6px 3px; }
 .editor-shell.left-collapsed .file-queue small,.editor-shell.left-collapsed .file-queue span { display: none; }
+
+/* Dashboard image previews replace the vertical ID strip. */
+.dashboard-shell .file-card { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; contain-intrinsic-size: auto 370px; }
+.dashboard-shell .file-preview { aspect-ratio: 8 / 5; overflow: hidden; background: #f0f2f6; border-bottom: 1px solid var(--border); }
+.dashboard-shell .file-preview img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.dashboard-shell .file-preview-fallback { display: flex; height: 100%; align-items: center; justify-content: center; flex-direction: column; gap: 10px; color: var(--text-muted); font-size: 12px; }
+.dashboard-shell .file-card-body { min-width: 0; gap: 4px; padding: 16px; }
+.dashboard-shell .file-title-row h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard-shell .file-card-body p { margin-top: 8px; }
+.dashboard-shell .file-card-body .button { margin-top: auto; }

@@ -84,7 +84,7 @@ export async function GET(
     return {
       id: f.id,
       externalKey: f.external_key,
-      thumbnailUrl: null,
+      thumbnailUrl: `/api/files/${encodeURIComponent(String(f.id))}/assets/thumbnail?v=${encodeURIComponent(String(f.updated_at))}`,
       annotationState: f.annotation_state,
       assetState: f.asset_state,
       lock: isLocked

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "thumbnails:generate": "node --experimental-strip-types scripts/generate-thumbnails.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

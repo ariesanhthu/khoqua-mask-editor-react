@@ -27,6 +27,12 @@ export interface EditorCanvasSnapshot {
   polygons: AnnotationPolygon[];
 }
 
+export interface EditorHistoryState {
+  local: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
 export interface EditorCanvasHandle {
   exportMask(): Promise<Blob>;
   resetToPrediction(): void;
@@ -63,6 +69,8 @@ interface Props {
   showMask: boolean;
   onChange(snapshot: EditorCanvasSnapshot): void;
   onSelectionChange(polygonIds: string[]): void;
+  onHistoryChange?(state: EditorHistoryState): void;
+  onPolygonComplete?(): void;
   onReady(): void;
   onMessage(message: string): void;
   onZoomChange?(scale: number): void;
@@ -81,7 +89,7 @@ type PointerActivity =
 
 const POLYGON_FILL = '#7c5cfa';
 const POLYGON_STROKE = '#7c5cfa';
-const BREAKPOINT_COLOR = '#6d4ef2';
+// Wart overlay temporarily hidden: const BREAKPOINT_COLOR = '#6d4ef2';
 const CUT_COLOR = '#f04438';
 
 type PolygonBounds = { left: number; right: number; top: number; bottom: number };
@@ -296,6 +304,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     onChange,
     onMessage,
     onReady,
+    onHistoryChange,
+    onPolygonComplete,
     onSelectionChange,
     onZoomChange,
     predictionUrl,
@@ -330,6 +340,11 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   const selectedNodeIdsRef = useRef(new Set<string>());
   const selectedPolygonIdsRef = useRef(new Set<string>());
   const draftPolygonRef = useRef<PolygonNode[]>([]);
+  const draftEditingRef = useRef(false);
+  const draftUndoRef = useRef<PolygonNode[][]>([]);
+  const draftRedoRef = useRef<PolygonNode[][]>([]);
+  const hoveredNodeRef = useRef<PolygonNode | null>(null);
+  const lastHistoryRef = useRef('');
   const polygonHoverRef = useRef<ImagePoint | null>(null);
   const cutPathRef = useRef<PolygonNode[]>([]);
   const marqueeRef = useRef<Marquee | null>(null);
@@ -515,6 +530,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       context.strokeRect(marquee.start.x, marquee.start.y, marquee.end.x - marquee.start.x, marquee.end.y - marquee.start.y);
     }
 
+    /* Wart overlay temporarily hidden.
     for (const point of breakpointsRef.current.points) {
       context.beginPath();
       context.arc(point.x, point.y, 8 / view.scale, 0, Math.PI * 2);
@@ -522,6 +538,19 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       context.fill();
       context.lineWidth = 3 / view.scale;
       context.strokeStyle = '#ffffff';
+      context.stroke();
+    }
+    */
+    const hovered = hoveredNodeRef.current;
+    if (hovered) {
+      const radius = 5 / view.scale;
+      context.strokeStyle = '#ef4444';
+      context.lineWidth = 2.5 / view.scale;
+      context.beginPath();
+      context.moveTo(hovered.x - radius, hovered.y - radius);
+      context.lineTo(hovered.x + radius, hovered.y + radius);
+      context.moveTo(hovered.x + radius, hovered.y - radius);
+      context.lineTo(hovered.x - radius, hovered.y + radius);
       context.stroke();
     }
     context.restore();
@@ -532,14 +561,33 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     renderFrameRef.current = window.requestAnimationFrame(() => {
       renderFrameRef.current = null;
       renderNow();
+      const local = draftEditingRef.current;
+      const state = {
+        local,
+        canUndo: (local ? draftUndoRef.current : polygonUndoRef.current).length > 0,
+        canRedo: (local ? draftRedoRef.current : polygonRedoRef.current).length > 0,
+      };
+      const key = JSON.stringify(state);
+      if (key !== lastHistoryRef.current) {
+        lastHistoryRef.current = key;
+        onHistoryChange?.(state);
+      }
     });
-  }, [renderNow]);
+  }, [onHistoryChange, renderNow]);
 
   useEffect(() => () => {
     if (renderFrameRef.current !== null) window.cancelAnimationFrame(renderFrameRef.current);
   }, []);
 
   useEffect(() => {
+    if (tool !== 'polygon' && tool !== 'pan' && draftEditingRef.current) {
+      draftPolygonRef.current = [];
+      draftEditingRef.current = false;
+      draftUndoRef.current = [];
+      draftRedoRef.current = [];
+      polygonHoverRef.current = null;
+    }
+    hoveredNodeRef.current = null;
     toolRef.current = tool;
     render();
   }, [render, tool]);
@@ -671,6 +719,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
 
   const commitPolygons = useCallback((next: AnnotationPolygon[], before = polygonsRef.current) => {
     pushPolygonHistory(before);
+    hoveredNodeRef.current = null;
     polygonsRef.current = clonePolygons(next);
     polygonModeRef.current = true;
     operationsRef.current = polygonOperation(next);
@@ -692,15 +741,24 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       nodes: draft.map((node) => ({ ...node })),
     };
     draftPolygonRef.current = [];
+    draftEditingRef.current = false;
+    draftUndoRef.current = [];
+    draftRedoRef.current = [];
+    hoveredNodeRef.current = null;
     polygonHoverRef.current = null;
     selectedNodeIdsRef.current.clear();
     selectedPolygonIdsRef.current = new Set([created.id]);
     commitPolygons([...polygonsRef.current, created]);
+    onPolygonComplete?.();
     return true;
-  }, [commitPolygons, onMessage]);
+  }, [commitPolygons, onMessage, onPolygonComplete]);
 
   const cancelCurrentPath = useCallback(() => {
     draftPolygonRef.current = [];
+    draftEditingRef.current = false;
+    draftUndoRef.current = [];
+    draftRedoRef.current = [];
+    hoveredNodeRef.current = null;
     polygonHoverRef.current = null;
     cutPathRef.current = [];
     marqueeRef.current = null;
@@ -781,8 +839,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!readyRef.current || (props.readOnly && tool !== 'pan')) return;
     const point = imagePoint(event);
+    hoveredNodeRef.current = null;
     if (event.button === 2) {
       event.preventDefault();
+      if (tool === 'polygon' || (tool === 'select' && hitNode(point))) return;
       if (tool !== 'select') return;
       const polygon = hitPolygon(point);
       if (!polygon) return;
@@ -840,6 +900,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       if (first && draftPolygonRef.current.length >= 3 && Math.hypot(first.x - point.x, first.y - point.y) <= 14 / viewRef.current.scale) {
         completePolygon();
       } else {
+        draftEditingRef.current = true;
+        draftUndoRef.current.push(draftPolygonRef.current);
+        draftRedoRef.current = [];
         draftPolygonRef.current = [...draftPolygonRef.current, { id: crypto.randomUUID(), ...point }];
         render();
       }
@@ -898,7 +961,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       // Hai lần pointer-down của double click đã thêm cùng một đỉnh hai lần.
       // Giữ lần nhấp đầu làm đỉnh cuối và bỏ bản sao trước khi hoàn tất.
       if (draftPolygonRef.current.length > 1) {
-        draftPolygonRef.current = draftPolygonRef.current.slice(0, -1);
+        draftPolygonRef.current = draftUndoRef.current.pop() ?? draftPolygonRef.current.slice(0, -1);
       }
       if (draftPolygonRef.current.length >= 3) completePolygon();
       else render();
@@ -960,8 +1023,33 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       suppressContextMenuSelectionRef.current = false;
       return;
     }
-    if (tool !== 'select' || !readyRef.current) return;
-    const polygon = hitPolygon(imagePoint(event));
+    if (!readyRef.current) return;
+    const point = imagePoint(event);
+    if (tool === 'polygon') {
+      const hit = draftPolygonRef.current.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale);
+      if (hit) {
+        draftUndoRef.current.push(draftPolygonRef.current);
+        draftRedoRef.current = [];
+        draftPolygonRef.current = draftPolygonRef.current.filter((node) => node.id !== hit.id);
+        hoveredNodeRef.current = null;
+        render();
+      }
+      return;
+    }
+    if (tool !== 'select') return;
+    const nodeHit = hitNode(point);
+    if (nodeHit) {
+      if (nodeHit.polygon.nodes.length <= 3) {
+        onMessage('Polygon cần ít nhất 3 điểm. Chọn polygon và nhấn Delete để xóa cả vùng.');
+        return;
+      }
+      hoveredNodeRef.current = null;
+      selectedNodeIdsRef.current.delete(nodeHit.node.id);
+      commitPolygons(polygonsRef.current.map((polygon) => polygon.id === nodeHit.polygon.id
+        ? { ...polygon, nodes: polygon.nodes.filter((node) => node.id !== nodeHit.node.id) } : polygon));
+      return;
+    }
+    const polygon = hitPolygon(point);
     if (!polygon) return;
     const additive = event.shiftKey || event.ctrlKey || event.metaKey;
     const nodeIds = additive ? new Set(selectedNodeIdsRef.current) : new Set<string>();
@@ -978,6 +1066,14 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (props.readOnly && pointerRef.current?.mode !== 'pan') { pointerRef.current = null; return; }
     const active = pointerRef.current;
     if (!active) {
+      const point = imagePoint(event);
+      const hovered = tool === 'polygon'
+        ? draftPolygonRef.current.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale) ?? null
+        : tool === 'select' ? hitNode(point)?.node ?? null : null;
+      if (hoveredNodeRef.current?.id !== hovered?.id) {
+        hoveredNodeRef.current = hovered;
+        render();
+      }
       if (tool === 'polygon' && draftPolygonRef.current.length) {
         polygonHoverRef.current = imagePoint(event);
         render();
@@ -1046,6 +1142,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   };
 
   const onPointerLeave = () => {
+    hoveredNodeRef.current = null;
+    render();
     if (!pointerRef.current && polygonHoverRef.current) {
       polygonHoverRef.current = null;
       render();
@@ -1064,6 +1162,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         polygonModeRef.current = true;
         humanActionRef.current = 'MODIFIED';
         notifyChange('MODIFIED');
+        render();
       }
       return;
     }
@@ -1104,6 +1203,16 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   };
 
   const undo = useCallback(() => {
+    if (pointerRef.current) return;
+    if (draftEditingRef.current) {
+      const next = draftUndoRef.current.pop();
+      if (!next) return;
+      draftRedoRef.current.push(draftPolygonRef.current);
+      draftPolygonRef.current = next;
+      hoveredNodeRef.current = null;
+      render();
+      return;
+    }
     if (tool === 'point') {
       const previous = pointUndoRef.current.pop();
       if (!previous) return;
@@ -1117,6 +1226,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     const previous = polygonUndoRef.current.pop();
     if (!previous) return;
     polygonRedoRef.current.push(clonePolygons(polygonsRef.current));
+    hoveredNodeRef.current = null;
     polygonsRef.current = clonePolygons(previous);
     polygonModeRef.current = true;
     operationsRef.current = polygonOperation(previous);
@@ -1129,6 +1239,16 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   }, [notifyChange, notifySelection, render, tool]);
 
   const redo = useCallback(() => {
+    if (pointerRef.current) return;
+    if (draftEditingRef.current) {
+      const next = draftRedoRef.current.pop();
+      if (!next) return;
+      draftUndoRef.current.push(draftPolygonRef.current);
+      draftPolygonRef.current = next;
+      hoveredNodeRef.current = null;
+      render();
+      return;
+    }
     if (tool === 'point') {
       const next = pointRedoRef.current.pop();
       if (!next) return;
@@ -1142,6 +1262,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     const next = polygonRedoRef.current.pop();
     if (!next) return;
     polygonUndoRef.current.push(clonePolygons(polygonsRef.current));
+    hoveredNodeRef.current = null;
     polygonsRef.current = clonePolygons(next);
     polygonModeRef.current = true;
     operationsRef.current = polygonOperation(next);
@@ -1281,6 +1402,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         context?.drawImage(prediction, 0, 0);
         if (tintRef.current) rebuildTint(mask, tintRef.current, POLYGON_FILL);
       }
+      cancelCurrentPath();
       polygonsRef.current = [];
       polygonModeRef.current = false;
       operationsRef.current = [{ type: 'RESET_TO_PREDICTION' }];
@@ -1303,6 +1425,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         context?.drawImage(prediction, 0, 0);
         if (tintRef.current) rebuildTint(mask, tintRef.current, POLYGON_FILL);
       }
+      cancelCurrentPath();
       polygonsRef.current = [];
       polygonModeRef.current = false;
       operationsRef.current = [];

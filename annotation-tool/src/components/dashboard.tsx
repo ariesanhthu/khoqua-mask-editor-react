@@ -2,6 +2,7 @@
 
 import { useCallback, useDeferredValue, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Image from 'next/image';
 import type { CurrentUser, FileListItem, ProjectSummary } from '@/types';
 import {
   disconnectGoogleDrive,
@@ -224,7 +225,8 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
           const assetError = file.assetState === 'ERROR';
           return (
             <article className={`file-card ${locked ? 'locked' : ''}`} key={file.id}>
-              <div className="thumbnail" aria-hidden="true"><span>{file.externalKey.slice(-4)}</span></div>
+              {/* Old ID strip hidden: <div className="thumbnail" aria-hidden="true"><span>{file.externalKey.slice(-4)}</span></div> */}
+              <FileThumbnail key={file.thumbnailUrl} file={file} />
               <div className="file-card-body">
                 <div className="file-title-row"><h2>{file.externalKey}</h2><StateBadge state={file.annotationState} /></div>
                 <p>{assetError ? 'Thiếu ảnh nguồn hoặc mặt nạ gợi ý' : file.lock.state === 'LOCKED' ? `Đang được ${file.lock.displayName} chỉnh sửa` : 'Sẵn sàng chỉnh sửa'}</p>
@@ -242,6 +244,16 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
       {user.role === 'ADMIN' ? <AdminPanel onChanged={loadProjects} /> : null}
     </main>
   );
+}
+
+function FileThumbnail({ file }: { file: FileListItem }) {
+  const [failed, setFailed] = useState(false);
+  return <div className="file-preview">
+    {file.thumbnailUrl && !failed
+      ? <Image src={file.thumbnailUrl} alt={`Ảnh gốc ${file.externalKey}`} width={640} height={400}
+          unoptimized loading="lazy" decoding="async" onError={() => setFailed(true)} />
+      : <div className="file-preview-fallback"><svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="8" cy="8" r="1.5" /><path d="m3 17 6-6 4 4 3-3 5 5" /></svg><span>Chưa có ảnh xem trước</span></div>}
+  </div>;
 }
 
 function StateBadge({ state }: { state: FileListItem['annotationState'] }) {

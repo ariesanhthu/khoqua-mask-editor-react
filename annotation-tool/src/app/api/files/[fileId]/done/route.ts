@@ -35,13 +35,14 @@ export async function POST(
   if (!Number.isInteger(baseRevision) || !segmentation || !breakpoints ||
       !['ACCEPTED', 'MODIFIED'].includes(segmentation.humanAction) ||
       !['NOT_ANNOTATED', 'ANNOTATED', 'CONFIRMED_NONE'].includes(breakpoints.state) ||
-      !validWartPoints(segmentation.wartPoints, true) ||
+      // Wart step temporarily hidden: !validWartPoints(segmentation.wartPoints, true)
+      !validWartPoints(segmentation.wartPoints) ||
       !Array.isArray(breakpoints.points) ||
       (breakpoints.state === 'ANNOTATED' && breakpoints.points.length === 0) ||
       (breakpoints.state === 'CONFIRMED_NONE' && breakpoints.points.length !== 0) ||
       (segmentation.maskOperations?.length > 0 && !hasPersistableOperations(segmentation.maskOperations))) {
     return NextResponse.json(
-      { code: 'INVALID_ANNOTATION', message: 'Complete the mask and wart point tasks before finishing.' },
+      { code: 'INVALID_ANNOTATION', message: 'Complete the mask task before finishing.' },
       { status: 400 }
     );
   }
