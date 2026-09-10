@@ -23,7 +23,10 @@ class ConverterIntegrationTest(unittest.TestCase):
             self.assertEqual(counts.v7_wart_polygons, counts.web_wart_polygons)
             payload = json.loads((output / "prelabels/8582_01.json").read_text(encoding="utf-8"))
             polygons = payload["maskOperations"][0]["polygons"]
-            self.assertEqual({polygon["label"] for polygon in polygons}, {"main_flesh_band", "wart_flesh"})
+            ridge_labels = {polygon["label"] for polygon in polygons if polygon["meta"]["semantic"] == "main_flesh_band"}
+            wart_labels = {polygon["label"] for polygon in polygons if polygon["meta"]["semantic"] == "wart_flesh"}
+            self.assertEqual(ridge_labels, {"r1", "r2", "r3", "r4", "r5", "r6"})
+            self.assertEqual(wart_labels, {f"w{index}" for index in range(1, 15)})
             self.assertTrue(all(polygon["meta"]["source"] == "model" for polygon in polygons))
             self.assertTrue(all(node["id"].startswith(polygon["id"]) for polygon in polygons for node in polygon["nodes"]))
 

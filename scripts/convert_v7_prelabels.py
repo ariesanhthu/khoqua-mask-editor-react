@@ -16,8 +16,7 @@ import numpy as np
 from PIL import Image
 
 
-ALLOWED_LABELS = {"main_flesh_band", "wart_flesh"}
-SCHEMA_VERSION = "bitter-melon-prelabel-1.0"
+SCHEMA_VERSION = "bitter-melon-prelabel-1.1"
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -78,7 +77,7 @@ def convert_prelabel(source: dict[str, Any], expected_id: str) -> tuple[dict[str
                 polygon_ids.add(polygon_id)
                 polygons.append({
                     "id": polygon_id,
-                    "label": "main_flesh_band",
+                    "label": f"r{group_id}",
                     "nodes": _nodes(flattened, polygon_id, width, height),
                     "meta": {
                         "semantic": "main_flesh_band",
@@ -103,7 +102,7 @@ def convert_prelabel(source: dict[str, Any], expected_id: str) -> tuple[dict[str
             polygon_ids.add(polygon_id)
             polygons.append({
                 "id": polygon_id,
-                "label": "wart_flesh",
+                "label": f"w{wart_id}",
                 "nodes": _nodes(flattened, polygon_id, width, height),
                 "meta": {
                     "semantic": "wart_flesh",
@@ -208,7 +207,7 @@ def convert_dataset(v7_dir: Path, images_dir: Path, output_dir: Path, force: boo
         if not items:
             raise ValueError("Không tìm thấy image output V7 nào")
         manifest = {
-            "dataset_version": "2026-08-20",
+            "dataset_version": "2026-09-09",
             "algorithm_version": "bitter-melon-v7",
             "items": items,
         }
