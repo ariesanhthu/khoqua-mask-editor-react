@@ -84,8 +84,10 @@ async function loadMask(row: ExportRow, segmentation: ReturnType<typeof parseRow
   if (segmentation.humanAction === 'MODIFIED' && operation?.type === 'POLYGON_SET') {
     if (!(row.width > 0 && row.height > 0)) throw new Error('Missing source image dimensions.');
     const polygons = operation.polygons.map((polygon) => {
-      if (!polygon.nodes.every((node) => Number.isFinite(node.x) && Number.isFinite(node.y))) throw new Error('Invalid polygon coordinates.');
-      return `<polygon points="${polygon.nodes.map((node) => `${node.x},${node.y}`).join(' ')}" fill="white"/>`;
+      const rings = [polygon.nodes, ...(polygon.holes ?? [])];
+      if (!rings.every((ring) => ring.every((node) => Number.isFinite(node.x) && Number.isFinite(node.y)))) throw new Error('Invalid polygon coordinates.');
+      const path = rings.map((ring) => ring.map((node, index) => (index ? 'L' : 'M') + node.x + ',' + node.y).join(' ') + ' Z').join(' ');
+      return '<path d="' + path + '" fill="white" fill-rule="evenodd"/>';
     }).join('');
     return sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${Number(row.width)}" height="${Number(row.height)}"><rect width="100%" height="100%" fill="black"/>${polygons}</svg>`))
       .greyscale().threshold(127).removeAlpha().png().toBuffer();

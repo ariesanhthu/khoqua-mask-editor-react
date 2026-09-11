@@ -11,7 +11,7 @@ beforeAll(async () => {
   for (const id of ['a', 'b']) await db.prepare('INSERT INTO users (id, display_name, hashed_password) VALUES (?, ?, ?)').run(id, id, 'test');
   await db.prepare("INSERT INTO projects (id, name) VALUES ('project', 'Test')").run();
   await db.prepare("INSERT INTO datasets (id, project_id, name) VALUES ('dataset', 'project', 'Test')").run();
-  for (const id of ['race', 'revisions', 'expiry']) await db.prepare(`INSERT INTO dataset_files
+  for (const id of ['race', 'revisions', 'expiry', 'parallel']) await db.prepare(`INSERT INTO dataset_files
     (id, dataset_id, external_key, image_drive_file_id, prediction_drive_file_id, image_filename, prediction_filename)
     VALUES (?, 'dataset', ?, 'image', 'mask', 'image.png', 'mask.png')`).run(id, id);
 }, 30_000);
@@ -44,6 +44,18 @@ describe('exclusive edit locks and revisions', () => {
     expect(await submitDone('revisions', 'a', lock.lockToken, 1, segmentation, legacy)).toMatchObject({ revision: 2, annotationState: 'DONE' });
     expect(await saveDraft('revisions', 'a', lock.lockToken, 2, segmentation, legacy)).toBe('LOCK_LOST');
     expect(await acquireLock('revisions', 'b')).toMatchObject({ denied: false, baseRevision: 2 });
+  });
+
+  it('serialises two simultaneous saves from one token so neither write is silently lost', async () => {
+    const lock = await acquireLock('parallel', 'a');
+    if (!lock || lock.denied) throw Error('Expected lock');
+    const results = await Promise.all([
+      saveDraft('parallel', 'a', lock.lockToken, 0, { humanAction: 'ACCEPTED' }, {}),
+      saveDraft('parallel', 'a', lock.lockToken, 0, { humanAction: 'MODIFIED' }, {}),
+    ]);
+    expect(results.filter((result) => result && typeof result === 'object' && 'revision' in result)).toHaveLength(1);
+    expect(results.filter((result) => result && typeof result === 'object' && 'conflict' in result)).toHaveLength(1);
+    expect(await getAnnotation('parallel')).toMatchObject({ revision: 1 });
   });
 
   it('rejects the old writer after expiry and reacquisition', async () => {

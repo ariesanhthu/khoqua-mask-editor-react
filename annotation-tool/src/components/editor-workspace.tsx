@@ -25,6 +25,7 @@ import {
 } from '@/lib/api-client';
 import { deleteLocalDraft, draftKey, getLocalDraft, putLocalDraft } from '@/lib/local-drafts';
 import { labelsForKind, nextLabel, polygonLabelKind, type PolygonLabelKind } from '@/lib/polygon-labels';
+import type { BrushMode } from '@/lib/polygon-geometry';
 import EditorCanvas, {
   type EditorCanvasHandle,
   type EditorHistoryState,
@@ -44,6 +45,11 @@ interface EditorSeed {
 }
 
 const emptyBreakpoints: BreakpointAnnotation = { state: 'NOT_ANNOTATED', points: [] };
+
+// Cỡ nét tính bằng pixel của ảnh gốc, không đổi theo mức thu phóng.
+const BRUSH_MIN_SIZE = 1;
+const BRUSH_MAX_SIZE = 200;
+const clampBrushSize = (size: number) => Math.max(BRUSH_MIN_SIZE, Math.min(BRUSH_MAX_SIZE, Math.round(size)));
 
 // So sanh noi dung ban nhap tren thiet bi voi du lieu may chu. Chenh lech revision
 // khong dong nghia voi xung dot: neu noi dung y het nhau thi ban nhap chi la rac con
@@ -109,13 +115,21 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const [tool, setTool] = useState<EditorTool>(() => {
     if (typeof window === 'undefined') return 'select';
     const stored = localStorage.getItem('editor-tool') as EditorTool | null;
-    return stored && ['polygon', 'select', 'cut', 'pan'].includes(stored) ? stored : 'select';
+    return stored && ['polygon', 'select', 'brush', 'pan'].includes(stored) ? stored : 'select';
   });
   const [workspaceStep, setWorkspaceStep] = useState<WorkspaceStep>('mask');
   const [opacity, setOpacity] = useState(() => {
     if (typeof window === 'undefined') return 0.5;
     const stored = Number(localStorage.getItem('mask-opacity'));
     return Number.isFinite(stored) && stored >= 0.1 && stored <= 1 ? stored : 0.5;
+  });
+  const [brushMode, setBrushMode] = useState<BrushMode>(() => (
+    typeof window !== 'undefined' && localStorage.getItem('brush-mode') === 'erase' ? 'erase' : 'add'
+  ));
+  const [brushSize, setBrushSize] = useState(() => {
+    if (typeof window === 'undefined') return 24;
+    const stored = Number(localStorage.getItem('brush-size'));
+    return Number.isFinite(stored) && stored >= BRUSH_MIN_SIZE ? clampBrushSize(stored) : 24;
   });
   const [showMask, setShowMask] = useState(true);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
@@ -124,6 +138,11 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const [history, setHistory] = useState<EditorHistoryState>({ local: false, canUndo: false, canRedo: false });
   const onPolygonComplete = useCallback(() => { setTool('select'); localStorage.setItem('editor-tool', 'select'); }, []);
   const [zoom, setZoom] = useState(1);
+  const toolRef = useRef(tool);
+  const brushSizeRef = useRef(brushSize);
+  useEffect(() => { toolRef.current = tool; }, [tool]);
+  useEffect(() => { brushSizeRef.current = brushSize; localStorage.setItem('brush-size', String(brushSize)); }, [brushSize]);
+  useEffect(() => { localStorage.setItem('brush-mode', brushMode); }, [brushMode]);
   const [selectedPolygonIds, setSelectedPolygonIds] = useState<string[]>([]);
   const [snapshot, setSnapshot] = useState<EditorCanvasSnapshot>({
     humanAction: 'UNTOUCHED', breakpoints: emptyBreakpoints, maskOperations: [], polygons: [],
@@ -133,6 +152,10 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const [status, setStatus] = useState<SaveStatus>('SAVED');
   const [toast, setToast] = useState('');
   const [conflict, setConflict] = useState<{ serverRevision: number; localDraft: LocalDraft } | null>(null);
+  const [staleDraft, setStaleDraft] = useState<LocalDraft | null>(null);
+  const staleDraftRef = useRef<LocalDraft | null>(null);
+  const [draftDecisionPending, setDraftDecisionPending] = useState(false);
+  const prefetchedAssetsRef = useRef<HTMLImageElement[]>([]);
   const [conflictMinimized, setConflictMinimized] = useState(false);
   const conflictRef = useRef(false);
   const dirtyVersionRef = useRef(0);
@@ -154,6 +177,12 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         changeToolRef.current('pan');
       } else if (key === 'p') {
         changeToolRef.current('polygon', 'mask');
+      } else if (key === 'b' || key === 'e') {
+        setBrushMode(key === 'e' ? 'erase' : 'add');
+        changeToolRef.current('brush', 'mask');
+      } else if ((event.key === '[' || event.key === ']') && toolRef.current === 'brush') {
+        const step = Math.max(1, Math.round(brushSizeRef.current * 0.2));
+        setBrushSize(clampBrushSize(brushSizeRef.current + (event.key === '[' ? -step : step)));
       } else if (key === 'm') {
         // Temporarily hidden: changeToolRef.current('point', 'warts');
       } else if (event.key === '?') {
@@ -181,6 +210,15 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     const freshSnapshot: EditorCanvasSnapshot = {
       humanAction: 'UNTOUCHED', breakpoints: emptyBreakpoints, maskOperations: [], polygons: [],
     };
+    // Anh goc va mask du doan khong phu thuoc vao khoa hay bootstrap. Tai chung ngay
+    // tu dau de chung chay song song voi hai vong goi kia; luc canvas can thi trinh
+    // duyet da co san trong cache.
+    // Giu tham chieu toi luc canvas dung xong, de trinh duyet khong bo request giua chung.
+    prefetchedAssetsRef.current = ['image', 'prediction'].map((asset) => {
+      const image = new Image();
+      image.src = `/api/files/${fileId}/assets/${asset}`;
+      return image;
+    });
     void (async () => {
       await Promise.resolve();
       if (cancelled) return;
@@ -200,6 +238,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       transitioningFileRef.current = false;
       setConflict(null);
       setConflictMinimized(false);
+      setStaleDraft(null);
+      setDraftDecisionPending(false);
       setStatus('SAVED');
       setWorkspaceStep('mask');
       setTool('pan');
@@ -215,38 +255,32 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         revisionRef.current = lock?.baseRevision ?? data.annotation?.revision ?? 0;
         legacyBreakpointsRef.current = data.annotation?.breakpoints ?? emptyBreakpoints;
         const serverSeed = createServerSeed(data);
-        let local = canEdit ? await getLocalDraft(data.file.projectId, fileId, userId) : undefined;
+        const local = canEdit ? await getLocalDraft(data.file.projectId, fileId, userId) : undefined;
         if (cancelled) return;
-        if (local && local.syncState !== 'SYNCED' && draftMatchesServerSeed(local, serverSeed)) {
+        // Mo file luon bat dau tu du lieu may chu: moi lan roi khoi tep deu da dong bo,
+        // nen ban nhap tren thiet bi chi la luoi an toan cho luc mat dien hoac mat mang
+        // giua chung. No khong duoc tu de len ban da nam tren may chu.
+        const unsyncedDraft = local && local.syncState !== 'SYNCED' && !draftMatchesServerSeed(local, serverSeed)
+          ? local
+          : undefined;
+        // Ban nhap trung noi dung may chu chi la rac con sot lai; ban chua gui thi giu
+        // nguyen trong IndexedDB cho toi khi nguoi dung dung no hoac sua de len.
+        if (local && !unsyncedDraft) {
           await deleteLocalDraft(data.file.projectId, fileId, userId).catch(() => undefined);
-          local = undefined;
         }
-        if (local && local.syncState !== 'SYNCED') legacyBreakpointsRef.current = local.breakpoints;
         setBootstrap(data);
-
-        if (local && local.baseServerRevision === revisionRef.current && local.syncState !== 'SYNCED') {
-          const recovered: EditorSeed = {
-            key: Date.now(), humanAction: local.humanAction,
-            breakpoints: local.wartPoints ?? emptyBreakpoints, operations: local.maskOperations || [],
-            localMaskBlob: local.maskSnapshotBlob,
-          };
-          setSeed(recovered);
-          const recoveredSnapshot = { humanAction: recovered.humanAction, breakpoints: recovered.breakpoints, maskOperations: recovered.operations, polygons: polygonsFromOperations(recovered.operations) };
-          setSnapshot(recoveredSnapshot);
-          snapshotRef.current = recoveredSnapshot;
-          dirtyVersionRef.current = 1;
-          setToast('Đã khôi phục phần việc chưa đồng bộ trên thiết bị này.');
-          setStatus(navigator.onLine ? 'SAVING' : 'OFFLINE');
-        } else if (local && local.baseServerRevision !== revisionRef.current && local.syncState !== 'SYNCED') {
+        if (unsyncedDraft) {
           const localSeed: EditorSeed = {
-            key: Date.now(), humanAction: local.humanAction,
-            breakpoints: local.wartPoints ?? emptyBreakpoints, operations: local.maskOperations || [], localMaskBlob: local.maskSnapshotBlob,
+            key: Date.now(),
+            humanAction: unsyncedDraft.humanAction,
+            breakpoints: unsyncedDraft.wartPoints ?? emptyBreakpoints,
+            operations: unsyncedDraft.maskOperations || [],
+            localMaskBlob: unsyncedDraft.maskSnapshotBlob,
           };
           setSeed(localSeed);
           const localSnapshot = { humanAction: localSeed.humanAction, breakpoints: localSeed.breakpoints, maskOperations: localSeed.operations, polygons: polygonsFromOperations(localSeed.operations) };
-          setSnapshot(localSnapshot);
-          snapshotRef.current = localSnapshot;
-          conflictRef.current = true; setConflictMinimized(false); setConflict({ serverRevision: revisionRef.current, localDraft: local }); setStatus('CONFLICT');
+          setSnapshot(localSnapshot); snapshotRef.current = localSnapshot;
+          setStaleDraft(unsyncedDraft);
         } else {
           setSeed(serverSeed);
           const serverSnapshot = { humanAction: serverSeed.humanAction, breakpoints: serverSeed.breakpoints, maskOperations: serverSeed.operations, polygons: polygonsFromOperations(serverSeed.operations) };
@@ -269,8 +303,13 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     return dirtyVersionRef.current === syncedVersionRef.current ? 'SYNCED' : 'DIRTY';
   }, []);
 
+  useEffect(() => { staleDraftRef.current = staleDraft; }, [staleDraft]);
+
   const persistLocal = useCallback(async (syncState: SyncState = 'DIRTY') => {
     if (!bootstrap || readOnly || transitioningFileRef.current) return;
+    // Chi di ngang qua tep ma khong sua gi thi khong duoc ghi de len ban nhap chua gui:
+    // do van la phan viec duy nhat con lai cua lan mat dien hoac mat mang truoc do.
+    if (staleDraftRef.current && dirtyVersionRef.current === syncedVersionRef.current) return;
     const current = snapshotRef.current;
     await putLocalDraft({
       key: draftKey(bootstrap.file.projectId, fileId, userId),
@@ -364,8 +403,14 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     }, 30_000);
     const heartbeatInterval = window.setInterval(async () => {
       try { await sendHeartbeat(fileId); }
-      catch {
+      catch (error) {
         if (transitioningFileRef.current) return;
+        // Mat mang khong dong nghia voi mat khoa: khoa con hieu luc het LOCK_TTL nen
+        // nhip sau van gia han duoc. Chi khi may chu bao LOCK_LOST moi la mat quyen sua.
+        if ((error as ApiError).code !== 'LOCK_LOST') {
+          if (!navigator.onLine && !conflictRef.current) setStatus('OFFLINE');
+          return;
+        }
         await persistLocal('CONFLICT').catch(() => undefined);
         conflictRef.current = true; setStatus('CONFLICT');
         const local = await getLocalDraft(bootstrap.file.projectId, fileId, userId);
@@ -415,9 +460,17 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         if (!cancelled) { setQueue(result.items); setQueueTotal(result.total); setQueueError(''); }
       } catch { if (!cancelled) setQueueError('Chưa tải được danh sách tệp.'); }
     };
+    // Danh sach chi doi khi co nguoi khac nhan/nha khoa. Lam moi 8s la qua day voi
+    // do tre ~0.3s moi truy van; tab an thi khong can lam moi chut nao.
+    const refreshIfVisible = () => { if (document.visibilityState === 'visible') void refresh(); };
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 8000);
-    return () => { cancelled = true; window.clearInterval(timer); };
+    const timer = window.setInterval(refreshIfVisible, 20_000);
+    document.addEventListener('visibilitychange', refreshIfVisible);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshIfVisible);
+    };
   }, [bootstrap, queuePage]);
 
   useEffect(() => {
@@ -501,6 +554,39 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     URL.revokeObjectURL(url);
   };
 
+  // Server duoc tai de doi chieu, nhung canvas van giu nguyen ban ve cuc bo cho toi khi
+  // nguoi dung chu dong chon phien ban muon tiep tuc.
+  const keepLocalDraft = () => {
+    if (!staleDraft || readOnly || conflictRef.current) return;
+    legacyBreakpointsRef.current = staleDraft.breakpoints;
+    staleDraftRef.current = null;
+    dirtyVersionRef.current += 1;
+    setStaleDraft(null);
+    setStatus(navigator.onLine ? 'SAVING' : 'OFFLINE');
+    setToast('Đang giữ bản vẽ trên thiết bị. Bấm Lưu để cập nhật lên máy chủ.');
+  };
+
+  const applyServerDraft = async () => {
+    if (!bootstrap || !staleDraft || draftDecisionPending) return;
+    setDraftDecisionPending(true);
+    try {
+      await deleteLocalDraft(bootstrap.file.projectId, fileId, userId);
+      const serverSeed = createServerSeed(bootstrap);
+      const serverSnapshot = { humanAction: serverSeed.humanAction, breakpoints: serverSeed.breakpoints, maskOperations: serverSeed.operations, polygons: polygonsFromOperations(serverSeed.operations) };
+      setSeed({ ...serverSeed, key: Date.now() });
+      setSnapshot(serverSnapshot); snapshotRef.current = serverSnapshot;
+      legacyBreakpointsRef.current = bootstrap.annotation?.breakpoints ?? emptyBreakpoints;
+      dirtyVersionRef.current = 0; syncedVersionRef.current = 0;
+      staleDraftRef.current = null; setStaleDraft(null);
+      setStatus('SAVED');
+      setToast('Đã cập nhật canvas theo dữ liệu trên máy chủ.');
+    } catch {
+      setToast('Chưa thể cập nhật theo máy chủ. Bản vẽ hiện tại trên thiết bị vẫn được giữ nguyên.');
+    } finally {
+      setDraftDecisionPending(false);
+    }
+  };
+
   const flushExplicitly = useCallback(async () => {
     if (readOnly) return true;
     await persistLocal(pendingSyncState()).catch(() => undefined);
@@ -510,7 +596,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const selectTool = useCallback(async (nextTool: EditorTool, nextStep = workspaceStep) => {
     if (navigating || status === 'SYNCING') return;
     if (nextStep !== workspaceStep && !await flushExplicitly()) return;
-    if (!readOnly && !conflictRef.current && nextTool === 'select' && nextStep === 'mask') canvasRef.current?.beginPolygonEdit();
+    if (!readOnly && !conflictRef.current && (nextTool === 'select' || nextTool === 'brush') && nextStep === 'mask') canvasRef.current?.beginPolygonEdit();
+    if (nextTool === 'brush') setShowMask(true);
     setTool(readOnly ? 'pan' : nextTool);
     setWorkspaceStep(nextStep);
     localStorage.setItem('editor-tool', nextTool);
@@ -541,10 +628,6 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   };
   const completePolygon = async () => {
     if (!canvasRef.current?.completePolygon()) return;
-    await flushExplicitly();
-  };
-  const applyCut = async () => {
-    if (!canvasRef.current?.applyCut()) return;
     await flushExplicitly();
   };
   /* Wart task temporarily hidden.
@@ -615,6 +698,24 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
           </div>
           {workspaceStep === 'mask' ? <button className={`layer-toggle ${showMask ? 'active' : ''}`} title={showMask ? 'Ẩn lớp phủ' : 'Hiện lớp phủ'} onClick={() => setShowMask((visible) => !visible)}><Icon name="layers" /> <span>{showMask ? 'Lớp phủ đang bật' : 'Lớp phủ đang ẩn'}</span></button> : null}
 
+          {workspaceStep === 'mask' && tool === 'brush' ? <fieldset className="brush-toolbar" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} aria-label="Công cụ bút vẽ và tẩy">
+            <div className="brush-mode-switch" role="group" aria-label="Chế độ nét vẽ">
+              <button type="button" className={brushMode === 'add' ? 'active' : ''} aria-pressed={brushMode === 'add'} title="Bút vẽ — tô thêm mask (B)" onClick={() => setBrushMode('add')}>
+                <Icon name="brush" /><span>Bút vẽ</span>
+              </button>
+              <button type="button" className={brushMode === 'erase' ? 'active erase' : ''} aria-pressed={brushMode === 'erase'} title="Tẩy — tẩy xuyên qua mask để tách vùng (E)" onClick={() => setBrushMode('erase')}>
+                <Icon name="eraser" /><span>Tẩy</span>
+              </button>
+            </div>
+            <span className="toolbar-divider" />
+            <label className="brush-size-field">
+              <span>Cỡ nét</span>
+              <input type="range" min={BRUSH_MIN_SIZE} max={BRUSH_MAX_SIZE} step="1" value={brushSize}
+                onChange={(event) => setBrushSize(clampBrushSize(Number(event.target.value)))} />
+              <strong>{brushSize} px</strong>
+            </label>
+          </fieldset> : null}
+
           <div className="canvas-control-stack">
             <div className="viewport-zoom" aria-label="Điều khiển thu phóng">
               <button aria-label="Phóng to" title="Phóng to" onClick={() => canvasRef.current?.zoomBy(1.2)}>＋</button>
@@ -626,7 +727,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               <ToolbarButton active={tool === 'pan'} label="Di chuyển ảnh (H)" icon="hand" onClick={() => selectTool('pan')} />
               <ToolbarButton active={tool === 'polygon'} label="Vẽ polygon (P)" icon="polygon" onClick={() => selectTool('polygon', 'mask')} />
               {/* Temporarily hidden: <ToolbarButton active={tool === 'point'} label="Đánh dấu point u vấu (M)" icon="pin" onClick={() => selectTool('point', 'warts')} /> */}
-              <ToolbarButton active={tool === 'cut'} label="Cắt polygon" icon="scissors" onClick={() => selectTool('cut', 'mask')} />
+              <ToolbarButton active={tool === 'brush'} label="Bút vẽ / Tẩy mask (B)" icon="brush" onClick={() => selectTool('brush', 'mask')} />
               <ToolbarButton disabled={selectedPolygonIds.length < 2} label="Gộp polygon đã chọn" icon="merge" onClick={() => canvasRef.current?.groupSelectedPolygons()} />
               <span className="toolbar-divider" />
               <ToolbarButton active={history.local} disabled={!history.canUndo} label={history.local ? "Hoàn tác điểm (Ctrl + Z) — cục bộ" : "Hoàn tác toàn cục (Ctrl + Z)"} icon="undo" onClick={() => canvasRef.current?.undo()} />
@@ -642,6 +743,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
             currentMaskUrl={bootstrap.assets.currentMaskUrl} localMaskBlob={seed.localMaskBlob}
             initialHumanAction={seed.humanAction} initialBreakpoints={seed.breakpoints} initialOperations={seed.operations}
             readOnly={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} tool={readOnly ? 'pan' : tool} maskOpacity={opacity} showMask={showMask}
+            brushMode={brushMode} brushSize={brushSize}
             onHistoryChange={setHistory} onPolygonComplete={onPolygonComplete}
             onChange={onEditorChange} onSelectionChange={setSelectedPolygonIds} onReady={onCanvasReady} onMessage={setToast} onZoomChange={setZoom} />
         </section>
@@ -671,12 +773,11 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               <section className="object-section">
                 <p aria-live="polite">{history.local
                   ? 'Đang sửa polygon: Ctrl+Z hoàn tác điểm; Ctrl+Y hoặc Ctrl+Shift+Z làm lại. Enter để hoàn tất, Esc để hủy. Undo/redo màu tím áp dụng cục bộ.'
-                  : 'Ctrl+Z hoàn tác toàn cục; Ctrl+Y hoặc Ctrl+Shift+Z làm lại. Polygon vừa hoàn tất được hoàn tác/làm lại cả vùng.'}</p>
-                <p>{tool === 'cut'
-                  ? 'Kéo qua hai biên polygon rồi thả chuột để tự nhận diện và tách. Chuột phải chọn/bỏ chọn polygon; Enter hoặc “Thực hiện cắt” áp dụng đường cắt đang giữ. Polygon khóa không bị cắt.'
+                  : 'Ctrl+Z hoàn tác toàn cục; Ctrl+Y hoặc Ctrl+Shift+Z làm lại. Polygon vừa hoàn tất được hoàn tác cả vùng.'}</p>
+                <p>{tool === 'brush'
+                  ? 'Tẩy xuyên qua mask để tách thành các vùng riêng biệt; tô để mở rộng vùng hoặc nối hai vùng thành một. Mỗi nét là một bước hoàn tác. Polygon đang khóa không bị ảnh hưởng.'
                   : 'Di chuột lên điểm để hiện dấu × đỏ, bấm chuột phải để xóa điểm. Polygon đã đóng cần ít nhất 3 điểm.'}</p>
                 {tool === 'polygon' ? <button className="button primary" onClick={() => void completePolygon()}>Hoàn tất polygon</button> : null}
-                {tool === 'cut' ? <button className="button primary" onClick={() => void applyCut()}>Thực hiện cắt</button> : null}
                 <div className="section-title-row"><p>Thông tin đối tượng</p><span>{polygonCount} vùng</span></div>
                 <PolygonLabelEditor
                   key={`${selectedPolygonIds.join(',')}:${selectedPolygons.map((polygon) => `${polygon.label}:${Boolean(polygon.meta?.locked)}`).join(',')}`}
@@ -730,9 +831,26 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       {helpOpen ? <div className="modal-backdrop help-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><section className="shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-title">
         <div className="shortcut-header"><div><span className="help-mark">?</span><span><h2 id="shortcut-title">Trợ giúp &amp; phím tắt</h2><p>Thao tác nhanh hơn trên vùng chú thích</p></span></div><button aria-label="Đóng trợ giúp" onClick={() => setHelpOpen(false)}>×</button></div>
         <div className="shortcut-content">
-          <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" />{/* <Shortcut keys={['M']} label="Đánh dấu point u vấu" /> */}<Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'Z']} label={history.local ? "Hoàn tác điểm (cục bộ)" : "Hoàn tác toàn cục"} /><Shortcut keys={['Ctrl', 'Y']} label={history.local ? "Làm lại điểm (cục bộ)" : "Làm lại toàn cục"} /></section>
-          <section className="usage-tips"><h3>Mẹo sử dụng</h3><p><Icon name="cursor" />Ở chế độ V, kéo khung qua các node để chọn nhiều polygon.</p><p><Icon name="polygon" />Chế độ P chỉ dùng để vẽ một polygon mới.</p><p><Icon name="layers" />Ẩn lớp phủ khi cần quan sát ảnh gốc.</p><p><Icon name="hand" />Dùng con lăn để zoom; Shift + con lăn để cuộn ngang.</p></section>
+          <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" /><Shortcut keys={['B']} label="Bút vẽ mask" /><Shortcut keys={['E']} label="Tẩy mask" /><Shortcut keys={['[', ']']} label="Giảm / tăng cỡ nét" />{/* <Shortcut keys={['M']} label="Đánh dấu point u vấu" /> */}<Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'Z']} label={history.local ? "Hoàn tác điểm (cục bộ)" : "Hoàn tác toàn cục"} /><Shortcut keys={['Ctrl', 'Y']} label={history.local ? "Làm lại điểm (cục bộ)" : "Làm lại toàn cục"} /></section>
+          <section className="usage-tips"><h3>Mẹo sử dụng</h3><p><Icon name="cursor" />Ở chế độ V, kéo khung qua các node để chọn nhiều polygon.</p><p><Icon name="polygon" />Chế độ P chỉ dùng để vẽ một polygon mới.</p><p><Icon name="eraser" />Ở chế độ B, tẩy xuyên qua mask để tách vùng; mảnh nào khép kín thành một mask riêng.</p><p><Icon name="layers" />Ẩn lớp phủ khi cần quan sát ảnh gốc.</p><p><Icon name="hand" />Dùng con lăn để zoom; Shift + con lăn để cuộn ngang.</p></section>
         </div>
+      </section></div> : null}
+      {staleDraft && !conflict ? <div className="modal-backdrop draft-choice-backdrop"><section className="draft-choice-dialog" role="dialog" aria-modal="true" aria-labelledby="draft-choice-title" aria-describedby="draft-choice-description">
+        <div className="draft-choice-icon" aria-hidden="true"><Icon name="files" /></div>
+        <p className="eyebrow">Có bản vẽ chưa đồng bộ</p>
+        <h2 id="draft-choice-title">Bạn muốn tiếp tục thế nào?</h2>
+        <p id="draft-choice-description">Hệ thống đã tải dữ liệu máy chủ để đối chiếu và phát hiện bản vẽ trên thiết bị này chưa được gửi lên. Canvas phía sau vẫn là bản vẽ trên thiết bị.</p>
+        <div className="draft-choice-options">
+          <button className="draft-choice-option device" type="button" disabled={draftDecisionPending} onClick={keepLocalDraft}>
+            <strong>Giữ bản vẽ hiện tại</strong>
+            <span>Tiếp tục với phần đang làm dở trên thiết bị. Bạn cần bấm Lưu để gửi bản này lên máy chủ.</span>
+          </button>
+          <button className="draft-choice-option server" type="button" disabled={draftDecisionPending} onClick={() => void applyServerDraft()}>
+            <strong>{draftDecisionPending ? 'Đang cập nhật…' : 'Cập nhật từ máy chủ'}</strong>
+            <span>Thay canvas bằng phiên bản đã đồng bộ. Bản vẽ chưa gửi trên thiết bị sẽ bị bỏ.</span>
+          </button>
+        </div>
+        <p className="draft-choice-note">Chưa có dữ liệu nào bị thay thế cho đến khi bạn chọn.</p>
       </section></div> : null}
       {conflict && conflictMinimized ? <button className="conflict-chip" onClick={() => setConflictMinimized(false)}>Có xung đột — mở lựa chọn xử lý</button> : null}
       {conflict && !conflictMinimized ? <div className="modal-backdrop"><div className="conflict-dialog panel" role="dialog" aria-modal="true" aria-labelledby="conflict-title">
@@ -748,7 +866,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   );
 }
 
-type IconName = 'chevron-left' | 'chevron-right' | 'cursor' | 'files' | 'fit' | 'folder' | 'hand' | 'layers' | 'merge' | 'pin' | 'polygon' | 'redo' | 'scissors' | 'trash' | 'undo';
+type IconName = 'brush' | 'chevron-left' | 'chevron-right' | 'cursor' | 'eraser' | 'files' | 'fit' | 'folder' | 'hand' | 'layers' | 'merge' | 'pin' | 'polygon' | 'redo' | 'trash' | 'undo';
 
 function ToolbarButton({ active = false, danger = false, disabled = false, icon, label, onClick }: { active?: boolean; danger?: boolean; disabled?: boolean; icon: IconName; label: string; onClick(): void }) {
   return <button type="button" aria-label={label} aria-pressed={active || undefined} className={`${active ? 'active' : ''} ${danger ? 'danger' : ''}`} disabled={disabled} title={label} onClick={onClick}><Icon name={icon} /></button>;
@@ -760,9 +878,11 @@ function Shortcut({ keys, label }: { keys: string[]; label: string }) {
 
 function Icon({ name }: { name: IconName }) {
   const paths: Record<IconName, ReactNode> = {
+    brush: <><path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08" /><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02Z" /></>,
     'chevron-left': <path d="m15 18-6-6 6-6" />,
     'chevron-right': <path d="m9 18 6-6-6-6" />,
     cursor: <path d="m5 3 6.4 15 2.2-5.4L19 10.4 5 3Z" />,
+    eraser: <><path d="m7 21-4.3-4.3a2.4 2.4 0 0 1 0-3.4l9.6-9.6a2.4 2.4 0 0 1 3.4 0l5.6 5.6a2.4 2.4 0 0 1 0 3.4L13 21" /><path d="M22 21H7M5 11l8 8" /></>,
     files: <><path d="M4 7h16v12H4z" /><path d="M8 4h8M12 10v6m-3-3h6" /></>,
     fit: <><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5" /><path d="M8 8h8v8H8z" /></>,
     folder: <path d="M3 6h7l2 2h9v10H3z" />,
@@ -772,7 +892,6 @@ function Icon({ name }: { name: IconName }) {
     pin: <><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z" /><circle cx="12" cy="10" r="2" /></>,
     polygon: <path d="m7 4 10 2 3 10-8 5-9-7 4-10Z" />,
     redo: <><path d="m17 7 4 4-4 4" /><path d="M3 18v-2a5 5 0 0 1 5-5h13" /></>,
-    scissors: <><circle cx="6" cy="7" r="3" /><circle cx="6" cy="17" r="3" /><path d="m8.7 8.4 11.3 6.1M8.7 15.6 20 9.5" /></>,
     trash: <><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7" /><path d="M10 11v6m4-6v6" /></>,
     undo: <><path d="m7 7-4 4 4 4" /><path d="M21 18v-2a5 5 0 0 0-5-5H3" /></>,
   };

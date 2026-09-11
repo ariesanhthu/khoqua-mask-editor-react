@@ -1,10 +1,14 @@
-import type { AnnotationPolygon, PolygonNode } from '@/types';
+import type { AnnotationPolygon, AnnotationPolygonMeta, PolygonNode } from '@/types';
 import polygonClipping from 'polygon-clipping';
 
 const EPSILON = 1e-6;
 const GEOMETRY_EPSILON = 1e-6;
 const MIN_BRIDGE_WIDTH = 2;
 const MAX_BRIDGE_WIDTH = 8;
+const MIN_REGION_AREA = 1e-6;
+const BRUSH_UNION_CHUNK = 8;
+const BRUSH_MIN_SPACING = 0.1;
+const BRUSH_MAX_SAMPLES = 400;
 
 type GeometryPoint = [number, number];
 type GeometryRing = GeometryPoint[];
@@ -219,6 +223,23 @@ function unionGeometries(geometries: GeometryPolygon[]): GeometryMultiPolygon {
   return union(...geometries);
 }
 
+type ClipInput = GeometryPolygon | GeometryMultiPolygon;
+
+function differenceGeometries(subject: ClipInput, clip: ClipInput): GeometryMultiPolygon {
+  const difference = polygonClipping.difference as unknown as (first: ClipInput, ...rest: ClipInput[]) => GeometryMultiPolygon;
+  return difference(subject, clip);
+}
+
+function unionClipInputs(items: ClipInput[]): GeometryMultiPolygon {
+  const union = polygonClipping.union as unknown as (first: ClipInput, ...rest: ClipInput[]) => GeometryMultiPolygon;
+  return union(items[0], ...items.slice(1));
+}
+
+function intersectionGeometries(subject: ClipInput, clip: ClipInput): GeometryMultiPolygon {
+  const intersection = polygonClipping.intersection as unknown as (first: ClipInput, ...rest: ClipInput[]) => GeometryMultiPolygon;
+  return intersection(subject, clip);
+}
+
 export function mergePolygonsIntoSingle(polygons: AnnotationPolygon[]): MergePolygonsResult {
   if (polygons.length < 2) return { error: 'Chọn ít nhất 2 polygon để gộp.' };
 
@@ -237,7 +258,7 @@ export function mergePolygonsIntoSingle(polygons: AnnotationPolygon[]): MergePol
     return { error: 'Không thể gộp vì hình học polygon không hợp lệ.' };
   }
   if (!components.length) return { error: 'Không thể gộp polygon.' };
-  // AnnotationPolygon stores one outer ring, so holes are intentionally filled.
+  // Explicit Merge intentionally fills holes; brush operations preserve them.
   components = components.map((component) => [component[0]]);
 
   if (components.length > 1) {
@@ -292,6 +313,7 @@ export function clonePolygons(polygons: AnnotationPolygon[]): AnnotationPolygon[
     ...polygon,
     ...(polygon.meta ? { meta: { ...polygon.meta } } : {}),
     nodes: polygon.nodes.map((node) => ({ ...node })),
+    ...(polygon.holes ? { holes: polygon.holes.map((ring) => ring.map((node) => ({ ...node }))) } : {}),
   }));
 }
 
@@ -436,4 +458,268 @@ export function resolvePolygonCut(
     candidate = { ...result, targetId: polygon.id };
   }
   return candidate ?? { error: 'Chưa nhận diện được polygon để tách. Kéo qua hai biên hoặc chuột phải chọn polygon, rồi nhấn Enter.' };
+}
+
+// ─── Brush (bút vẽ / tẩy) ───────────────────────────────
+
+export type BrushMode = 'add' | 'erase';
+
+export interface BrushStrokeResult {
+  /** Toàn bộ danh sách polygon sau khi áp nét vẽ. */
+  polygons?: AnnotationPolygon[];
+  /** Id các vùng vừa sinh ra, để canvas chọn lại sau khi commit. */
+  resultIds?: string[];
+  error?: string;
+}
+
+interface BrushAttempt {
+  /** Lệch pha của đa giác đầu cọ, tính theo tỉ lệ một bước góc. */
+  phase: number;
+  /** Bước lưới làm tròn toạ độ; 0 nghĩa là giữ nguyên. */
+  grid: number;
+  segments: number;
+}
+
+/**
+ * polygon-clipping@0.15 thỉnh thoảng vỡ sweep line khi hai biên gần trùng nhau
+ * (đầu cọ tiếp tuyến đúng cạnh thân cọ ở nét dọc hoặc ngang). Mỗi lần thử làm
+ * nhiễu hình học một kiểu khác ở mức dưới một pixel; đo trên 1218 nét vẽ ngẫu
+ * nhiên thì thang này chỉ còn đúng một nét thất bại, và nét đó chỉ báo lỗi chứ
+ * không làm hỏng dữ liệu.
+ */
+const BRUSH_ATTEMPTS: BrushAttempt[] = [
+  { phase: 0, grid: 1 / 64, segments: 16 },
+  { phase: 0.31, grid: 1 / 64, segments: 16 },
+  { phase: 0.17, grid: 1 / 256, segments: 16 },
+  { phase: 0.43, grid: 1 / 16, segments: 12 },
+  { phase: 0.07, grid: 0, segments: 20 },
+];
+
+type GeometryBounds = { left: number; right: number; top: number; bottom: number };
+
+function ringBounds(ring: GeometryRing): GeometryBounds {
+  return ring.reduce<GeometryBounds>((result, [x, y]) => ({
+    left: Math.min(result.left, x),
+    right: Math.max(result.right, x),
+    top: Math.min(result.top, y),
+    bottom: Math.max(result.bottom, y),
+  }), { left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity });
+}
+
+function boundsOverlap(a: GeometryBounds, b: GeometryBounds): boolean {
+  return a.right >= b.left && a.left <= b.right && a.bottom >= b.top && a.top <= b.bottom;
+}
+
+/** Validate every brush boundary without replacing the shape with a convex hull. */
+function polygonGeometry(polygon: AnnotationPolygon): GeometryPolygon | null {
+  const rings = polygonRings(polygon).map((nodes) => normalizeRing(nodes));
+  return rings.some((ring) => !ring) ? null : rings as GeometryPolygon;
+}
+
+export function polygonRings(polygon: AnnotationPolygon): PolygonNode[][] {
+  return [polygon.nodes, ...(polygon.holes ?? [])];
+}
+
+export function pointInMask(point: Pick<PolygonNode, 'x' | 'y'>, polygon: AnnotationPolygon): boolean {
+  return pointInPolygon(point, polygon.nodes)
+    && !(polygon.holes ?? []).some((ring) => pointInPolygon(point, ring));
+}
+
+function ringToNodes(ring: GeometryRing): PolygonNode[] {
+  return ring.map(([x, y]) => ({ id: createId(), x, y }));
+}
+
+/** Hợp theo từng cụm nhỏ rồi hợp tiếp các cụm: nhanh hơn nhiều lần một lời gọi phẳng. */
+function chunkedUnion(pieces: GeometryMultiPolygon[]): GeometryMultiPolygon {
+  let level = pieces;
+  while (level.length > 1) {
+    const next: GeometryMultiPolygon[] = [];
+    for (let index = 0; index < level.length; index += BRUSH_UNION_CHUNK) {
+      next.push(unionClipInputs(level.slice(index, index + BRUSH_UNION_CHUNK)));
+    }
+    level = next;
+  }
+  return level[0] ?? [];
+}
+
+/** Bỏ bớt mẫu con trỏ nhưng luôn giữ điểm cuối để nét không bị cụt. */
+function decimateStroke(points: Array<{ x: number; y: number }>, spacing: number) {
+  const kept = [points[0]];
+  for (const point of points.slice(1)) {
+    const last = kept[kept.length - 1];
+    if (Math.hypot(point.x - last.x, point.y - last.y) >= spacing) kept.push(point);
+  }
+  const last = points[points.length - 1];
+  if (kept[kept.length - 1] !== last) kept.push(last);
+  return kept;
+}
+
+/**
+ * Biến các mẫu con trỏ thành vùng quét của đầu cọ tròn: mỗi mẫu là một đa giác
+ * đều xấp xỉ hình tròn, mỗi cặp mẫu liên tiếp là một hình chữ nhật lệch theo
+ * pháp tuyến. Hình chữ nhật chính là phần nội suy giữa hai mẫu, giữ nét liền
+ * mạch khi rê chuột nhanh. Đầu cọ xoay lệch nửa bước so với hướng đi để đỉnh
+ * của nó không nằm đúng trên cạnh thân cọ.
+ */
+function brushStrokeGeometry(
+  strokePoints: Array<{ x: number; y: number }>,
+  radius: number,
+  attempt: BrushAttempt,
+  bounds?: { width: number; height: number },
+): GeometryMultiPolygon {
+  const usableRadius = Math.max(0.5, radius);
+  const samples = strokePoints.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  if (!samples.length) return [];
+
+  const spacing = Math.max(usableRadius * 0.4, BRUSH_MIN_SPACING);
+  let kept = decimateStroke(samples, spacing);
+  if (usableRadius > 1 && kept.length > BRUSH_MAX_SAMPLES) kept = decimateStroke(samples, (spacing * kept.length) / BRUSH_MAX_SAMPLES);
+
+  const step = (Math.PI * 2) / attempt.segments;
+  const snap = (value: number) => attempt.grid ? Math.round(value / attempt.grid) * attempt.grid : value;
+  const direction = (index: number) => {
+    const previous = kept[Math.max(0, index - 1)];
+    const next = kept[Math.min(kept.length - 1, index + 1)];
+    return Math.atan2(next.y - previous.y, next.x - previous.x);
+  };
+
+  const pieces: GeometryMultiPolygon[] = kept.map((point, index) => {
+    const base = direction(index) + step / 2 + attempt.phase * step;
+    const ring: GeometryRing = [];
+    for (let corner = 0; corner < attempt.segments; corner += 1) {
+      const angle = base + corner * step;
+      ring.push([snap(point.x + Math.cos(angle) * usableRadius), snap(point.y + Math.sin(angle) * usableRadius)]);
+    }
+    return [[ring]];
+  });
+  for (let index = 0; index < kept.length - 1; index += 1) {
+    const start = kept[index];
+    const end = kept[index + 1];
+    const length = Math.hypot(end.x - start.x, end.y - start.y);
+    if (length <= GEOMETRY_EPSILON) continue;
+    const normalX = (-(end.y - start.y) / length) * usableRadius;
+    const normalY = ((end.x - start.x) / length) * usableRadius;
+    pieces.push([[[
+      [snap(start.x + normalX), snap(start.y + normalY)],
+      [snap(end.x + normalX), snap(end.y + normalY)],
+      [snap(end.x - normalX), snap(end.y - normalY)],
+      [snap(start.x - normalX), snap(start.y - normalY)],
+    ]]]);
+  }
+
+  const stroke = chunkedUnion(pieces);
+  if (!bounds || !stroke.length) return stroke;
+  return intersectionGeometries(stroke, [[
+    [0, 0], [bounds.width, 0], [bounds.width, bounds.height], [0, bounds.height],
+  ]]);
+}
+
+// Preserve both the outer boundary and every unpainted inner boundary.
+function brushComponents(components: GeometryMultiPolygon) {
+  return components.flatMap((component) => {
+    const rings = component.map((ring) => normalizeRing(ring));
+    if (rings.some((ring) => !ring)) throw new Error('Invalid clipping result');
+    const [outer, ...holes] = rings as GeometryRing[];
+    if (Math.abs(ringArea(outer)) < MIN_REGION_AREA) return [];
+    return [{ nodes: ringToNodes(outer), ...(holes.length ? { holes: holes.map(ringToNodes) } : {}) }];
+  });
+}
+
+function resolveBrushStroke(
+  polygons: AnnotationPolygon[],
+  geometries: Array<GeometryPolygon | null>,
+  stroke: GeometryMultiPolygon,
+  mode: BrushMode,
+  newRegion: { label: string; meta?: AnnotationPolygonMeta },
+): BrushStrokeResult {
+  const touched = geometries.map((geometry) => !!geometry
+    && intersectionGeometries(geometry, stroke).length > 0);
+  if (mode === 'erase') {
+    const resultIds: string[] = [];
+    const next = polygons.flatMap((polygon, index) => {
+      if (!touched[index]) return [polygon];
+      return brushComponents(differenceGeometries(geometries[index]!, stroke)).map((shape) => {
+        const created = { ...shape, id: createId(), label: polygon.label, meta: { ...polygon.meta, source: 'human' as const } };
+        resultIds.push(created.id);
+        return created;
+      });
+    });
+    if (!touched.some(Boolean)) return { error: 'Nét tẩy chưa chạm vùng mask nào.' };
+    return { polygons: next, resultIds };
+  }
+
+  const affectedIndexes = touched.flatMap((value, index) => value ? [index] : []);
+  const template = affectedIndexes.length
+    ? affectedIndexes.map((index) => polygons[index]).reduce((largest, candidate) =>
+      Math.abs(polygonArea(candidate.nodes)) > Math.abs(polygonArea(largest.nodes)) ? candidate : largest)
+    : newRegion;
+  // Exact local union, including all inner rings. No hull, bridge or hole filling.
+  const geometry = chunkedUnion([stroke, ...affectedIndexes.map((index) => [geometries[index]!])]);
+  const created = brushComponents(geometry).map((shape): AnnotationPolygon => ({
+    ...shape, id: createId(), label: template.label, meta: { ...template.meta, source: 'human' },
+  }));
+  if (!created.length) return { error: 'Nét vẽ quá nhỏ để tạo vùng mới.' };
+  const affected = new Set(affectedIndexes);
+  const next = affectedIndexes.length ? polygons.flatMap((polygon, index) =>
+    index === affectedIndexes[0] ? created : affected.has(index) ? [] : [polygon])
+    : [...polygons, ...created];
+  return { polygons: next, resultIds: created.map((polygon) => polygon.id) };
+}
+
+/**
+ * Áp một nét bút hoặc nét tẩy lên danh sách polygon.
+ *
+ * - `erase`: mỗi mảnh còn khép kín sau khi trừ nét tẩy trở thành một vùng riêng
+ *   biệt, giữ nguyên label như splitPolygonWithCut (trùng label là bình thường).
+ * - `add`: hợp nét vẽ với mọi vùng nó chạm tới, nên tô nối hai vùng rời sẽ ra
+ *   một vùng mang label/meta của vùng lớn nhất. Không chạm vùng nào thì tạo
+ *   vùng mới từ `newRegion`.
+ *
+ * Polygon đang khóa luôn được giữ nguyên, giống resolvePolygonCut.
+ */
+export function applyBrushStroke(
+  polygons: AnnotationPolygon[],
+  strokePoints: Array<{ x: number; y: number }>,
+  radius: number,
+  mode: BrushMode,
+  newRegion: { label: string; meta?: AnnotationPolygonMeta },
+  bounds?: { width: number; height: number },
+): BrushStrokeResult {
+  if (!strokePoints.length) return { error: 'Nét vẽ chưa có điểm nào.' };
+  // Reject distant polygons before quadratic ring validation.
+  const validPoints = strokePoints.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  if (!validPoints.length) return { error: 'Invalid brush coordinates.' };
+  const strokeBounds = ringBounds(validPoints.map((point) => [point.x, point.y]));
+  const padding = Math.max(0.5, radius) + 0.1;
+  strokeBounds.left -= padding;
+  strokeBounds.right += padding;
+  strokeBounds.top -= padding;
+  strokeBounds.bottom += padding;
+  let invalidCandidate = false;
+  const rings = polygons.map((polygon) => {
+    if (polygon.meta?.locked) return null;
+    const bounds = ringBounds(polygon.nodes.map((node) => [node.x, node.y]));
+    if (!boundsOverlap(bounds, strokeBounds)) return null;
+    const geometry = polygonGeometry(polygon);
+    if (!geometry) invalidCandidate = true;
+    return geometry;
+  });
+
+  if (invalidCandidate) return { error: 'Biên mask không hợp lệ. Hãy chỉnh lại biên trước khi vẽ.' };
+
+  for (const attempt of BRUSH_ATTEMPTS) {
+    let stroke: GeometryMultiPolygon;
+    try {
+      stroke = brushStrokeGeometry(strokePoints, radius, attempt, bounds);
+    } catch {
+      continue;
+    }
+    if (!stroke.length) return { error: 'Nét vẽ nằm ngoài ảnh hoặc quá nhỏ để áp dụng.' };
+    try {
+      return resolveBrushStroke(polygons, rings, stroke, mode, newRegion);
+    } catch {
+      continue;
+    }
+  }
+  return { error: 'Không xử lý được nét vẽ này. Hãy vẽ lại một nét ngắn hơn.' };
 }

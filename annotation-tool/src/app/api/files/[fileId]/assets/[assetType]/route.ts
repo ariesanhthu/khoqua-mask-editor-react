@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { createHash } from 'node:crypto';
 import { access, readFile } from 'fs/promises';
 import path from 'path';
 import { getDb } from '@/lib/db';
@@ -14,6 +15,14 @@ export const runtime = 'nodejs';
  * Serves image or prediction mask. For now serves placeholder/local files.
  * In production, this would proxy from Google Drive.
  */
+const etagFor = (version: string) => `"${createHash('sha1').update(version).digest('hex').slice(0, 24)}"`;
+
+function notModified(request: Request, etag: string, cacheControl: string) {
+  const requested = request.headers.get('if-none-match');
+  if (!requested || requested !== etag) return null;
+  return new NextResponse(null, { status: 304, headers: { ETag: etag, 'Cache-Control': cacheControl, Vary: 'Cookie' } });
+}
+
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ fileId: string; assetType: string }> }
@@ -49,17 +58,24 @@ export async function GET(
   let contentType: string;
 
   if (assetType === 'current-mask') {
-    const annotation = await db.prepare<{ segmentation_json: string }>('SELECT segmentation_json FROM annotations WHERE dataset_file_id = ?')
-      .get(fileId);
+    const annotation = await db.prepare<{ segmentation_json: string; revision: number }>(
+      'SELECT segmentation_json, revision FROM annotations WHERE dataset_file_id = ?',
+    ).get(fileId);
     const storageKey = annotation
       ? (JSON.parse(annotation.segmentation_json) as { maskStorageKey?: string }).maskStorageKey
       : undefined;
     if (!storageKey) {
       return NextResponse.json({ code: 'ASSET_NOT_FOUND', message: 'Current mask not found' }, { status: 404 });
     }
+    const maskCacheControl = 'private, no-cache';
+    const maskEtag = etagFor(`${storageKey}:${annotation!.revision}`);
+    const cached = notModified(request, maskEtag, maskCacheControl);
+    if (cached) return cached;
     try {
       const buffer = await readStoredMask(storageKey);
-      return new NextResponse(toArrayBuffer(buffer), { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'private, no-store' } });
+      return new NextResponse(toArrayBuffer(buffer), {
+        headers: { 'Content-Type': 'image/png', 'Cache-Control': maskCacheControl, ETag: maskEtag, Vary: 'Cookie' },
+      });
     } catch {
       return NextResponse.json({ code: 'ASSET_NOT_FOUND', message: 'Current mask not found' }, { status: 404 });
     }
@@ -73,6 +89,17 @@ export async function GET(
     return NextResponse.json({ code: 'ASSET_NOT_FOUND', message: 'Invalid asset type' }, { status: 404 });
   }
 
+  const sourceCacheControl = 'private, max-age=3600, stale-while-revalidate=86400';
+  const sourceEtag = etagFor(`${assetType}:${filePath}:${file.updated_at}`);
+  const cachedSource = notModified(request, sourceEtag, sourceCacheControl);
+  if (cachedSource) return cachedSource;
+  const sourceHeaders = {
+    'Content-Type': contentType,
+    'Cache-Control': sourceCacheControl,
+    ETag: sourceEtag,
+    Vary: 'Cookie',
+  };
+
   // Try to serve local file (development mode)
   try {
     const absolutePath = path.isAbsolute(filePath)
@@ -80,18 +107,11 @@ export async function GET(
       : path.join(process.cwd(), 'data', filePath);
 
     const buffer = await readFile(absolutePath);
-    return new NextResponse(buffer, {
-      headers: {
-        'Content-Type': contentType,
-        'Cache-Control': 'public, max-age=3600',
-      },
-    });
+    return new NextResponse(buffer, { headers: sourceHeaders });
   } catch {
     try {
       const bytes = await fetchDatasetAsset(filePath);
-      return new NextResponse(toArrayBuffer(bytes), {
-        headers: { 'Content-Type': contentType, 'Cache-Control': 'private, max-age=3600' },
-      });
+      return new NextResponse(toArrayBuffer(bytes), { headers: sourceHeaders });
     } catch {
       // The seed dataset intentionally uses placeholder paths.
     }

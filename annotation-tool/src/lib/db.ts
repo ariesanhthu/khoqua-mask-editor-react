@@ -65,7 +65,7 @@ async function initializeDatabase(): Promise<AppDatabase> {
     const sql = postgres(connectionString, {
       max: 5,
       prepare: false,
-      idle_timeout: 20,
+      idle_timeout: 180,
       connect_timeout: 15,
     });
     engine = {
@@ -201,6 +201,10 @@ async function initializeSchema(db: AppDatabase): Promise<void> {
       closed_at TEXT,
       close_reason TEXT
     )`,
+    `CREATE TABLE IF NOT EXISTS schema_state (
+      fingerprint TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+    )`,
     'CREATE INDEX IF NOT EXISTS idx_datasets_project ON datasets(project_id)',
     'CREATE INDEX IF NOT EXISTS idx_files_dataset_state ON dataset_files(dataset_id, annotation_state)',
     'CREATE INDEX IF NOT EXISTS idx_assignments_file_user ON assignments(dataset_file_id, user_id)',
@@ -210,7 +214,22 @@ async function initializeSchema(db: AppDatabase): Promise<void> {
     `ALTER TABLE dataset_files ADD COLUMN IF NOT EXISTS prelabel_filename TEXT`,
   ];
 
+  // 17 lệnh DDL tuần tự tốn ~6.3s mỗi lần khởi động vì mỗi lệnh là một vòng tới
+  // Neon. Chúng đều idempotent nên chỉ cần chạy lại khi danh sách thay đổi: vân tay
+  // băm từ chính danh sách nên thêm/sửa lệnh là tự động chạy lại, không phải nhớ
+  // tăng số phiên bản bằng tay.
+  const fingerprint = crypto.createHash('sha1').update(statements.join(';')).digest('hex').slice(0, 32);
+  try {
+    const applied = await db.prepare('SELECT fingerprint FROM schema_state WHERE fingerprint = ?').get(fingerprint);
+    if (applied) return;
+  } catch {
+    // schema_state chưa tồn tại: đây là lần khởi tạo đầu tiên.
+  }
+
   for (const statement of statements) await db.prepare(statement).run();
+  await db.prepare('INSERT INTO schema_state (fingerprint, applied_at) VALUES (?, ?) ON CONFLICT (fingerprint) DO NOTHING')
+    .run(fingerprint, nowISO())
+    .catch(() => undefined);
 }
 
 async function bootstrapAdmin(db: AppDatabase): Promise<void> {

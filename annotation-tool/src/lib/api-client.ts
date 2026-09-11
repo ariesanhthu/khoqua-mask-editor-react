@@ -9,9 +9,39 @@ import type {
   SaveDraftResponse, DoneRequest, DoneResponse, ApiError, CurrentUser, ProjectSummary,
 } from '@/types';
 
+/**
+ * Token khoá phải sống sót qua F5 của chính tab đang sửa: máy chủ chỉ cấp lại
+ * đúng phiên cũ khi nhận được token cũ (lock-service.acquireLock), không có
+ * token thì chính chủ cũng bị từ chối cho tới khi khoá hết hạn.
+ *
+ * sessionStorage đúng phạm vi cần: sống qua reload, nhưng tab mới có kho riêng
+ * nên vẫn không lấy được quyền sửa — không cho hai tab chỉnh sửa chung.
+ */
+const LOCK_TOKEN_KEY = 'annotation-lock-token:';
 const lockTokens = new Map<string, string>();
 const lockRequests = new Map<string, Promise<LockAcquireResponse>>();
-function getLockToken(fileId: string) { return lockTokens.get(fileId); }
+
+function getLockToken(fileId: string) {
+  const cached = lockTokens.get(fileId);
+  if (cached || !fileId || typeof window === 'undefined') return cached;
+  try {
+    const stored = sessionStorage.getItem(LOCK_TOKEN_KEY + fileId) || undefined;
+    if (stored) lockTokens.set(fileId, stored);
+    return stored;
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberLockToken(fileId: string, token: string) {
+  lockTokens.set(fileId, token);
+  try { sessionStorage.setItem(LOCK_TOKEN_KEY + fileId, token); } catch { /* chế độ riêng tư */ }
+}
+
+function forgetLockToken(fileId: string) {
+  lockTokens.delete(fileId);
+  try { sessionStorage.removeItem(LOCK_TOKEN_KEY + fileId); } catch { /* chế độ riêng tư */ }
+}
 
 async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
@@ -110,7 +140,12 @@ export async function acquireLock(fileId: string) {
   const pending = lockRequests.get(fileId);
   if (pending) return pending;
   const request = apiFetch<LockAcquireResponse>(`/api/files/${fileId}/lock`, { method: 'POST' })
-    .then((result) => { lockTokens.set(fileId, result.lockToken); return result; })
+    .then((result) => { rememberLockToken(fileId, result.lockToken); return result; })
+    .catch((error: ApiError) => {
+      // Token cũ đã vô nghĩa (khoá thuộc người khác hoặc đã hết hạn rồi bị lấy mất).
+      if (error?.code === 'FILE_LOCKED') forgetLockToken(fileId);
+      throw error;
+    })
     .finally(() => lockRequests.delete(fileId));
   lockRequests.set(fileId, request);
   return request;
@@ -124,7 +159,7 @@ export async function releaseLock(fileId: string) {
   try {
     await apiFetch<{ released: boolean }>(`/api/files/${fileId}/lock`, { method: 'DELETE' });
   } finally {
-    lockTokens.delete(fileId);
+    forgetLockToken(fileId);
   }
 }
 
@@ -155,10 +190,12 @@ export async function saveDraft(fileId: string, data: SaveDraftRequest) {
 }
 
 export async function submitDone(fileId: string, data: DoneRequest) {
-  return apiFetch<DoneResponse>(`/api/files/${fileId}/done`, {
+  const result = await apiFetch<DoneResponse>(`/api/files/${fileId}/done`, {
     method: 'POST',
     body: JSON.stringify(data),
   });
+  forgetLockToken(fileId);
+  return result;
 }
 
 // ─── Seed ───────────────────────────────────────────────

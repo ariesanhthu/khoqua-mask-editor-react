@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useDeferredValue, useEffect, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import type { CurrentUser, FileListItem, ProjectSummary } from '@/types';
@@ -28,11 +28,15 @@ const filters: Array<{ value: Filter; label: string }> = [
   { value: 'MINE', label: 'Của tôi' },
 ];
 
+const PAGE_SIZE = 20;
+
 export default function Dashboard({ user }: { user: CurrentUser }) {
   const router = useRouter();
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectId, setProjectId] = useState('');
   const [files, setFiles] = useState<FileListItem[]>([]);
+  const [page, setPage] = useState(1);
+  const [totalFiles, setTotalFiles] = useState(0);
   const [filter, setFilter] = useState<Filter>('ALL');
   const [search, setSearch] = useState('');
   const deferredSearch = useDeferredValue(search);
@@ -46,6 +50,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
     configured: false,
     connected: false,
   });
+  const fileRequestRef = useRef(0);
 
   const loadProjects = useCallback(async () => {
     const result = await getProjects();
@@ -53,6 +58,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
     if (result.length === 0) {
       setProjectId('');
       setFiles([]);
+      setTotalFiles(0);
       setLoading(false);
       return;
     }
@@ -71,13 +77,15 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
   }, [loadProjects, router]);
 
   const loadFiles = useCallback(async (silent = false) => {
+    const requestId = ++fileRequestRef.current;
     if (!projectId) {
       setFiles([]);
+      setTotalFiles(0);
       setLoading(false);
       return;
     }
     if (!silent) setLoading(true);
-    const params: Record<string, string> = { pageSize: '50' };
+    const params: Record<string, string> = { page: String(page), pageSize: String(PAGE_SIZE) };
     if (deferredSearch.trim()) params.search = deferredSearch.trim();
     if (filter === 'AVAILABLE') params.lockState = 'AVAILABLE';
     if (filter === 'DOING') params.lockState = 'LOCKED';
@@ -85,22 +93,26 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
     if (filter === 'MINE') params.assignedTo = 'me';
     try {
       const result = await getFiles(projectId, params);
+      if (requestId !== fileRequestRef.current) return;
       setFiles(result.items);
+      setTotalFiles(result.total);
       setMessage('');
     } catch {
-      setMessage('Không tải được danh sách. Hệ thống sẽ tự thử lại.');
+      if (requestId !== fileRequestRef.current) return;
+      setMessage('Không tải được danh sách. Hãy bấm Làm mới để thử lại.');
     } finally {
-      setLoading(false);
+      if (requestId === fileRequestRef.current) setLoading(false);
     }
-  }, [deferredSearch, filter, projectId]);
+  }, [deferredSearch, filter, page, projectId]);
 
   useEffect(() => {
     if (!projectId) return;
     localStorage.setItem('last-project-id', projectId);
     const initialTimer = window.setTimeout(() => void loadFiles(), 0);
-    const timer = window.setInterval(() => void loadFiles(true), 8000);
-    return () => { window.clearTimeout(initialTimer); window.clearInterval(timer); };
+    return () => window.clearTimeout(initialTimer);
   }, [loadFiles, projectId]);
+
+  const pageCount = Math.max(1, Math.ceil(totalFiles / PAGE_SIZE));
 
   const openFile = (file: FileListItem) => {
     if (!navigator.onLine) {
@@ -147,15 +159,20 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
       <section className="dashboard-toolbar panel">
         <label>
           <span>Dự án</span>
-          <select name="project" autoComplete="off" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+          <select name="project" autoComplete="off" value={projectId} onChange={(event) => { setPage(1); setProjectId(event.target.value); }}>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
         </label>
         <label className="search-field">
           <span>Tìm ảnh</span>
-          <input name="file-search" autoComplete="off" spellCheck={false} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ví dụ: BM_000123…" />
+          <input name="file-search" autoComplete="off" spellCheck={false} value={search} onChange={(event) => { setPage(1); setSearch(event.target.value); }} placeholder="Ví dụ: BM_000123…" />
         </label>
-        <div className="progress-pill"><strong>{files.length}</strong><span>tệp hiển thị</span></div>
+        <div className="dashboard-list-actions">
+          <div className="progress-pill"><strong>{files.length}/{totalFiles}</strong><span>tệp hiển thị</span></div>
+          <button className="button ghost refresh-button" type="button" disabled={loading || !projectId} onClick={() => void loadFiles()}>
+            <span aria-hidden="true">↻</span> {loading ? 'Đang tải…' : 'Làm mới'}
+          </button>
+        </div>
       </section>
 
       {selectedProject ? (
@@ -210,7 +227,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
 
       <nav className="filter-tabs" aria-label="Lọc danh sách tệp">
         {filters.map((item) => (
-          <button key={item.value} className={filter === item.value ? 'active' : ''} onClick={() => setFilter(item.value)}>
+          <button key={item.value} className={filter === item.value ? 'active' : ''} onClick={() => { setPage(1); setFilter(item.value); }}>
             {item.label}
           </button>
         ))}
@@ -239,6 +256,14 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
           );
         })}
       </section>
+
+      {!loading && totalFiles > 0 ? (
+        <nav className="dashboard-pagination" aria-label="Phân trang danh sách tệp">
+          <button className="button ghost" type="button" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Trang trước</button>
+          <span>Trang <strong>{page}</strong> / {pageCount} · {totalFiles} tệp</span>
+          <button className="button ghost" type="button" disabled={page >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))}>Trang sau</button>
+        </nav>
+      ) : null}
 
       {!loading && projects.length === 0 ? <div className="empty-state panel"><h2>Chưa có dự án</h2><p>Quản trị viên có thể tạo dự án và đồng bộ manifest bên dưới.</p></div> : null}
       {user.role === 'ADMIN' ? <AdminPanel onChanged={loadProjects} /> : null}

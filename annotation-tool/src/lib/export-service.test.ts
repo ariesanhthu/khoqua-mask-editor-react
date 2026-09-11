@@ -69,4 +69,27 @@ describe('explicit Drive exports', () => {
     expect(result?.errors).toEqual([{ id: 'file', message: 'Source missing' }]);
     expect(mocks.upload).not.toHaveBeenCalled();
   });
+
+  it('exports inner rings as empty pixels while preserving another mask inside the hole', async () => {
+    const ring = (left: number, top: number, right: number, bottom: number) => [
+      { x: left, y: top }, { x: right, y: top }, { x: right, y: bottom }, { x: left, y: bottom },
+    ];
+    mocks.rows[0].width = 50;
+    mocks.rows[0].height = 50;
+    mocks.rows[0].segmentation_json = JSON.stringify({ humanAction: 'MODIFIED', maskOperations: [{
+      type: 'POLYGON_SET', polygons: [
+        { id: 'island', nodes: ring(22, 22, 28, 28) },
+        { id: 'connected', nodes: ring(1, 1, 49, 49), holes: [ring(10, 10, 40, 40)] },
+      ],
+    }] });
+    const result = await createProjectExportArchive('p');
+    expect(result?.errors).toEqual([]);
+    const zip = await JSZip.loadAsync(result!.bytes);
+    const mask = await zip.file('masks/file.png')!.async('nodebuffer');
+    const { data, info } = await sharp(mask).raw().toBuffer({ resolveWithObject: true });
+    const pixel = (x: number, y: number) => data[(y * info.width + x) * info.channels];
+    expect(pixel(5, 25)).toBe(255);
+    expect(pixel(15, 25)).toBe(0);
+    expect(pixel(25, 25)).toBe(255);
+  });
 });

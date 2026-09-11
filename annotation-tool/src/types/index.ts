@@ -46,6 +46,7 @@ export interface AnnotationPolygon {
   id: string;
   label: string;
   nodes: PolygonNode[];
+  holes?: PolygonNode[][];
   meta?: AnnotationPolygonMeta;
 }
 

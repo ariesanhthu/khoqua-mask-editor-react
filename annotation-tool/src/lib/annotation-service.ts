@@ -98,10 +98,9 @@ export async function submitDone(
   });
 }
 
-export async function getAnnotation(fileId: string): Promise<Record<string, unknown> | null> {
-  const db = await getDb();
-  const row = await db.prepare('SELECT * FROM annotations WHERE dataset_file_id = ?').get(fileId);
-  if (!row) return null;
+/** Dòng bảng annotations -> DTO. Tách riêng để nơi khác lấy kèm bằng JOIN cũng dùng được. */
+export function mapAnnotationRow(row: Record<string, unknown> | undefined | null): Record<string, unknown> | null {
+  if (!row || row.segmentation_json == null) return null;
   return {
     datasetFileId: row.dataset_file_id,
     revision: Number(row.revision),
@@ -111,6 +110,11 @@ export async function getAnnotation(fileId: string): Promise<Record<string, unkn
     updatedAt: row.updated_at,
     status: row.status,
   };
+}
+
+export async function getAnnotation(fileId: string): Promise<Record<string, unknown> | null> {
+  const db = await getDb();
+  return mapAnnotationRow(await db.prepare('SELECT * FROM annotations WHERE dataset_file_id = ?').get(fileId));
 }
 
 function validOwnedLock(lock: Record<string, unknown> | undefined, userId: string, token: string): boolean {

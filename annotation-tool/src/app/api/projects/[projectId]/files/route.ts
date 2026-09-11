@@ -19,8 +19,12 @@ export async function GET(
   const lockState = url.searchParams.get('lockState');
   const assignedTo = url.searchParams.get('assignedTo');
   const search = url.searchParams.get('search');
-  const page = Math.max(1, Number(url.searchParams.get('page') || '1'));
-  const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') || '50')));
+  const requestedPage = Number(url.searchParams.get('page') || '1');
+  const requestedPageSize = Number(url.searchParams.get('pageSize') || '20');
+  const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+  const pageSize = Number.isSafeInteger(requestedPageSize)
+    ? Math.min(100, Math.max(1, requestedPageSize))
+    : 20;
 
   // Build query — get files from all datasets in this project
   const now = new Date().toISOString();

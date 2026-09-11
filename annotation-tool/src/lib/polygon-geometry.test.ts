@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergePolygonsIntoSingle, polygonArea, resolvePolygonCut } from './polygon-geometry';
+import { applyBrushStroke, mergePolygonsIntoSingle, polygonArea, resolvePolygonCut, pointInMask, clonePolygons } from './polygon-geometry';
 
 const polygon = (id: string, points: Array<[number, number]>, label = 'damage') => ({
   id,
@@ -144,5 +144,156 @@ describe('mergePolygonsIntoSingle', () => {
       rectangle('right', 25, 5, 30, 25),
     ]));
     expect(Math.abs(polygonArea(merged.nodes))).toBeCloseTo(900);
+  });
+});
+
+describe('applyBrushStroke', () => {
+  const newRegion = { label: 'r9', meta: { semantic: 'main_flesh_band' as const } };
+  const target = () => rectangle('target', 10, 10, 30, 30, 'r1');
+  const totalArea = (polygons: Array<{ nodes: Array<{ x: number; y: number }> }>) => polygons
+    .reduce((sum, polygon) => sum + Math.abs(polygonArea(polygon.nodes)), 0);
+
+  it('splits a mask into two separate regions that keep the same label', () => {
+    const source = target();
+    const result = applyBrushStroke(
+      [source], [{ x: 20, y: 0 }, { x: 20, y: 40 }], 2, 'erase', newRegion,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.polygons).toHaveLength(2);
+    expect(result.polygons!.every((polygon) => polygon.label === 'r1')).toBe(true);
+    expect(new Set(result.polygons!.map((polygon) => polygon.id)).size).toBe(2);
+    expect(result.resultIds).toEqual(result.polygons!.map((polygon) => polygon.id));
+    expect(totalArea(result.polygons!)).toBeCloseTo(320);
+    expect(source.nodes).toHaveLength(4);
+  });
+
+  it('preserves a hole erased strictly inside a mask', () => {
+    const result = applyBrushStroke([target()], [{ x: 20, y: 20 }], 3, 'erase', newRegion);
+    expect(result.polygons).toHaveLength(1);
+    expect(result.polygons![0].holes).toHaveLength(1);
+    expect(pointInMask({ x: 20, y: 20 }, result.polygons![0])).toBe(false);
+  });
+
+  it('shaves a mask when the stroke only reaches one edge', () => {
+    const result = applyBrushStroke([target()], [{ x: 0, y: 20 }, { x: 15, y: 20 }], 2, 'erase', newRegion);
+    expect(result.polygons).toHaveLength(1);
+    expect(result.polygons![0].holes ?? []).toHaveLength(0);
+    expect(totalArea(result.polygons!)).toBeLessThan(400);
+  });
+
+  it('merges two regions the brush connects and keeps the largest label', () => {
+    const small = rectangle('small', 0, 0, 10, 10, 'r1');
+    const large = rectangle('large', 30, 0, 50, 20, 'r2');
+    const result = applyBrushStroke(
+      [small, large], [{ x: 5, y: 5 }, { x: 35, y: 10 }], 1, 'add', newRegion,
+    );
+    expect(result.polygons).toHaveLength(1);
+    expect(result.polygons![0].label).toBe('r2');
+    expect(totalArea(result.polygons!)).toBeGreaterThan(500);
+  });
+
+  it('creates a new region when the brush touches nothing', () => {
+    const source = target();
+    const result = applyBrushStroke([source], [{ x: 100, y: 100 }], 5, 'add', newRegion);
+    expect(result.polygons).toHaveLength(2);
+    expect(result.polygons![0]).toBe(source);
+    expect(result.polygons![1].label).toBe('r9');
+    expect(result.polygons![1].meta).toEqual({ semantic: 'main_flesh_band', source: 'human' });
+    expect(result.resultIds).toEqual([result.polygons![1].id]);
+  });
+
+  it('grows a region in place without touching the other polygons', () => {
+    const other = rectangle('other', 100, 100, 120, 120, 'r2');
+    const result = applyBrushStroke([target(), other], [{ x: 29, y: 20 }, { x: 34, y: 20 }], 2, 'add', newRegion);
+    expect(result.polygons).toHaveLength(2);
+    expect(result.polygons![0].label).toBe('r1');
+    expect(Math.abs(polygonArea(result.polygons![0].nodes))).toBeGreaterThan(400);
+    expect(result.polygons![1]).toBe(other);
+  });
+
+  it('leaves locked polygons untouched', () => {
+    const locked = { ...target(), meta: { locked: true } };
+    const stroke = [{ x: 20, y: 0 }, { x: 20, y: 40 }];
+    expect(applyBrushStroke([locked], stroke, 2, 'erase', newRegion).error).toContain('chưa chạm');
+    const painted = applyBrushStroke([locked], stroke, 2, 'add', newRegion);
+    expect(painted.polygons).toHaveLength(2);
+    expect(painted.polygons![0]).toBe(locked);
+    expect(painted.polygons![1].label).toBe('r9');
+  });
+
+  it('rejects strokes that fall outside the image or miss every mask', () => {
+    expect(applyBrushStroke([target()], [], 4, 'erase', newRegion).polygons).toBeUndefined();
+    expect(applyBrushStroke([target()], [{ x: 90, y: 90 }], 4, 'erase', newRegion).error).toContain('chưa chạm');
+    const outside = applyBrushStroke([target()], [{ x: 90, y: 90 }], 4, 'add', newRegion, { width: 40, height: 40 });
+    expect(outside.polygons).toBeUndefined();
+    expect(outside.error).toContain('ngoài ảnh');
+  });
+
+  it('clips strokes to the image bounds', () => {
+    const result = applyBrushStroke([], [{ x: 0, y: 0 }], 10, 'add', newRegion, { width: 40, height: 40 });
+    expect(result.polygons).toHaveLength(1);
+    expect(result.polygons![0].nodes.every((node) => node.x >= -1e-6 && node.y >= -1e-6)).toBe(true);
+  });
+});
+
+describe('thin brush precision', () => {
+  it.each([1, 2, 8])('cuts separate masks with a %s px gap', (size) => {
+    const result = applyBrushStroke([rectangle('mask', 0, 0, 100, 100)],
+      [{ x: 50, y: -5 }, { x: 50, y: 105 }], size / 2, 'erase', { label: 'R1' });
+    expect(result.error).toBeUndefined();
+    expect(result.polygons).toHaveLength(2);
+    const pieces = result.polygons!.sort((a, b) => a.nodes[0].x - b.nodes[0].x);
+    const leftEdge = Math.max(...pieces[0].nodes.map((node) => node.x));
+    const rightEdge = Math.min(...pieces[1].nodes.map((node) => node.x));
+    expect(rightEdge - leftEdge).toBeCloseTo(size, 5);
+    expect(pieces[0].id).not.toBe(pieces[1].id);
+    expect(pieces.reduce((sum, item) => sum + Math.abs(polygonArea(item.nodes)), 0)).toBeCloseTo(10000 - size * 100, 5);
+  });
+
+  it('retains a single 1 px dab as a new region', () => {
+    const result = applyBrushStroke([], [{ x: 10, y: 10 }], 0.5, 'add', { label: 'R1' });
+    expect(result.error).toBeUndefined();
+    expect(result.polygons).toHaveLength(1);
+    expect(Math.abs(polygonArea(result.polygons![0].nodes))).toBeGreaterThan(0.7);
+  });
+});
+
+
+describe('brush local union with inner boundaries', () => {
+  const newRegion = { label: 'R1' };
+  const stroke = (items: Parameters<typeof applyBrushStroke>[0], points: Array<{ x: number; y: number }>, mode: 'add' | 'erase' = 'add') => {
+    const result = applyBrushStroke(items, points, 1, mode, newRegion);
+    expect(result.error).toBeUndefined();
+    return result.polygons!;
+  };
+
+  it('connects only painted bridges and retains the enclosed unpainted gap across edits and reload', () => {
+    const sides = [rectangle('left', 0, 0, 10, 50), rectangle('right', 40, 0, 50, 50)];
+    const top = stroke(sides, [{ x: 5, y: 5 }, { x: 45, y: 5 }]);
+    expect(top).toHaveLength(1);
+    expect(pointInMask({ x: 25, y: 25 }, top[0])).toBe(false);
+    const closed = stroke(top, [{ x: 5, y: 45 }, { x: 45, y: 45 }]);
+    expect(closed).toHaveLength(1);
+    expect(closed[0].holes).toHaveLength(1);
+    expect(pointInMask({ x: 25, y: 25 }, closed[0])).toBe(false);
+    expect(pointInMask({ x: 25, y: 45 }, closed[0])).toBe(true);
+    expect(closed[0].holes![0].some((node) => node.x === 10 && node.y === 44)).toBe(true);
+    const saved = clonePolygons(JSON.parse(JSON.stringify(closed)));
+    expect(saved).toEqual(closed);
+    expect(saved[0].holes![0]).not.toBe(closed[0].holes![0]);
+    const repainted = stroke(saved, [{ x: 5, y: 20 }, { x: 12, y: 20 }]);
+    expect(pointInMask({ x: 25, y: 25 }, repainted[0])).toBe(false);
+    expect(pointInMask({ x: 11, y: 20 }, repainted[0])).toBe(true);
+    const reopened = stroke(repainted, [{ x: 25, y: 40 }, { x: 25, y: 50 }], 'erase');
+    expect(reopened).toHaveLength(1);
+    expect(reopened[0].holes ?? []).toHaveLength(0);
+    expect(pointInMask({ x: 25, y: 25 }, reopened[0])).toBe(false);
+  });
+
+  it('keeps a loop painted on empty space hollow', () => {
+    const result = stroke([], [{ x: 5, y: 5 }, { x: 45, y: 5 }, { x: 45, y: 45 }, { x: 5, y: 45 }, { x: 5, y: 5 }]);
+    expect(result).toHaveLength(1);
+    expect(result[0].holes).toHaveLength(1);
+    expect(pointInMask({ x: 25, y: 25 }, result[0])).toBe(false);
   });
 });
