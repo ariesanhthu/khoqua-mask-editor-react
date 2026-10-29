@@ -489,7 +489,6 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const selectTool = useCallback(async (nextTool: EditorTool, nextStep = workspaceStep) => {
     if (navigating || status === 'SYNCING') return;
     if (nextStep !== workspaceStep && !await flushExplicitly()) return;
-    if (!readOnly && !conflictRef.current && (nextTool === 'select' || nextTool === 'anchor' || nextTool === 'rectangle' || nextTool === 'circle') && nextStep === 'mask') canvasRef.current?.beginPolygonEdit();
     setTool(readOnly ? 'pan' : nextTool);
     setWorkspaceStep(nextStep);
     localStorage.setItem('editor-tool', nextTool);

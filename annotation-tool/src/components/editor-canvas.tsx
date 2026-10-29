@@ -440,7 +440,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           context.fill();
         }
         context.globalAlpha = 1;
-      } else if (tintRef.current) {
+      } else if (tintRef.current && toolRef.current !== 'circle' && toolRef.current !== 'rectangle' && toolRef.current !== 'polygon') {
         context.globalAlpha = display.maskOpacity;
         context.drawImage(tintRef.current, 0, 0);
         context.globalAlpha = 1;
