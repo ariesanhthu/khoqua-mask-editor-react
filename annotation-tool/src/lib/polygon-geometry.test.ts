@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  computeSmoothNodeDisplacements,
   createCirclePolygon,
   createRectanglePolygon,
+  drawSmoothClosedPath,
   insertNodeAtEdge,
   mergePolygonsIntoSingle,
   polygonArea,
@@ -168,5 +170,129 @@ describe('insertNodeAtEdge', () => {
     expect(updated.nodes[4].id).toBe(node.id);
     expect(updated.nodes[4].x).toBe(0);
     expect(updated.nodes[4].y).toBe(5);
+  });
+});
+
+describe('drawSmoothClosedPath', () => {
+  it('does nothing when nodes length is less than 2', () => {
+    const ctx = {
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      bezierCurveTo: vi.fn(),
+      closePath: vi.fn(),
+    };
+    drawSmoothClosedPath(ctx, []);
+    drawSmoothClosedPath(ctx, [{ x: 10, y: 10 }]);
+    expect(ctx.moveTo).not.toHaveBeenCalled();
+    expect(ctx.bezierCurveTo).not.toHaveBeenCalled();
+    expect(ctx.closePath).not.toHaveBeenCalled();
+  });
+
+  it('draws a straight segment when nodes length is 2', () => {
+    const ctx = {
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      bezierCurveTo: vi.fn(),
+      closePath: vi.fn(),
+    };
+    drawSmoothClosedPath(ctx, [{ x: 10, y: 10 }, { x: 20, y: 20 }]);
+    expect(ctx.moveTo).toHaveBeenCalledWith(10, 10);
+    expect(ctx.lineTo).toHaveBeenCalledWith(20, 20);
+    expect(ctx.bezierCurveTo).not.toHaveBeenCalled();
+    expect(ctx.closePath).not.toHaveBeenCalled();
+  });
+
+  it('creates smooth Bézier spline loop for 3 or more points', () => {
+    const ctx = {
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      bezierCurveTo: vi.fn(),
+      closePath: vi.fn(),
+    };
+    const nodes = [
+      { x: 0, y: 0 },
+      { x: 10, y: 0 },
+      { x: 10, y: 10 },
+      { x: 0, y: 10 },
+    ];
+    drawSmoothClosedPath(ctx, nodes, 0.16);
+    expect(ctx.moveTo).toHaveBeenCalledWith(0, 0);
+    expect(ctx.bezierCurveTo).toHaveBeenCalledTimes(4);
+    expect(ctx.closePath).toHaveBeenCalledTimes(1);
+    // End point of the last curve connects back to first point (nodes[0])
+    expect(ctx.bezierCurveTo).toHaveBeenLastCalledWith(
+      expect.any(Number),
+      expect.any(Number),
+      expect.any(Number),
+      expect.any(Number),
+      nodes[0].x,
+      nodes[0].y,
+    );
+  });
+});
+
+describe('computeSmoothNodeDisplacements', () => {
+  it('moves only the active node when polygon has fewer than 5 nodes', () => {
+    const nodes = [
+      { id: 'n0', x: 0, y: 0 },
+      { id: 'n1', x: 10, y: 0 },
+      { id: 'n2', x: 10, y: 10 },
+      { id: 'n3', x: 0, y: 10 },
+    ];
+    const active = new Set(['n1']);
+    const updated = computeSmoothNodeDisplacements(nodes, active, 5, 2, 100, 100);
+    expect(updated[1].x).toBe(15);
+    expect(updated[1].y).toBe(2);
+    expect(updated[0].x).toBe(0);
+    expect(updated[2].x).toBe(10);
+    expect(updated[3].x).toBe(0);
+  });
+
+  it('smoothly diffuses displacement to immediate neighbors for dense contours', () => {
+    const nodes = Array.from({ length: 8 }, (_, i) => ({
+      id: `n${i}`,
+      x: i * 10,
+      y: 0,
+    }));
+    const active = new Set(['n3']);
+    const deltaX = 0;
+    const deltaY = 10;
+    const updated = computeSmoothNodeDisplacements(nodes, active, deltaX, deltaY, 200, 200);
+
+    // Target node moves 100% (10px)
+    expect(updated[3].y).toBe(10);
+
+    // Immediate neighbors (dist = 1) get 45% (4.5px)
+    expect(updated[2].y).toBe(4.5);
+    expect(updated[4].y).toBe(4.5);
+
+    // Distance 2 neighbors get 18% (1.8px)
+    expect(updated[1].y).toBe(1.8);
+    expect(updated[5].y).toBe(1.8);
+
+    // Further nodes (dist >= 3 for n=8) stay at 0
+    expect(updated[0].y).toBe(0);
+    expect(updated[6].y).toBe(0);
+    expect(updated[7].y).toBe(0);
+  });
+
+  it('stops diffusion when hitting a pinned anchor point (isAnchor === true)', () => {
+    const nodes = Array.from({ length: 8 }, (_, i) => ({
+      id: `n${i}`,
+      x: i * 10,
+      y: 0,
+      isAnchor: i === 4, // n4 is pinned
+    }));
+    const active = new Set(['n3']);
+    const updated = computeSmoothNodeDisplacements(nodes, active, 0, 10, 200, 200);
+
+    // Pinned neighbor n4 must NOT move at all
+    expect(updated[4].y).toBe(0);
+    // Node n5 beyond pinned anchor also must NOT move
+    expect(updated[5].y).toBe(0);
+
+    // Counter-clockwise side still moves smoothly
+    expect(updated[2].y).toBe(4.5);
+    expect(updated[1].y).toBe(1.8);
   });
 });

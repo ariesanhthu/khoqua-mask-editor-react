@@ -18,8 +18,10 @@ import type {
 } from '@/types';
 import {
   clonePolygons,
+  computeSmoothNodeDisplacements,
   createCirclePolygon,
   createRectanglePolygon,
+  drawSmoothClosedPath,
   insertNodeAtEdge,
   mergePolygonsIntoSingle,
   pointInPolygon,
@@ -437,8 +439,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         for (const polygon of visiblePolygons) {
           if (polygon.nodes.length < 3) continue;
           context.beginPath();
-          polygon.nodes.forEach((node, index) => index === 0 ? context.moveTo(node.x, node.y) : context.lineTo(node.x, node.y));
-          context.closePath();
+          drawSmoothClosedPath(context, polygon.nodes, 0.16);
           context.fill();
         }
         context.globalAlpha = 1;
@@ -454,8 +455,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         if (polygon.nodes.length < 2) continue;
         const selected = selectedPolygonIdsRef.current.has(polygon.id);
         context.beginPath();
-        polygon.nodes.forEach((node, index) => index === 0 ? context.moveTo(node.x, node.y) : context.lineTo(node.x, node.y));
-        context.closePath();
+        drawSmoothClosedPath(context, polygon.nodes, 0.16);
         context.lineWidth = (selected ? 3 : 1.5) / view.scale;
         context.strokeStyle = selected ? '#6d4ef2' : POLYGON_STROKE;
         context.stroke();
@@ -505,19 +505,23 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       const hover = polygonHoverRef.current;
       const preview = hover ? [...draft, { id: 'preview', ...hover }] : draft;
       context.beginPath();
-      preview.forEach((node, index) => index === 0 ? context.moveTo(node.x, node.y) : context.lineTo(node.x, node.y));
       if (preview.length >= 3) {
-        context.closePath();
+        drawSmoothClosedPath(context, preview, 0.16);
         context.globalAlpha = Math.min(0.72, Math.max(0.2, display.maskOpacity * 0.85));
         context.fillStyle = POLYGON_FILL;
         context.fill();
         context.globalAlpha = 1;
+        context.setLineDash([8 / view.scale, 5 / view.scale]);
+        context.lineWidth = 2 / view.scale;
+        context.strokeStyle = '#6d4ef2';
+        context.stroke();
+        context.setLineDash([]);
+      } else {
+        preview.forEach((node, index) => index === 0 ? context.moveTo(node.x, node.y) : context.lineTo(node.x, node.y));
+        context.lineWidth = 2 / view.scale;
+        context.strokeStyle = '#6d4ef2';
+        context.stroke();
       }
-      context.setLineDash([8 / view.scale, 5 / view.scale]);
-      context.lineWidth = 2 / view.scale;
-      context.strokeStyle = '#6d4ef2';
-      context.stroke();
-      context.setLineDash([]);
       for (const node of draft) {
         context.beginPath();
         context.arc(node.x, node.y, 3.5 / view.scale, 0, Math.PI * 2);
@@ -671,12 +675,26 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     const anchorHover = anchorHoverRef.current;
     if (toolRef.current === 'anchor' && anchorHover && !pointerRef.current) {
       context.save();
-      const edgeStart = anchorHover.polygon.nodes[anchorHover.edgeIndex];
-      const edgeEnd = anchorHover.polygon.nodes[(anchorHover.edgeIndex + 1) % anchorHover.polygon.nodes.length];
+      const nodes = anchorHover.polygon.nodes;
+      const n = nodes.length;
+      const i = anchorHover.edgeIndex;
+      const edgeStart = nodes[i];
+      const edgeEnd = nodes[(i + 1) % n];
       if (edgeStart && edgeEnd) {
         context.beginPath();
         context.moveTo(edgeStart.x, edgeStart.y);
-        context.lineTo(edgeEnd.x, edgeEnd.y);
+        if (n >= 3) {
+          const prev = nodes[(i - 1 + n) % n];
+          const next2 = nodes[(i + 2) % n];
+          const tension = 0.16;
+          const cp1x = edgeStart.x + (edgeEnd.x - prev.x) * tension;
+          const cp1y = edgeStart.y + (edgeEnd.y - prev.y) * tension;
+          const cp2x = edgeEnd.x - (next2.x - edgeStart.x) * tension;
+          const cp2y = edgeEnd.y - (next2.y - edgeStart.y) * tension;
+          context.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, edgeEnd.x, edgeEnd.y);
+        } else {
+          context.lineTo(edgeEnd.x, edgeEnd.y);
+        }
         context.lineWidth = 2 / view.scale;
         context.strokeStyle = '#6d4ef2';
         context.stroke();
@@ -1515,16 +1533,29 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       const deltaY = point.y - active.start.y;
       active.moved = active.moved || Math.hypot(deltaX, deltaY) > 0.5;
       if (active.mode === 'polygons' && active.moved) suppressContextMenuSelectionRef.current = true;
-      polygonsRef.current = active.original.map((polygon) => {
-        const shouldMovePolygon = active.mode === 'polygons' && active.polygonIds.has(polygon.id);
-        if (!shouldMovePolygon && active.mode === 'nodes' && !polygon.nodes.some((node) => active.nodeIds.has(node.id))) return polygon;
-        return {
-          ...polygon,
-          nodes: polygon.nodes.map((node) => (shouldMovePolygon || (active.mode === 'nodes' && active.nodeIds.has(node.id)))
-            ? { ...node, x: Math.max(0, Math.min(width, node.x + deltaX)), y: Math.max(0, Math.min(height, node.y + deltaY)) }
-            : node),
-        };
-      });
+      if (active.mode === 'polygons') {
+        const polygonIds = active.polygonIds;
+        polygonsRef.current = active.original.map((polygon) => {
+          if (!polygonIds.has(polygon.id)) return polygon;
+          return {
+            ...polygon,
+            nodes: polygon.nodes.map((node) => ({
+              ...node,
+              x: Math.max(0, Math.min(width, Math.round((node.x + deltaX) * 10) / 10)),
+              y: Math.max(0, Math.min(height, Math.round((node.y + deltaY) * 10) / 10)),
+            })),
+          };
+        });
+      } else {
+        const nodeIds = active.nodeIds;
+        polygonsRef.current = active.original.map((polygon) => {
+          if (!polygon.nodes.some((node) => nodeIds.has(node.id))) return polygon;
+          return {
+            ...polygon,
+            nodes: computeSmoothNodeDisplacements(polygon.nodes, nodeIds, deltaX, deltaY, width, height),
+          };
+        });
+      }
       polygonModeRef.current = true;
       render();
       return;
@@ -1857,8 +1888,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         for (const polygon of polygonsRef.current) {
           if (polygon.nodes.length < 3) continue;
           context.beginPath();
-          polygon.nodes.forEach((node, index) => index === 0 ? context.moveTo(node.x, node.y) : context.lineTo(node.x, node.y));
-          context.closePath();
+          drawSmoothClosedPath(context, polygon.nodes, 0.16);
           context.fill();
         }
         return toBlob(canvas);

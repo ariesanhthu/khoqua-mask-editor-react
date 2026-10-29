@@ -381,6 +381,104 @@ export function insertNodeAtEdge(
   };
 }
 
+/**
+ * Draws a closed Catmull-Rom spline path passing smoothly through all given points.
+ * Tension controls curve tightness: 0.16 gives subtle, natural smoothing without sharp spikes.
+ */
+export function drawSmoothClosedPath(
+  context: {
+    moveTo(x: number, y: number): void;
+    lineTo(x: number, y: number): void;
+    bezierCurveTo(cp1x: number, cp1y: number, cp2x: number, cp2y: number, x: number, y: number): void;
+    closePath(): void;
+  },
+  nodes: Array<Pick<PolygonNode, 'x' | 'y'>>,
+  tension = 0.16,
+): void {
+  const n = nodes.length;
+  if (n < 2) return;
+  if (n === 2) {
+    context.moveTo(nodes[0].x, nodes[0].y);
+    context.lineTo(nodes[1].x, nodes[1].y);
+    return;
+  }
+
+  context.moveTo(nodes[0].x, nodes[0].y);
+  for (let i = 0; i < n; i += 1) {
+    const prev = nodes[(i - 1 + n) % n];
+    const curr = nodes[i];
+    const next = nodes[(i + 1) % n];
+    const next2 = nodes[(i + 2) % n];
+
+    const cp1x = curr.x + (next.x - prev.x) * tension;
+    const cp1y = curr.y + (next.y - prev.y) * tension;
+    const cp2x = next.x - (next2.x - curr.x) * tension;
+    const cp2y = next.y - (next2.y - curr.y) * tension;
+
+    context.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+  }
+  context.closePath();
+}
+
+/**
+ * Computes smooth displacements for polygon nodes when dragging an anchor point,
+ * diffusing movement to immediate neighbors with an elastic falloff so corners stay smooth.
+ * Falloff stops at other pinned anchor points (`isAnchor === true`).
+ */
+export function computeSmoothNodeDisplacements(
+  nodes: PolygonNode[],
+  activeNodeIds: Set<string>,
+  deltaX: number,
+  deltaY: number,
+  width: number,
+  height: number,
+): PolygonNode[] {
+  const n = nodes.length;
+  if (activeNodeIds.size !== 1 || n < 5) {
+    return nodes.map((node) => activeNodeIds.has(node.id)
+      ? {
+          ...node,
+          x: Math.max(0, Math.min(width, Math.round((node.x + deltaX) * 10) / 10)),
+          y: Math.max(0, Math.min(height, Math.round((node.y + deltaY) * 10) / 10)),
+        }
+      : node);
+  }
+
+  const draggedId = activeNodeIds.values().next().value;
+  const targetIndex = nodes.findIndex((node) => node.id === draggedId);
+  if (targetIndex === -1) return nodes;
+
+  const weights = new Float64Array(n);
+  weights[targetIndex] = 1.0;
+
+  const maxFalloffDist = n >= 16 ? 3 : n >= 8 ? 2 : 1;
+  const falloffLevels = [0.45, 0.18, 0.05];
+
+  // Positive direction (clockwise)
+  for (let dist = 1; dist <= maxFalloffDist; dist += 1) {
+    const idx = (targetIndex + dist) % n;
+    if (nodes[idx].isAnchor) break;
+    weights[idx] = falloffLevels[dist - 1];
+  }
+
+  // Negative direction (counter-clockwise)
+  for (let dist = 1; dist <= maxFalloffDist; dist += 1) {
+    const idx = (targetIndex - dist + n) % n;
+    if (nodes[idx].isAnchor) break;
+    weights[idx] = falloffLevels[dist - 1];
+  }
+
+  return nodes.map((node, i) => {
+    const w = weights[i];
+    if (w === 0) return node;
+    return {
+      ...node,
+      x: Math.max(0, Math.min(width, Math.round((node.x + deltaX * w) * 10) / 10)),
+      y: Math.max(0, Math.min(height, Math.round((node.y + deltaY * w) * 10) / 10)),
+    };
+  });
+}
+
 export function polygonArea(nodes: Array<Pick<PolygonNode, 'x' | 'y'>>): number {
   let area = 0;
   for (let index = 0; index < nodes.length; index += 1) {
