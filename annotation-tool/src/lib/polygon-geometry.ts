@@ -463,8 +463,66 @@ export function getSmoothSegmentControlPoints(
 }
 
 /**
- * Draws a closed smooth path with gentle curvature through all given points.
- * Intensity is subtle (tension = 0.08) to keep boundaries tight without stiff angles.
+ * Checks if a line segment between `start` and `end` lies directly on the boundary of any polygon in `otherPolygons`.
+ * Uses endpoints and midpoint proximity so interior chords or crossing edges are not falsely matched.
+ */
+export function isSegmentOnPolygonsBoundary(
+  start: Pick<PolygonNode, 'x' | 'y'>,
+  end: Pick<PolygonNode, 'x' | 'y'>,
+  otherPolygons: AnnotationPolygon[],
+  tolerance = 2.0,
+): boolean {
+  if (!otherPolygons || !otherPolygons.length) return false;
+  const midX = (start.x + end.x) / 2;
+  const midY = (start.y + end.y) / 2;
+  const segMinX = Math.min(start.x, end.x) - tolerance;
+  const segMaxX = Math.max(start.x, end.x) + tolerance;
+  const segMinY = Math.min(start.y, end.y) - tolerance;
+  const segMaxY = Math.max(start.y, end.y) + tolerance;
+
+  for (const poly of otherPolygons) {
+    if (poly.nodes.length < 2) continue;
+
+    let polyMinX = Infinity;
+    let polyMaxX = -Infinity;
+    let polyMinY = Infinity;
+    let polyMaxY = -Infinity;
+    for (const node of poly.nodes) {
+      if (node.x < polyMinX) polyMinX = node.x;
+      if (node.x > polyMaxX) polyMaxX = node.x;
+      if (node.y < polyMinY) polyMinY = node.y;
+      if (node.y > polyMaxY) polyMaxY = node.y;
+    }
+    if (
+      segMaxX < polyMinX - tolerance ||
+      segMinX > polyMaxX + tolerance ||
+      segMaxY < polyMinY - tolerance ||
+      segMinY > polyMaxY + tolerance
+    ) {
+      continue;
+    }
+
+    let startNear = false;
+    let endNear = false;
+    let midNear = false;
+
+    for (let i = 0; i < poly.nodes.length; i += 1) {
+      const a = poly.nodes[i];
+      const b = poly.nodes[(i + 1) % poly.nodes.length];
+      if (!startNear && closestPointOnSegment(start, a, b).distance <= tolerance) startNear = true;
+      if (!endNear && closestPointOnSegment(end, a, b).distance <= tolerance) endNear = true;
+      if (!midNear && closestPointOnSegment({ x: midX, y: midY }, a, b).distance <= tolerance) midNear = true;
+      if (startNear && endNear && midNear) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Draws a closed smooth path with gentle curvature through given points.
+ * Segments that lie on an existing polygon's boundary are drawn with straight lines (`lineTo`)
+ * without applying smoothing, guaranteeing 100% boundary adherence ("bám dính")
+ * without protruding lumps ("cục lòi ra").
  */
 export function drawSmoothClosedPath(
   context: {
@@ -475,6 +533,7 @@ export function drawSmoothClosedPath(
   },
   nodes: Array<Pick<PolygonNode, 'x' | 'y'>>,
   tension = 0.08,
+  otherPolygons?: AnnotationPolygon[],
 ): void {
   const n = nodes.length;
   if (n < 2) return;
@@ -484,6 +543,18 @@ export function drawSmoothClosedPath(
     return;
   }
 
+  // Precompute which segments are straight/shared boundary segments
+  const isStraight: boolean[] = new Array(n).fill(false);
+  if (otherPolygons && otherPolygons.length > 0) {
+    for (let i = 0; i < n; i += 1) {
+      const curr = nodes[i];
+      const next = nodes[(i + 1) % n];
+      if (isSegmentOnPolygonsBoundary(curr, next, otherPolygons)) {
+        isStraight[i] = true;
+      }
+    }
+  }
+
   context.moveTo(nodes[0].x, nodes[0].y);
   for (let i = 0; i < n; i += 1) {
     const prev = nodes[(i - 1 + n) % n];
@@ -491,8 +562,43 @@ export function drawSmoothClosedPath(
     const next = nodes[(i + 1) % n];
     const next2 = nodes[(i + 2) % n];
 
-    const { cp1, cp2 } = getSmoothSegmentControlPoints(prev, curr, next, next2, tension);
-    context.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, next.x, next.y);
+    if (isStraight[i]) {
+      // Shared boundary segment: follow existing boundary directly without smoothing
+      context.lineTo(next.x, next.y);
+    } else {
+      // Free smoothed segment
+      const prevStraight = isStraight[(i - 1 + n) % n];
+      const nextStraight = isStraight[(i + 1) % n];
+
+      const dSegX = next.x - curr.x;
+      const dSegY = next.y - curr.y;
+      const dSeg = Math.hypot(dSegX, dSegY);
+      if (dSeg < 1e-6) {
+        context.lineTo(next.x, next.y);
+        continue;
+      }
+      const uSegX = dSegX / dSeg;
+      const uSegY = dSegY / dSeg;
+
+      let cp1: { x: number; y: number };
+      let cp2: { x: number; y: number };
+
+      if (prevStraight || nextStraight) {
+        const fullCP = getSmoothSegmentControlPoints(prev, curr, next, next2, tension);
+        cp1 = prevStraight
+          ? { x: curr.x + uSegX * Math.min(dSeg * 0.15, 6), y: curr.y + uSegY * Math.min(dSeg * 0.15, 6) }
+          : fullCP.cp1;
+        cp2 = nextStraight
+          ? { x: next.x - uSegX * Math.min(dSeg * 0.15, 6), y: next.y - uSegY * Math.min(dSeg * 0.15, 6) }
+          : fullCP.cp2;
+      } else {
+        const fullCP = getSmoothSegmentControlPoints(prev, curr, next, next2, tension);
+        cp1 = fullCP.cp1;
+        cp2 = fullCP.cp2;
+      }
+
+      context.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, next.x, next.y);
+    }
   }
   context.closePath();
 }

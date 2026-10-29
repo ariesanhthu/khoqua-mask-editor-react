@@ -447,7 +447,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         for (const polygon of visiblePolygons) {
           if (polygon.nodes.length < 3) continue;
           context.beginPath();
-          drawSmoothClosedPath(context, polygon.nodes, 0.08);
+          const others = visiblePolygons.filter((p) => p.id !== polygon.id);
+          drawSmoothClosedPath(context, polygon.nodes, 0.08, others);
           context.fill();
         }
         context.globalAlpha = 1;
@@ -463,7 +464,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         if (polygon.nodes.length < 2) continue;
         const selected = selectedPolygonIdsRef.current.has(polygon.id);
         context.beginPath();
-        drawSmoothClosedPath(context, polygon.nodes, 0.08);
+        const others = visiblePolygons.filter((p) => p.id !== polygon.id);
+        drawSmoothClosedPath(context, polygon.nodes, 0.08, others);
         context.lineWidth = (selected ? 3 : 1.5) / view.scale;
         context.strokeStyle = selected ? '#6d4ef2' : POLYGON_STROKE;
         context.stroke();
@@ -517,7 +519,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         : (autofill ? [...draft, ...autofill.nodes] : draft);
       context.beginPath();
       if (preview.length >= 3) {
-        drawSmoothClosedPath(context, preview, 0.08);
+        drawSmoothClosedPath(context, preview, 0.08, polygonsRef.current);
         context.globalAlpha = Math.min(0.72, Math.max(0.2, display.maskOpacity * 0.85));
         context.fillStyle = POLYGON_FILL;
         context.fill();
@@ -2070,7 +2072,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         for (const polygon of polygonsRef.current) {
           if (polygon.nodes.length < 3) continue;
           context.beginPath();
-          drawSmoothClosedPath(context, polygon.nodes, 0.08);
+          const others = polygonsRef.current.filter((p) => p.id !== polygon.id);
+          drawSmoothClosedPath(context, polygon.nodes, 0.08, others);
           context.fill();
         }
         return toBlob(canvas);

@@ -10,6 +10,7 @@ import {
   getSharedBoundaryAutofillPath,
   getSmoothSegmentControlPoints,
   insertNodeAtEdge,
+  isSegmentOnPolygonsBoundary,
   mergePolygonsIntoSingle,
   polygonArea,
 } from './polygon-geometry';
@@ -265,6 +266,34 @@ describe('drawSmoothClosedPath', () => {
     );
     expect(cp1.x).toBeGreaterThan(20);
     expect(cp2.x).toBeLessThan(40);
+  });
+
+  it('draws shared boundary segments with lineTo without applying smooth', () => {
+    const existingPoly = rectangle('p1', 0, 0, 100, 100);
+    // Polygon 2 shares the edge along x=100 from y=20 to y=80
+    const poly2Nodes = [
+      { x: 100, y: 20 },
+      { x: 150, y: 50 },
+      { x: 100, y: 80 },
+    ];
+    const ctx = {
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      bezierCurveTo: vi.fn(),
+      closePath: vi.fn(),
+    };
+    drawSmoothClosedPath(ctx, poly2Nodes, 0.08, [existingPoly]);
+    // The segment from (100, 80) to (100, 20) lies on existingPoly's boundary (x=100)
+    // It should be drawn directly with lineTo, NOT bezierCurveTo
+    expect(ctx.lineTo).toHaveBeenCalledWith(100, 20);
+  });
+
+  it('detects segments lying on other polygon boundaries accurately', () => {
+    const existingPoly = rectangle('p1', 0, 0, 100, 100);
+    // Segment along edge x=100
+    expect(isSegmentOnPolygonsBoundary({ x: 100, y: 20 }, { x: 100, y: 80 }, [existingPoly])).toBe(true);
+    // Segment pointing away from the boundary
+    expect(isSegmentOnPolygonsBoundary({ x: 100, y: 20 }, { x: 150, y: 50 }, [existingPoly])).toBe(false);
   });
 });
 
