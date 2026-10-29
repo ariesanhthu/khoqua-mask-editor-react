@@ -275,7 +275,7 @@ input:focus-visible, select:focus-visible { border-color: var(--accent); box-sha
 .editor-main > .canvas-viewport { position: absolute; z-index: 1; inset: 0; }
 .canvas-viewport { position: relative; min-height: 0; overflow: hidden; touch-action: none; }
 .canvas-viewport canvas { display: block; width: 100%; height: 100%; }
-.canvas-viewport.tool-polygon canvas,.canvas-viewport.tool-cut canvas,.canvas-viewport.tool-point canvas { cursor: crosshair; }.canvas-viewport.tool-select canvas { cursor: default; }.canvas-viewport.tool-pan canvas { cursor: grab; }
+.canvas-viewport.tool-polygon canvas,.canvas-viewport.tool-cut canvas,.canvas-viewport.tool-point canvas,.canvas-viewport.tool-rectangle canvas,.canvas-viewport.tool-circle canvas,.canvas-viewport.tool-anchor canvas { cursor: crosshair; }.canvas-viewport.tool-select canvas { cursor: default; }.canvas-viewport.tool-pan canvas { cursor: grab; }
 .canvas-hint { position: absolute; z-index: 2; right: 14px; bottom: 14px; padding: 6px 9px; color: var(--text-muted); background: rgba(18, 26, 43, .84); border: 1px solid var(--border); border-radius: 7px; font-size: 9px; pointer-events: none; backdrop-filter: blur(8px); }
 .canvas-identity,.layer-controls,.viewport-tools,.zoom-controls { position: absolute; z-index: 5; }
 .canvas-identity { top: 15px; left: 15px; display: flex; align-items: center; gap: 8px; max-width: calc(100% - 100px); padding: 7px 11px; overflow: hidden; color: var(--text-secondary); background: rgba(22, 30, 47, .88); border: 1px solid var(--border); border-radius: 999px; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; backdrop-filter: blur(10px); }

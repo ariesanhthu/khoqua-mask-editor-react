@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { mergePolygonsIntoSingle, polygonArea } from './polygon-geometry';
+import {
+  createCirclePolygon,
+  createRectanglePolygon,
+  insertNodeAtEdge,
+  mergePolygonsIntoSingle,
+  polygonArea,
+} from './polygon-geometry';
 
 const polygon = (id: string, points: Array<[number, number]>, label = 'damage') => ({
   id,
@@ -98,5 +104,66 @@ describe('mergePolygonsIntoSingle', () => {
       rectangle('right', 25, 5, 30, 25),
     ]));
     expect(Math.abs(polygonArea(merged.nodes))).toBeCloseTo(900);
+  });
+});
+
+describe('createRectanglePolygon', () => {
+  it('creates a 4-node clockwise polygon with correct bounds', () => {
+    const poly = createRectanglePolygon({ x: 10, y: 20 }, { x: 50, y: 70 }, 'Test Rect');
+    expect(poly.label).toBe('Test Rect');
+    expect(poly.nodes.length).toBe(4);
+    expect(poly.nodes[0]).toMatchObject({ x: 10, y: 20 });
+    expect(poly.nodes[1]).toMatchObject({ x: 50, y: 20 });
+    expect(poly.nodes[2]).toMatchObject({ x: 50, y: 70 });
+    expect(poly.nodes[3]).toMatchObject({ x: 10, y: 70 });
+    expect(Math.abs(polygonArea(poly.nodes))).toBeCloseTo(40 * 50);
+  });
+
+  it('handles reverse drag corners correctly', () => {
+    const poly = createRectanglePolygon({ x: 80, y: 90 }, { x: 20, y: 30 });
+    expect(poly.nodes[0]).toMatchObject({ x: 20, y: 30 });
+    expect(poly.nodes[1]).toMatchObject({ x: 80, y: 30 });
+    expect(poly.nodes[2]).toMatchObject({ x: 80, y: 90 });
+    expect(poly.nodes[3]).toMatchObject({ x: 20, y: 90 });
+  });
+});
+
+describe('createCirclePolygon', () => {
+  it('creates circular polygon approximating area pi * r^2', () => {
+    const radius = 20;
+    const poly = createCirclePolygon({ x: 100, y: 100 }, radius, radius, 32, 'Test Circle');
+    expect(poly.label).toBe('Test Circle');
+    expect(poly.nodes.length).toBe(32);
+    // Area of regular 32-gon with radius 20: 32 * 0.5 * r^2 * sin(2pi/32) ≈ 1248.57
+    const expectedArea = 0.5 * 32 * radius * radius * Math.sin((2 * Math.PI) / 32);
+    expect(Math.abs(polygonArea(poly.nodes))).toBeCloseTo(expectedArea, -1);
+  });
+
+  it('creates ellipse when rx != ry', () => {
+    const poly = createCirclePolygon({ x: 50, y: 50 }, 30, 15, 24);
+    expect(poly.nodes.length).toBe(24);
+    expect(Math.abs(polygonArea(poly.nodes))).toBeGreaterThan(1000);
+  });
+});
+
+describe('insertNodeAtEdge', () => {
+  it('inserts an anchor point between edgeIndex and edgeIndex + 1', () => {
+    const rect = createRectanglePolygon({ x: 0, y: 0 }, { x: 10, y: 10 });
+    const { polygon: updated, node } = insertNodeAtEdge(rect, 0, { x: 5, y: 0 });
+    expect(updated.nodes.length).toBe(5);
+    expect(updated.nodes[1].id).toBe(node.id);
+    expect(updated.nodes[1].x).toBe(5);
+    expect(updated.nodes[1].y).toBe(0);
+    expect(updated.meta?.source).toBe('human');
+  });
+
+  it('inserts an anchor point at the last edge (between last node and first node)', () => {
+    const rect = createRectanglePolygon({ x: 0, y: 0 }, { x: 10, y: 10 });
+    // Edge 3 connects node 3 (0, 10) to node 0 (0, 0)
+    const { polygon: updated, node } = insertNodeAtEdge(rect, 3, { x: 0, y: 5 });
+    expect(updated.nodes.length).toBe(5);
+    expect(updated.nodes[4].id).toBe(node.id);
+    expect(updated.nodes[4].x).toBe(0);
+    expect(updated.nodes[4].y).toBe(5);
   });
 });

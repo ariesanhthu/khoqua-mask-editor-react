@@ -295,6 +295,91 @@ export function clonePolygons(polygons: AnnotationPolygon[]): AnnotationPolygon[
   }));
 }
 
+/**
+ * Creates a rectangular AnnotationPolygon from two opposite corners.
+ * Vertices are ordered clockwise: top-left, top-right, bottom-right, bottom-left.
+ */
+export function createRectanglePolygon(
+  start: Pick<PolygonNode, 'x' | 'y'>,
+  end: Pick<PolygonNode, 'x' | 'y'>,
+  label = 'Vùng hư hại',
+): AnnotationPolygon {
+  const minX = Math.min(start.x, end.x);
+  const maxX = Math.max(start.x, end.x);
+  const minY = Math.min(start.y, end.y);
+  const maxY = Math.max(start.y, end.y);
+
+  return {
+    id: createId(),
+    label,
+    nodes: [
+      { id: createId(), x: Math.round(minX * 10) / 10, y: Math.round(minY * 10) / 10 },
+      { id: createId(), x: Math.round(maxX * 10) / 10, y: Math.round(minY * 10) / 10 },
+      { id: createId(), x: Math.round(maxX * 10) / 10, y: Math.round(maxY * 10) / 10 },
+      { id: createId(), x: Math.round(minX * 10) / 10, y: Math.round(maxY * 10) / 10 },
+    ],
+    meta: { source: 'human' },
+  };
+}
+
+/**
+ * Creates a circular/elliptical AnnotationPolygon with N samples around a center point.
+ * Vertices are ordered clockwise.
+ */
+export function createCirclePolygon(
+  center: Pick<PolygonNode, 'x' | 'y'>,
+  rx: number,
+  ry: number = rx,
+  samples = 32,
+  label = 'Vùng hư hại',
+): AnnotationPolygon {
+  const count = Math.max(8, samples);
+  const nodes: PolygonNode[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const angle = (index * 2 * Math.PI) / count;
+    nodes.push({
+      id: createId(),
+      x: Math.round((center.x + rx * Math.cos(angle)) * 10) / 10,
+      y: Math.round((center.y + ry * Math.sin(angle)) * 10) / 10,
+    });
+  }
+
+  return {
+    id: createId(),
+    label,
+    nodes,
+    meta: { source: 'human' },
+  };
+}
+
+/**
+ * Inserts a new node into a polygon at a specific edge index, returning the updated polygon and new node.
+ */
+export function insertNodeAtEdge(
+  polygon: AnnotationPolygon,
+  edgeIndex: number,
+  point: Pick<PolygonNode, 'x' | 'y'>,
+): { polygon: AnnotationPolygon; node: PolygonNode } {
+  const node: PolygonNode = {
+    id: createId(),
+    x: Math.round(point.x * 10) / 10,
+    y: Math.round(point.y * 10) / 10,
+  };
+  const nodes = [
+    ...polygon.nodes.slice(0, edgeIndex + 1),
+    node,
+    ...polygon.nodes.slice(edgeIndex + 1),
+  ];
+  return {
+    polygon: {
+      ...polygon,
+      nodes,
+      meta: { ...polygon.meta, source: 'human' },
+    },
+    node,
+  };
+}
+
 export function polygonArea(nodes: Array<Pick<PolygonNode, 'x' | 'y'>>): number {
   let area = 0;
   for (let index = 0; index < nodes.length; index += 1) {

@@ -99,7 +99,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const [tool, setTool] = useState<EditorTool>(() => {
     if (typeof window === 'undefined') return 'select';
     const stored = localStorage.getItem('editor-tool') as EditorTool | null;
-    return stored && ['polygon', 'select', 'cut', 'pan'].includes(stored) ? stored : 'select';
+    return stored && ['polygon', 'rectangle', 'circle', 'anchor', 'select', 'cut', 'pan'].includes(stored) ? stored : 'select';
   });
   const [workspaceStep, setWorkspaceStep] = useState<WorkspaceStep>('mask');
   const [opacity, setOpacity] = useState(() => {
@@ -144,6 +144,12 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         changeToolRef.current('pan');
       } else if (key === 'p') {
         changeToolRef.current('polygon', 'mask');
+      } else if (key === 'r') {
+        changeToolRef.current('rectangle', 'mask');
+      } else if (key === 'c') {
+        changeToolRef.current('circle', 'mask');
+      } else if (key === 'a') {
+        changeToolRef.current('anchor', 'mask');
       } else if (key === 'm') {
         // Temporarily hidden: changeToolRef.current('point', 'warts');
       } else if (event.key === '?') {
@@ -483,7 +489,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const selectTool = useCallback(async (nextTool: EditorTool, nextStep = workspaceStep) => {
     if (navigating || status === 'SYNCING') return;
     if (nextStep !== workspaceStep && !await flushExplicitly()) return;
-    if (!readOnly && !conflictRef.current && nextTool === 'select' && nextStep === 'mask') canvasRef.current?.beginPolygonEdit();
+    if (!readOnly && !conflictRef.current && (nextTool === 'select' || nextTool === 'anchor' || nextTool === 'rectangle' || nextTool === 'circle') && nextStep === 'mask') canvasRef.current?.beginPolygonEdit();
     setTool(readOnly ? 'pan' : nextTool);
     setWorkspaceStep(nextStep);
     localStorage.setItem('editor-tool', nextTool);
@@ -603,6 +609,9 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               <ToolbarButton active={tool === 'select'} label="Chọn / chỉnh sửa (V)" icon="cursor" onClick={() => selectTool('select', 'mask')} />
               <ToolbarButton active={tool === 'pan'} label="Di chuyển ảnh (H)" icon="hand" onClick={() => selectTool('pan')} />
               <ToolbarButton active={tool === 'polygon'} label="Vẽ polygon (P)" icon="polygon" onClick={() => selectTool('polygon', 'mask')} />
+              <ToolbarButton active={tool === 'rectangle'} label="Vẽ hình chữ nhật (R)" icon="rectangle" onClick={() => selectTool('rectangle', 'mask')} />
+              <ToolbarButton active={tool === 'circle'} label="Vẽ vòng tròn (C)" icon="circle" onClick={() => selectTool('circle', 'mask')} />
+              <ToolbarButton active={tool === 'anchor'} label="Chế độ điểm neo: Bấm viền để thêm & kéo anchor point (A)" icon="anchor" onClick={() => selectTool('anchor', 'mask')} />
               {/* Temporarily hidden: <ToolbarButton active={tool === 'point'} label="Đánh dấu point u vấu (M)" icon="pin" onClick={() => selectTool('point', 'warts')} /> */}
               <ToolbarButton active={tool === 'cut'} label="Cắt polygon" icon="scissors" onClick={() => selectTool('cut', 'mask')} />
               <ToolbarButton disabled={selectedPolygonIds.length < 2} label="Gộp polygon đã chọn" icon="merge" onClick={() => canvasRef.current?.groupSelectedPolygons()} />
@@ -648,7 +657,13 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
 
               <section className="object-section">
                 <p aria-live="polite">{history.local
-                  ? 'Đang sửa polygon: Ctrl+Z hoàn tác điểm; Ctrl+Y hoặc Ctrl+Shift+Z làm lại. Enter để hoàn tất, Esc để hủy. Undo/redo màu tím áp dụng cục bộ.'
+                  ? 'Đang sửa polygon: Ctrl+Z hoàn tác điểm; Ctrl+Y hoặc Ctrl+Shift+Z làm lại. Enter để hoàn tất, Esc để hủy.'
+                  : tool === 'anchor'
+                  ? 'Chế độ điểm neo: Rê chuột lên viền mask để xem điểm thêm. Click và kéo chuột để tạo & tùy chỉnh anchor point ngay lập tức. Bấm chuột phải lên điểm để xóa.'
+                  : tool === 'rectangle'
+                  ? 'Chế độ hình chữ nhật: Nhấp và kéo chuột trên ảnh để tạo mask hình chữ nhật.'
+                  : tool === 'circle'
+                  ? 'Chế độ vòng tròn: Nhấp và kéo chuột để tạo mask vòng tròn/oval. Giữ Shift để tạo vòng tròn đều, giữ Alt để vẽ từ tâm.'
                   : 'Ctrl+Z hoàn tác toàn cục; Ctrl+Y hoặc Ctrl+Shift+Z làm lại. Polygon vừa hoàn tất được hoàn tác/làm lại cả vùng.'}</p>
                 <p>Di chuột lên điểm để hiện dấu × đỏ, bấm chuột phải để xóa điểm. Polygon đã đóng cần ít nhất 3 điểm.</p>
                 {tool === 'polygon' ? <button className="button primary" onClick={() => void completePolygon()}>Hoàn tất polygon</button> : null}
@@ -706,8 +721,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       {helpOpen ? <div className="modal-backdrop help-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><section className="shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-title">
         <div className="shortcut-header"><div><span className="help-mark">?</span><span><h2 id="shortcut-title">Trợ giúp &amp; phím tắt</h2><p>Thao tác nhanh hơn trên vùng chú thích</p></span></div><button aria-label="Đóng trợ giúp" onClick={() => setHelpOpen(false)}>×</button></div>
         <div className="shortcut-content">
-          <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" />{/* <Shortcut keys={['M']} label="Đánh dấu point u vấu" /> */}<Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'Z']} label={history.local ? "Hoàn tác điểm (cục bộ)" : "Hoàn tác toàn cục"} /><Shortcut keys={['Ctrl', 'Y']} label={history.local ? "Làm lại điểm (cục bộ)" : "Làm lại toàn cục"} /></section>
-          <section className="usage-tips"><h3>Mẹo sử dụng</h3><p><Icon name="cursor" />Ở chế độ V, kéo khung qua các node để chọn nhiều polygon.</p><p><Icon name="polygon" />Chế độ P chỉ dùng để vẽ một polygon mới.</p><p><Icon name="layers" />Ẩn lớp phủ khi cần quan sát ảnh gốc.</p><p><Icon name="hand" />Dùng con lăn để zoom; Shift + con lăn để cuộn ngang.</p></section>
+          <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" /><Shortcut keys={['R']} label="Vẽ hình chữ nhật" /><Shortcut keys={['C']} label="Vẽ vòng tròn" /><Shortcut keys={['A']} label="Thêm & kéo điểm neo" />{/* <Shortcut keys={['M']} label="Đánh dấu point u vấu" /> */}<Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'Z']} label={history.local ? "Hoàn tác điểm (cục bộ)" : "Hoàn tác toàn cục"} /><Shortcut keys={['Ctrl', 'Y']} label={history.local ? "Làm lại điểm (cục bộ)" : "Làm lại toàn cục"} /></section>
+          <section className="usage-tips"><h3>Mẹo sử dụng</h3><p><Icon name="cursor" />Ở chế độ V, kéo khung qua các node để chọn nhiều polygon.</p><p><Icon name="polygon" />Chế độ P chỉ dùng để vẽ một polygon mới.</p><p><Icon name="rectangle" />Chế độ R: Kéo chuột để vẽ nhanh mask hình chữ nhật.</p><p><Icon name="circle" />Chế độ C: Kéo chuột để vẽ mask hình tròn/oval. Giữ Shift để tạo vòng tròn đều, Alt để vẽ từ tâm.</p><p><Icon name="anchor" />Chế độ A (Điểm neo): Click lên viền mask để tạo anchor point và kéo tùy chỉnh hình dạng mask.</p><p><Icon name="layers" />Ẩn lớp phủ khi cần quan sát ảnh gốc.</p><p><Icon name="hand" />Dùng con lăn để zoom; Shift + con lăn để cuộn ngang.</p></section>
         </div>
       </section></div> : null}
       {conflict && conflictMinimized ? <button className="conflict-chip" onClick={() => setConflictMinimized(false)}>Có xung đột — mở lựa chọn xử lý</button> : null}
@@ -724,7 +739,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   );
 }
 
-type IconName = 'chevron-left' | 'chevron-right' | 'cursor' | 'files' | 'fit' | 'folder' | 'hand' | 'layers' | 'merge' | 'pin' | 'polygon' | 'redo' | 'scissors' | 'trash' | 'undo';
+type IconName = 'chevron-left' | 'chevron-right' | 'cursor' | 'files' | 'fit' | 'folder' | 'hand' | 'layers' | 'merge' | 'pin' | 'polygon' | 'rectangle' | 'circle' | 'anchor' | 'redo' | 'scissors' | 'trash' | 'undo';
 
 function ToolbarButton({ active = false, danger = false, disabled = false, icon, label, onClick }: { active?: boolean; danger?: boolean; disabled?: boolean; icon: IconName; label: string; onClick(): void }) {
   return <button type="button" aria-label={label} aria-pressed={active || undefined} className={`${active ? 'active' : ''} ${danger ? 'danger' : ''}`} disabled={disabled} title={label} onClick={onClick}><Icon name={icon} /></button>;
@@ -747,6 +762,9 @@ function Icon({ name }: { name: IconName }) {
     merge: <><path d="M4 5h7v7H4zM13 12h7v7h-7z" /><path d="m9 15 6-6m-2 0h2v2" /></>,
     pin: <><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z" /><circle cx="12" cy="10" r="2" /></>,
     polygon: <path d="m7 4 10 2 3 10-8 5-9-7 4-10Z" />,
+    rectangle: <rect x="3" y="5" width="18" height="14" rx="2" />,
+    circle: <circle cx="12" cy="12" r="9" />,
+    anchor: <><path d="M3 19C6 10 14 6 21 5" /><circle cx="12" cy="10" r="3.5" /><path d="M12 17v6m-3-3h6" /></>,
     redo: <><path d="m17 7 4 4-4 4" /><path d="M3 18v-2a5 5 0 0 1 5-5h13" /></>,
     scissors: <><circle cx="6" cy="7" r="3" /><circle cx="6" cy="17" r="3" /><path d="m8.7 8.4 11.3 6.1M8.7 15.6 20 9.5" /></>,
     trash: <><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7" /><path d="M10 11v6m4-6v6" /></>,
