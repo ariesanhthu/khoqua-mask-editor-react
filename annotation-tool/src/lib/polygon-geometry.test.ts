@@ -8,6 +8,7 @@ import {
   ensurePolygonHasNodeAt,
   findSnapTargetToPolygons,
   getSharedBoundaryAutofillPath,
+  getSmoothSegmentControlPoints,
   insertNodeAtEdge,
   mergePolygonsIntoSingle,
   polygonArea,
@@ -232,6 +233,36 @@ describe('drawSmoothClosedPath', () => {
       nodes[0].x,
       nodes[0].y,
     );
+  });
+
+  it('prevents loops and overshoots at sharp corners (zero bulging ears / cuc loi ra)', () => {
+    // 90 degree corner at (100, 0)
+    const { cp1, cp2 } = getSmoothSegmentControlPoints(
+      { x: 0, y: 0 },
+      { x: 100, y: 0 },
+      { x: 100, y: 100 },
+      { x: 0, y: 100 },
+    );
+    // Control points must lie strictly along the edge x=100 without overshooting past x=100
+    expect(cp1.x).toBeCloseTo(100);
+    expect(cp1.y).toBeGreaterThan(0);
+    expect(cp1.y).toBeLessThan(100);
+    expect(cp2.x).toBeCloseTo(100);
+    expect(cp2.y).toBeGreaterThan(0);
+    expect(cp2.y).toBeLessThan(100);
+  });
+
+  it('smooths gentle curves on round contours', () => {
+    // 4 points forming gentle 30 degree turns
+    const { cp1, cp2 } = getSmoothSegmentControlPoints(
+      { x: 0, y: 0 },
+      { x: 20, y: 5 },
+      { x: 40, y: 12 },
+      { x: 60, y: 22 },
+      0.16,
+    );
+    expect(cp1.x).toBeGreaterThan(20);
+    expect(cp2.x).toBeLessThan(40);
   });
 });
 

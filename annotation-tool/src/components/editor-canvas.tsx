@@ -26,6 +26,7 @@ import {
   ensurePolygonHasNodeAt,
   findSnapTargetToPolygons,
   getSharedBoundaryAutofillPath,
+  getSmoothSegmentControlPoints,
   insertNodeAtEdge,
   mergePolygonsIntoSingle,
   pointInPolygon,
@@ -712,12 +713,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         if (n >= 3) {
           const prev = nodes[(i - 1 + n) % n];
           const next2 = nodes[(i + 2) % n];
-          const tension = 0.16;
-          const cp1x = edgeStart.x + (edgeEnd.x - prev.x) * tension;
-          const cp1y = edgeStart.y + (edgeEnd.y - prev.y) * tension;
-          const cp2x = edgeEnd.x - (next2.x - edgeStart.x) * tension;
-          const cp2y = edgeEnd.y - (next2.y - edgeStart.y) * tension;
-          context.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, edgeEnd.x, edgeEnd.y);
+          const { cp1, cp2 } = getSmoothSegmentControlPoints(prev, edgeStart, edgeEnd, next2, 0.16);
+          context.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, edgeEnd.x, edgeEnd.y);
         } else {
           context.lineTo(edgeEnd.x, edgeEnd.y);
         }

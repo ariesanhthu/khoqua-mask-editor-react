@@ -382,8 +382,103 @@ export function insertNodeAtEdge(
 }
 
 /**
- * Draws a closed Catmull-Rom spline path passing smoothly through all given points.
- * Tension controls curve tightness: 0.16 gives subtle, natural smoothing without sharp spikes.
+ * Calculates cubic Bézier control points for a smooth curve segment from `curr` to `next`,
+ * preserving sharp corners / cusps (when turn angle >= 57 deg, cosAngle < 0.55) to prevent
+ * overshoots, loops, or bulging "ears" at junctions, while smoothly curving gentle turns.
+ */
+export function getSmoothSegmentControlPoints(
+  prev: { x: number; y: number },
+  curr: { x: number; y: number },
+  next: { x: number; y: number },
+  next2: { x: number; y: number },
+  tension = 0.16,
+): { cp1: { x: number; y: number }; cp2: { x: number; y: number } } {
+  const dSegX = next.x - curr.x;
+  const dSegY = next.y - curr.y;
+  const dSeg = Math.hypot(dSegX, dSegY);
+
+  if (dSeg < 1e-4) {
+    return { cp1: { ...curr }, cp2: { ...next } };
+  }
+
+  const uSegX = dSegX / dSeg;
+  const uSegY = dSegY / dSeg;
+
+  // Incoming vector at curr: (curr - prev)
+  const dInX = curr.x - prev.x;
+  const dInY = curr.y - prev.y;
+  const dIn = Math.hypot(dInX, dInY);
+  const uInX = dIn > 1e-6 ? dInX / dIn : uSegX;
+  const uInY = dIn > 1e-6 ? dInY / dIn : uSegY;
+
+  // Outgoing vector at next: (next2 - next)
+  const dOutX = next2.x - next.x;
+  const dOutY = next2.y - next.y;
+  const dOut = Math.hypot(dOutX, dOutY);
+  const uOutX = dOut > 1e-6 ? dOutX / dOut : uSegX;
+  const uOutY = dOut > 1e-6 ? dOutY / dOut : uSegY;
+
+  // Check turn angles
+  const cosTurnCurr = uInX * uSegX + uInY * uSegY;
+  const cosTurnNext = uSegX * uOutX + uSegY * uOutY;
+
+  const maxCPDist = dSeg * 0.333; // Strict 1/3 limit guarantees monotonic curve without loops
+
+  // Tangent at curr
+  let tCurrX: number;
+  let tCurrY: number;
+  let len1: number;
+
+  if (cosTurnCurr < 0.55 || dIn < 1e-3) {
+    // Sharp turn / corner cusp at curr: control point points strictly along the segment
+    tCurrX = uSegX;
+    tCurrY = uSegY;
+    len1 = Math.min(dSeg * 0.2, 8);
+  } else {
+    // Smooth turn: use normalized bisector
+    const sumX = uInX + uSegX;
+    const sumY = uInY + uSegY;
+    const sumLen = Math.hypot(sumX, sumY);
+    tCurrX = sumLen > 1e-6 ? sumX / sumLen : uSegX;
+    tCurrY = sumLen > 1e-6 ? sumY / sumLen : uSegY;
+    len1 = Math.min(maxCPDist, Math.min(dIn, dSeg) * tension);
+  }
+
+  // Tangent at next
+  let tNextX: number;
+  let tNextY: number;
+  let len2: number;
+
+  if (cosTurnNext < 0.55 || dOut < 1e-3) {
+    // Sharp turn / corner cusp at next: control point points strictly along the segment
+    tNextX = uSegX;
+    tNextY = uSegY;
+    len2 = Math.min(dSeg * 0.2, 8);
+  } else {
+    // Smooth turn: use normalized bisector
+    const sumX = uSegX + uOutX;
+    const sumY = uSegY + uOutY;
+    const sumLen = Math.hypot(sumX, sumY);
+    tNextX = sumLen > 1e-6 ? sumX / sumLen : uSegX;
+    tNextY = sumLen > 1e-6 ? sumY / sumLen : uSegY;
+    len2 = Math.min(maxCPDist, Math.min(dSeg, dOut) * tension);
+  }
+
+  return {
+    cp1: {
+      x: curr.x + tCurrX * len1,
+      y: curr.y + tCurrY * len1,
+    },
+    cp2: {
+      x: next.x - tNextX * len2,
+      y: next.y - tNextY * len2,
+    },
+  };
+}
+
+/**
+ * Draws a closed smooth path passing cleanly through all given points.
+ * Preserves sharp corners and junction cusps without overshooting or looping ("cục lòi ra").
  */
 export function drawSmoothClosedPath(
   context: {
@@ -410,12 +505,8 @@ export function drawSmoothClosedPath(
     const next = nodes[(i + 1) % n];
     const next2 = nodes[(i + 2) % n];
 
-    const cp1x = curr.x + (next.x - prev.x) * tension;
-    const cp1y = curr.y + (next.y - prev.y) * tension;
-    const cp2x = next.x - (next2.x - curr.x) * tension;
-    const cp2y = next.y - (next2.y - curr.y) * tension;
-
-    context.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+    const { cp1, cp2 } = getSmoothSegmentControlPoints(prev, curr, next, next2, tension);
+    context.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, next.x, next.y);
   }
   context.closePath();
 }
