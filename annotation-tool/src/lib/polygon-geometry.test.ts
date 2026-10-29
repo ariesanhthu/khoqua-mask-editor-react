@@ -149,11 +149,14 @@ describe('createCirclePolygon', () => {
 describe('insertNodeAtEdge', () => {
   it('inserts an anchor point between edgeIndex and edgeIndex + 1', () => {
     const rect = createRectanglePolygon({ x: 0, y: 0 }, { x: 10, y: 10 });
+    expect(rect.nodes.every((n) => !n.isAnchor)).toBe(true);
     const { polygon: updated, node } = insertNodeAtEdge(rect, 0, { x: 5, y: 0 });
     expect(updated.nodes.length).toBe(5);
     expect(updated.nodes[1].id).toBe(node.id);
     expect(updated.nodes[1].x).toBe(5);
     expect(updated.nodes[1].y).toBe(0);
+    expect(node.isAnchor).toBe(true);
+    expect(updated.nodes[1].isAnchor).toBe(true);
     expect(updated.meta?.source).toBe('human');
   });
 

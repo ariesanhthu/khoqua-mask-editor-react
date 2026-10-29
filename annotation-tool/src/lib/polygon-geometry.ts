@@ -364,6 +364,7 @@ export function insertNodeAtEdge(
     id: createId(),
     x: Math.round(point.x * 10) / 10,
     y: Math.round(point.y * 10) / 10,
+    isAnchor: true,
   };
   const nodes = [
     ...polygon.nodes.slice(0, edgeIndex + 1),

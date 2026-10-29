@@ -49,6 +49,7 @@ export interface EditorCanvasHandle {
   redo(): void;
   deleteSelectedPoint(): void;
   deleteSelection(): void;
+  selectAllPolygons(): void;
   clearAllPolygons(): void;
   confirmNoBreakpoint(): void;
   completePolygon(): boolean;
@@ -475,23 +476,23 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           context.textBaseline = 'middle';
           context.fillText(text, anchorX + paddingX, tagY + tagHeight / 2);
         }
-        if (toolRef.current === 'select' || toolRef.current === 'polygon' || toolRef.current === 'cut' || toolRef.current === 'anchor') {
+        if (toolRef.current === 'anchor') {
           for (const node of polygon.nodes) {
+            if (!node.isAnchor) continue;
             const nodeSelected = selectedNodeIdsRef.current.has(node.id);
-            const isAnchorTool = toolRef.current === 'anchor';
-            const nodeRadius = (nodeSelected ? 4.75 : isAnchorTool ? 3.5 : 2.75) / view.scale;
+            const nodeRadius = (nodeSelected ? 2.8 : 2.0) / view.scale;
             context.beginPath();
             context.arc(node.x, node.y, nodeRadius, 0, Math.PI * 2);
             context.fillStyle = nodeSelected ? '#ffffff' : '#cfc4ff';
             context.fill();
-            context.lineWidth = (isAnchorTool ? 1.8 : 1.5) / view.scale;
+            context.lineWidth = 1.0 / view.scale;
             context.strokeStyle = nodeSelected ? '#6d4ef2' : '#7c5cfa';
             context.stroke();
-            if (isAnchorTool && hoveredNodeRef.current?.id === node.id) {
+            if (hoveredNodeRef.current?.id === node.id) {
               context.beginPath();
-              context.arc(node.x, node.y, (nodeRadius + 2.5 / view.scale), 0, Math.PI * 2);
+              context.arc(node.x, node.y, nodeRadius + 1.5 / view.scale, 0, Math.PI * 2);
               context.strokeStyle = '#6d4ef2';
-              context.lineWidth = 1.2 / view.scale;
+              context.lineWidth = 1.0 / view.scale;
               context.stroke();
             }
           }
@@ -676,42 +677,42 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         context.beginPath();
         context.moveTo(edgeStart.x, edgeStart.y);
         context.lineTo(edgeEnd.x, edgeEnd.y);
-        context.lineWidth = 3 / view.scale;
+        context.lineWidth = 2 / view.scale;
         context.strokeStyle = '#6d4ef2';
         context.stroke();
       }
 
-      const r = 5.5 / view.scale;
+      const r = 3.2 / view.scale;
       context.beginPath();
       context.arc(anchorHover.point.x, anchorHover.point.y, r, 0, Math.PI * 2);
       context.fillStyle = '#ffffff';
       context.fill();
-      context.lineWidth = 2.5 / view.scale;
+      context.lineWidth = 1.4 / view.scale;
       context.strokeStyle = '#6d4ef2';
       context.stroke();
 
-      const plusR = 2.5 / view.scale;
+      const plusR = 1.6 / view.scale;
       context.beginPath();
       context.moveTo(anchorHover.point.x - plusR, anchorHover.point.y);
       context.lineTo(anchorHover.point.x + plusR, anchorHover.point.y);
       context.moveTo(anchorHover.point.x, anchorHover.point.y - plusR);
       context.lineTo(anchorHover.point.x, anchorHover.point.y + plusR);
-      context.lineWidth = 1.5 / view.scale;
+      context.lineWidth = 1.1 / view.scale;
       context.strokeStyle = '#6d4ef2';
       context.stroke();
 
-      const badge = 'Click để thêm & kéo anchor point';
-      context.font = `600 ${10 / view.scale}px ui-sans-serif, system-ui, sans-serif`;
-      const badgeW = context.measureText(badge).width + 10 / view.scale;
-      const badgeH = 18 / view.scale;
-      const badgeX = anchorHover.point.x + 10 / view.scale;
-      const badgeY = Math.max(0, anchorHover.point.y - badgeH - 4 / view.scale);
+      const badge = 'Thêm & kéo anchor';
+      context.font = `600 ${9 / view.scale}px ui-sans-serif, system-ui, sans-serif`;
+      const badgeW = context.measureText(badge).width + 8 / view.scale;
+      const badgeH = 16 / view.scale;
+      const badgeX = anchorHover.point.x + 8 / view.scale;
+      const badgeY = Math.max(0, anchorHover.point.y - badgeH - 3 / view.scale);
       context.fillStyle = 'rgba(16, 24, 40, 0.88)';
       context.fillRect(badgeX, badgeY, badgeW, badgeH);
       context.fillStyle = '#ffffff';
       context.textBaseline = 'middle';
       context.textAlign = 'left';
-      context.fillText(badge, badgeX + 5 / view.scale, badgeY + badgeH / 2);
+      context.fillText(badge, badgeX + 4 / view.scale, badgeY + badgeH / 2);
       context.restore();
     }
 
@@ -924,7 +925,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     const created: AnnotationPolygon = {
       id: crypto.randomUUID(),
       label: 'Vùng hư hại',
-      nodes: draft.map((node) => ({ ...node })),
+      nodes: draft.map((node) => ({ ...node, isAnchor: true })),
     };
     draftPolygonRef.current = [];
     draftEditingRef.current = false;
@@ -986,6 +987,20 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     commitPolygons(next);
   }, [commitPolygons]);
 
+  const selectAllPolygons = useCallback(() => {
+    if (props.readOnly) return;
+    if (!polygonsRef.current.length) {
+      onMessage('Không có polygon nào để chọn.');
+      return;
+    }
+    const polygonIds = new Set(polygonsRef.current.map((p) => p.id));
+    selectedPolygonIdsRef.current = polygonIds;
+    selectedNodeIdsRef.current.clear();
+    notifySelection();
+    render();
+    onMessage(`Đã chọn tất cả (${polygonIds.size} polygon). Nhấn Delete để xóa.`);
+  }, [notifySelection, onMessage, props.readOnly, render]);
+
   const clearAllPolygons = useCallback(() => {
     if (props.readOnly) return;
     if (!polygonsRef.current.length && polygonModeRef.current) {
@@ -1020,8 +1035,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     notifyChange();
   }, [notifyChange, render]);
 
-  const hitNode = useCallback((point: ImagePoint) => {
-    const radius = 12 / viewRef.current.scale;
+  const hitNode = useCallback((point: ImagePoint, onlyAnchors = false) => {
+    const radius = 10 / viewRef.current.scale;
     for (let polygonIndex = polygonsRef.current.length - 1; polygonIndex >= 0; polygonIndex -= 1) {
       const polygon = polygonsRef.current[polygonIndex];
       const bounds = polygonBounds(polygon);
@@ -1029,6 +1044,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           || point.y < bounds.top - radius || point.y > bounds.bottom + radius) continue;
       for (let nodeIndex = polygon.nodes.length - 1; nodeIndex >= 0; nodeIndex -= 1) {
         const node = polygon.nodes[nodeIndex];
+        if (onlyAnchors && !node.isAnchor) continue;
         if (Math.hypot(node.x - point.x, node.y - point.y) <= radius) return { polygon, node };
       }
     }
@@ -1073,7 +1089,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     hoveredNodeRef.current = null;
     if (event.button === 2) {
       event.preventDefault();
-      if (tool === 'polygon' || ((tool === 'select' || tool === 'anchor') && hitNode(point))) return;
+      if (tool === 'polygon' || (tool === 'anchor' && hitNode(point, true))) return;
       if (tool !== 'select' && tool !== 'anchor') return;
       const polygon = hitPolygon(point);
       if (!polygon) return;
@@ -1173,7 +1189,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       return;
     }
     if (tool === 'anchor') {
-      const nodeHit = hitNode(point);
+      const nodeHit = hitNode(point, true);
       if (nodeHit) {
         selectedNodeIdsRef.current = new Set([nodeHit.node.id]);
         selectedPolygonIdsRef.current = new Set([nodeHit.polygon.id]);
@@ -1195,18 +1211,40 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       const closest = findClosestPolygonEdge(point, hitTolerance);
       if (closest) {
         const before = clonePolygons(polygonsRef.current);
-        const { polygon: updated, node: insertedNode } = insertNodeAtEdge(
-          closest.polygon,
-          closest.edgeIndex,
-          closest.point,
-        );
-        const next = polygonsRef.current.map((p) => p.id === closest.polygon.id ? updated : p);
-        polygonsRef.current = next;
+        const edgeStart = closest.polygon.nodes[closest.edgeIndex];
+        const edgeEnd = closest.polygon.nodes[(closest.edgeIndex + 1) % closest.polygon.nodes.length];
+        const endpointTolerance = 6 / viewRef.current.scale;
+        const existingVertex = Math.hypot(closest.point.x - edgeStart.x, closest.point.y - edgeStart.y) <= endpointTolerance
+          ? edgeStart
+          : Math.hypot(closest.point.x - edgeEnd.x, closest.point.y - edgeEnd.y) <= endpointTolerance ? edgeEnd : null;
+
+        let targetNode: PolygonNode;
+        let nextPolygons: AnnotationPolygon[];
+
+        if (existingVertex) {
+          targetNode = { ...existingVertex, isAnchor: true };
+          nextPolygons = polygonsRef.current.map((p) => p.id === closest.polygon.id
+            ? {
+                ...p,
+                nodes: p.nodes.map((n) => n.id === existingVertex.id ? targetNode : n),
+              }
+            : p);
+        } else {
+          const { polygon: updated, node: insertedNode } = insertNodeAtEdge(
+            closest.polygon,
+            closest.edgeIndex,
+            closest.point,
+          );
+          targetNode = insertedNode;
+          nextPolygons = polygonsRef.current.map((p) => p.id === closest.polygon.id ? updated : p);
+        }
+
+        polygonsRef.current = nextPolygons;
         polygonModeRef.current = true;
-        operationsRef.current = polygonOperation(next);
+        operationsRef.current = polygonOperation(nextPolygons);
         humanActionRef.current = 'MODIFIED';
         selectedPolygonIdsRef.current = new Set([closest.polygon.id]);
-        selectedNodeIdsRef.current = new Set([insertedNode.id]);
+        selectedNodeIdsRef.current = new Set([targetNode.id]);
         anchorHoverRef.current = null;
 
         event.currentTarget.setPointerCapture(event.pointerId);
@@ -1214,13 +1252,13 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           id: event.pointerId,
           mode: 'nodes',
           start: point,
-          original: clonePolygons(next),
+          original: clonePolygons(nextPolygons),
           historyBefore: before,
-          nodeIds: new Set([insertedNode.id]),
+          nodeIds: new Set([targetNode.id]),
           moved: true,
         };
         notifySelection();
-        notifyChange('MODIFIED', next);
+        notifyChange('MODIFIED', nextPolygons);
         onMessage('Đã tạo anchor point trên viền. Hãy kéo để chỉnh hình dạng mask.');
         render();
         return;
@@ -1243,24 +1281,28 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     }
 
     const additive = event.shiftKey || event.ctrlKey || event.metaKey;
-    const nodeHit = hitNode(point);
-    if (nodeHit) {
-      if (!additive && !selectedNodeIdsRef.current.has(nodeHit.node.id)) selectedNodeIdsRef.current.clear();
-      selectedNodeIdsRef.current.add(nodeHit.node.id);
-      if (!additive) selectedPolygonIdsRef.current = new Set([nodeHit.polygon.id]);
-      else selectedPolygonIdsRef.current.add(nodeHit.polygon.id);
-      event.currentTarget.setPointerCapture(event.pointerId);
-      pointerRef.current = {
-        id: event.pointerId,
-        mode: 'nodes',
-        start: point,
-        original: clonePolygons(polygonsRef.current),
-        nodeIds: new Set(selectedNodeIdsRef.current),
-        moved: false,
-      };
-      notifySelection();
-      render();
-      return;
+    if (tool === 'select') {
+      const polyHit = hitPolygon(point);
+      if (polyHit) {
+        if (!additive && !selectedPolygonIdsRef.current.has(polyHit.id)) {
+          selectedPolygonIdsRef.current = new Set([polyHit.id]);
+          selectedNodeIdsRef.current.clear();
+        } else if (additive) {
+          selectedPolygonIdsRef.current.add(polyHit.id);
+        }
+        event.currentTarget.setPointerCapture(event.pointerId);
+        pointerRef.current = {
+          id: event.pointerId,
+          mode: 'polygons',
+          start: point,
+          original: clonePolygons(polygonsRef.current),
+          polygonIds: new Set(selectedPolygonIdsRef.current),
+          moved: false,
+        };
+        notifySelection();
+        render();
+        return;
+      }
     }
     if (!additive) {
       selectedNodeIdsRef.current.clear();
@@ -1356,7 +1398,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       return;
     }
     if (tool !== 'select' && tool !== 'anchor') return;
-    const nodeHit = hitNode(point);
+    const nodeHit = hitNode(point, tool === 'anchor');
     if (nodeHit) {
       if (nodeHit.polygon.nodes.length <= 3) {
         onMessage('Polygon cần ít nhất 3 điểm. Chọn polygon và nhấn Delete để xóa cả vùng.');
@@ -1389,7 +1431,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       if (tool === 'anchor') {
         const hitTolerance = 14 / viewRef.current.scale;
         const closest = findClosestPolygonEdge(point, hitTolerance);
-        const nodeHit = hitNode(point);
+        const nodeHit = hitNode(point, true);
         const nextHovered = nodeHit?.node ?? null;
         const nextAnchorHover = closest && !nodeHit
           ? { polygon: closest.polygon, edgeIndex: closest.edgeIndex, point: closest.point }
@@ -1415,7 +1457,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       }
       const hovered = tool === 'polygon'
         ? draftPolygonRef.current.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale) ?? null
-        : tool === 'select' ? hitNode(point)?.node ?? null : null;
+        : null;
       if (hoveredNodeRef.current?.id !== hovered?.id) {
         hoveredNodeRef.current = hovered;
         render();
@@ -1776,7 +1818,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           && target.matches('input, select, textarea, [contenteditable="true"]')) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
         event.preventDefault();
-        clearAllPolygons();
+        selectAllPolygons();
       } else if ((event.key === 'Delete' || event.key === 'Backspace') && (tool === 'select' || tool === 'anchor')) {
         event.preventDefault();
         deleteSelection();
@@ -1801,7 +1843,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [applyCut, cancelCurrentPath, clearAllPolygons, completePolygon, deleteSelectedPoint, deleteSelection, props.readOnly, redo, tool, undo]);
+  }, [applyCut, cancelCurrentPath, clearAllPolygons, completePolygon, deleteSelectedPoint, deleteSelection, props.readOnly, redo, selectAllPolygons, tool, undo]);
 
   useImperativeHandle(ref, () => ({
     exportMask: async () => {
@@ -1872,6 +1914,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     redo: () => { if (!props.readOnly) redo(); },
     deleteSelectedPoint: () => { if (!props.readOnly) deleteSelectedPoint(); },
     deleteSelection: () => { if (!props.readOnly) deleteSelection(); },
+    selectAllPolygons: () => { if (!props.readOnly) selectAllPolygons(); },
     clearAllPolygons: () => { if (!props.readOnly) clearAllPolygons(); },
     completePolygon: () => !props.readOnly && completePolygon(),
     cancelCurrentPath,
@@ -1914,7 +1957,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       onZoomChange?.(next);
       render();
     },
-  }), [applyCut, beginPolygonEdit, cancelCurrentPath, clearAllPolygons, completePolygon, deleteSelectedPoint, deleteSelection, fit, groupSelectedPolygons, height, notifyChange, notifySelection, onZoomChange, props.readOnly, rebuildTint, redo, render, selectPolygon, undo, updateSelectedPolygonLabel, width]);
+  }), [applyCut, beginPolygonEdit, cancelCurrentPath, clearAllPolygons, completePolygon, deleteSelectedPoint, deleteSelection, fit, groupSelectedPolygons, height, notifyChange, notifySelection, onZoomChange, props.readOnly, rebuildTint, redo, render, selectAllPolygons, selectPolygon, undo, updateSelectedPolygonLabel, width]);
 
   const onWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
     event.preventDefault();
