@@ -49,6 +49,7 @@ export interface EditorCanvasHandle {
   redo(): void;
   deleteSelectedPoint(): void;
   deleteSelection(): void;
+  clearAllPolygons(): void;
   confirmNoBreakpoint(): void;
   completePolygon(): boolean;
   cancelCurrentPath(): void;
@@ -985,6 +986,26 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     commitPolygons(next);
   }, [commitPolygons]);
 
+  const clearAllPolygons = useCallback(() => {
+    if (props.readOnly) return;
+    if (!polygonsRef.current.length && polygonModeRef.current) {
+      onMessage('Không có polygon nào để xóa.');
+      return;
+    }
+    const before = clonePolygons(polygonsRef.current);
+    pushPolygonHistory(before);
+    selectedNodeIdsRef.current.clear();
+    selectedPolygonIdsRef.current.clear();
+    polygonsRef.current = [];
+    polygonModeRef.current = true;
+    operationsRef.current = polygonOperation([]);
+    humanActionRef.current = 'MODIFIED';
+    render();
+    notifyChange('MODIFIED', []);
+    notifySelection();
+    onMessage('Đã xóa tất cả polygon (Ctrl+Z để hoàn tác).');
+  }, [notifyChange, notifySelection, onMessage, props.readOnly, pushPolygonHistory, render]);
+
   const deleteSelectedPoint = useCallback(() => {
     const selectedPointId = selectedPointIdRef.current;
     if (!selectedPointId) return;
@@ -1753,7 +1774,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       const target = event.target;
       if (target instanceof HTMLElement
           && target.matches('input, select, textarea, [contenteditable="true"]')) return;
-      if ((event.key === 'Delete' || event.key === 'Backspace') && (tool === 'select' || tool === 'anchor')) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        clearAllPolygons();
+      } else if ((event.key === 'Delete' || event.key === 'Backspace') && (tool === 'select' || tool === 'anchor')) {
         event.preventDefault();
         deleteSelection();
       } else if ((event.key === 'Delete' || event.key === 'Backspace') && tool === 'point') {
@@ -1777,7 +1801,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [applyCut, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, props.readOnly, redo, tool, undo]);
+  }, [applyCut, cancelCurrentPath, clearAllPolygons, completePolygon, deleteSelectedPoint, deleteSelection, props.readOnly, redo, tool, undo]);
 
   useImperativeHandle(ref, () => ({
     exportMask: async () => {
@@ -1848,6 +1872,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     redo: () => { if (!props.readOnly) redo(); },
     deleteSelectedPoint: () => { if (!props.readOnly) deleteSelectedPoint(); },
     deleteSelection: () => { if (!props.readOnly) deleteSelection(); },
+    clearAllPolygons: () => { if (!props.readOnly) clearAllPolygons(); },
     completePolygon: () => !props.readOnly && completePolygon(),
     cancelCurrentPath,
     applyCut: () => !props.readOnly && applyCut(),
@@ -1889,7 +1914,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       onZoomChange?.(next);
       render();
     },
-  }), [applyCut, beginPolygonEdit, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, fit, groupSelectedPolygons, height, notifyChange, notifySelection, onZoomChange, props.readOnly, rebuildTint, redo, render, selectPolygon, undo, updateSelectedPolygonLabel, width]);
+  }), [applyCut, beginPolygonEdit, cancelCurrentPath, clearAllPolygons, completePolygon, deleteSelectedPoint, deleteSelection, fit, groupSelectedPolygons, height, notifyChange, notifySelection, onZoomChange, props.readOnly, rebuildTint, redo, render, selectPolygon, undo, updateSelectedPolygonLabel, width]);
 
   const onWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
     event.preventDefault();
