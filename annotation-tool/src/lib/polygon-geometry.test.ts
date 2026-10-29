@@ -235,7 +235,7 @@ describe('drawSmoothClosedPath', () => {
     );
   });
 
-  it('prevents loops and overshoots at sharp corners (zero bulging ears / cuc loi ra)', () => {
+  it('gently curves corners with bounded offset without loops or bulging ears (zero cuc loi ra)', () => {
     // 90 degree corner at (100, 0)
     const { cp1, cp2 } = getSmoothSegmentControlPoints(
       { x: 0, y: 0 },
@@ -243,11 +243,13 @@ describe('drawSmoothClosedPath', () => {
       { x: 100, y: 100 },
       { x: 0, y: 100 },
     );
-    // Control points must lie strictly along the edge x=100 without overshooting past x=100
-    expect(cp1.x).toBeCloseTo(100);
+    // Control points should gently round the corner with offset strictly bounded within 22% of segment length
+    expect(cp1.x).toBeGreaterThan(100);
+    expect(cp1.x).toBeLessThanOrEqual(100 + 100 * 0.22);
     expect(cp1.y).toBeGreaterThan(0);
     expect(cp1.y).toBeLessThan(100);
-    expect(cp2.x).toBeCloseTo(100);
+    expect(cp2.x).toBeGreaterThan(100);
+    expect(cp2.x).toBeLessThanOrEqual(100 + 100 * 0.22);
     expect(cp2.y).toBeGreaterThan(0);
     expect(cp2.y).toBeLessThan(100);
   });

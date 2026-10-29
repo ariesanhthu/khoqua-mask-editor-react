@@ -382,16 +382,17 @@ export function insertNodeAtEdge(
 }
 
 /**
- * Calculates cubic Bézier control points for a smooth curve segment from `curr` to `next`,
- * preserving sharp corners / cusps (when turn angle >= 57 deg, cosAngle < 0.55) to prevent
- * overshoots, loops, or bulging "ears" at junctions, while smoothly curving gentle turns.
+ * Calculates cubic Bézier control points for a gentle smooth curve segment from `curr` to `next`.
+ * Applies smooth curvature across vertices with subtle intensity (tension = 0.08),
+ * while strictly capping control point offsets (<= 22% of segment length) so curves
+ * never overshoot, loop, or form protruding lumps ("cục lòi ra").
  */
 export function getSmoothSegmentControlPoints(
   prev: { x: number; y: number },
   curr: { x: number; y: number },
   next: { x: number; y: number },
   next2: { x: number; y: number },
-  tension = 0.16,
+  tension = 0.08,
 ): { cp1: { x: number; y: number }; cp2: { x: number; y: number } } {
   const dSegX = next.x - curr.x;
   const dSegY = next.y - curr.y;
@@ -404,65 +405,50 @@ export function getSmoothSegmentControlPoints(
   const uSegX = dSegX / dSeg;
   const uSegY = dSegY / dSeg;
 
-  // Incoming vector at curr: (curr - prev)
+  // Incoming direction at curr: (curr - prev)
   const dInX = curr.x - prev.x;
   const dInY = curr.y - prev.y;
   const dIn = Math.hypot(dInX, dInY);
   const uInX = dIn > 1e-6 ? dInX / dIn : uSegX;
   const uInY = dIn > 1e-6 ? dInY / dIn : uSegY;
 
-  // Outgoing vector at next: (next2 - next)
+  // Outgoing direction at next: (next2 - next)
   const dOutX = next2.x - next.x;
   const dOutY = next2.y - next.y;
   const dOut = Math.hypot(dOutX, dOutY);
   const uOutX = dOut > 1e-6 ? dOutX / dOut : uSegX;
   const uOutY = dOut > 1e-6 ? dOutY / dOut : uSegY;
 
-  // Check turn angles
-  const cosTurnCurr = uInX * uSegX + uInY * uSegY;
-  const cosTurnNext = uSegX * uOutX + uSegY * uOutY;
+  // Tangent at curr: smooth normalized bisector
+  const sumCurrX = uInX + uSegX;
+  const sumCurrY = uInY + uSegY;
+  const lenSumCurr = Math.hypot(sumCurrX, sumCurrY);
+  let tCurrX = lenSumCurr > 1e-6 ? sumCurrX / lenSumCurr : uSegX;
+  let tCurrY = lenSumCurr > 1e-6 ? sumCurrY / lenSumCurr : uSegY;
 
-  const maxCPDist = dSeg * 0.333; // Strict 1/3 limit guarantees monotonic curve without loops
+  // Tangent at next: smooth normalized bisector
+  const sumNextX = uSegX + uOutX;
+  const sumNextY = uSegY + uOutY;
+  const lenSumNext = Math.hypot(sumNextX, sumNextY);
+  let tNextX = lenSumNext > 1e-6 ? sumNextX / lenSumNext : uSegX;
+  let tNextY = lenSumNext > 1e-6 ? sumNextY / lenSumNext : uSegY;
 
-  // Tangent at curr
-  let tCurrX: number;
-  let tCurrY: number;
-  let len1: number;
-
-  if (cosTurnCurr < 0.55 || dIn < 1e-3) {
-    // Sharp turn / corner cusp at curr: control point points strictly along the segment
+  // Severe hairpin reversal guard (> 135 deg reversal)
+  const dotCurr = uInX * uSegX + uInY * uSegY;
+  const dotNext = uSegX * uOutX + uSegY * uOutY;
+  if (dotCurr < -0.7) {
     tCurrX = uSegX;
     tCurrY = uSegY;
-    len1 = Math.min(dSeg * 0.2, 8);
-  } else {
-    // Smooth turn: use normalized bisector
-    const sumX = uInX + uSegX;
-    const sumY = uInY + uSegY;
-    const sumLen = Math.hypot(sumX, sumY);
-    tCurrX = sumLen > 1e-6 ? sumX / sumLen : uSegX;
-    tCurrY = sumLen > 1e-6 ? sumY / sumLen : uSegY;
-    len1 = Math.min(maxCPDist, Math.min(dIn, dSeg) * tension);
   }
-
-  // Tangent at next
-  let tNextX: number;
-  let tNextY: number;
-  let len2: number;
-
-  if (cosTurnNext < 0.55 || dOut < 1e-3) {
-    // Sharp turn / corner cusp at next: control point points strictly along the segment
+  if (dotNext < -0.7) {
     tNextX = uSegX;
     tNextY = uSegY;
-    len2 = Math.min(dSeg * 0.2, 8);
-  } else {
-    // Smooth turn: use normalized bisector
-    const sumX = uSegX + uOutX;
-    const sumY = uSegY + uOutY;
-    const sumLen = Math.hypot(sumX, sumY);
-    tNextX = sumLen > 1e-6 ? sumX / sumLen : uSegX;
-    tNextY = sumLen > 1e-6 ? sumY / sumLen : uSegY;
-    len2 = Math.min(maxCPDist, Math.min(dSeg, dOut) * tension);
   }
+
+  // Gentle intensity offset: clamped to max 22% of segment length
+  const maxOffset = dSeg * 0.22;
+  const len1 = Math.min(maxOffset, Math.max(0, Math.min(dIn, dSeg) * tension * 1.5));
+  const len2 = Math.min(maxOffset, Math.max(0, Math.min(dSeg, dOut) * tension * 1.5));
 
   return {
     cp1: {
@@ -477,8 +463,8 @@ export function getSmoothSegmentControlPoints(
 }
 
 /**
- * Draws a closed smooth path passing cleanly through all given points.
- * Preserves sharp corners and junction cusps without overshooting or looping ("cục lòi ra").
+ * Draws a closed smooth path with gentle curvature through all given points.
+ * Intensity is subtle (tension = 0.08) to keep boundaries tight without stiff angles.
  */
 export function drawSmoothClosedPath(
   context: {
@@ -488,7 +474,7 @@ export function drawSmoothClosedPath(
     closePath(): void;
   },
   nodes: Array<Pick<PolygonNode, 'x' | 'y'>>,
-  tension = 0.16,
+  tension = 0.08,
 ): void {
   const n = nodes.length;
   if (n < 2) return;

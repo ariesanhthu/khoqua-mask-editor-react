@@ -447,7 +447,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         for (const polygon of visiblePolygons) {
           if (polygon.nodes.length < 3) continue;
           context.beginPath();
-          drawSmoothClosedPath(context, polygon.nodes, 0.16);
+          drawSmoothClosedPath(context, polygon.nodes, 0.08);
           context.fill();
         }
         context.globalAlpha = 1;
@@ -463,7 +463,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         if (polygon.nodes.length < 2) continue;
         const selected = selectedPolygonIdsRef.current.has(polygon.id);
         context.beginPath();
-        drawSmoothClosedPath(context, polygon.nodes, 0.16);
+        drawSmoothClosedPath(context, polygon.nodes, 0.08);
         context.lineWidth = (selected ? 3 : 1.5) / view.scale;
         context.strokeStyle = selected ? '#6d4ef2' : POLYGON_STROKE;
         context.stroke();
@@ -517,7 +517,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         : (autofill ? [...draft, ...autofill.nodes] : draft);
       context.beginPath();
       if (preview.length >= 3) {
-        drawSmoothClosedPath(context, preview, 0.16);
+        drawSmoothClosedPath(context, preview, 0.08);
         context.globalAlpha = Math.min(0.72, Math.max(0.2, display.maskOpacity * 0.85));
         context.fillStyle = POLYGON_FILL;
         context.fill();
@@ -769,6 +769,19 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       context.arc(snapTarget.point.x, snapTarget.point.y, 2.5 / view.scale, 0, Math.PI * 2);
       context.fillStyle = '#10b981';
       context.fill();
+
+      if (toolRef.current === 'polygon' && !snapTarget.isVertex) {
+        context.font = `600 ${11 / view.scale}px ui-sans-serif, system-ui, sans-serif`;
+        const text = '+ Tạo anchor trên biên';
+        const tw = context.measureText(text).width;
+        const bx = snapTarget.point.x + 8 / view.scale;
+        const by = snapTarget.point.y - 10 / view.scale;
+        context.fillStyle = 'rgba(16, 185, 129, 0.9)';
+        context.fillRect(bx, by - 12 / view.scale, tw + 8 / view.scale, 16 / view.scale);
+        context.fillStyle = '#ffffff';
+        context.textBaseline = 'middle';
+        context.fillText(text, bx + 4 / view.scale, by - 4 / view.scale);
+      }
       context.restore();
     }
 
@@ -1247,17 +1260,39 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (tool === 'polygon') {
       const snapTolerance = 14 / viewRef.current.scale;
       const snap = findSnapTargetToPolygons(polygonsRef.current, point, snapTolerance);
-      const effectivePoint = snap ? snap.point : point;
+      let effectivePoint = snap ? snap.point : point;
+
+      if (snap && !snap.isVertex) {
+        const targetPoly = polygonsRef.current.find((p) => p.id === snap.polygonId);
+        if (targetPoly) {
+          const { polygon: updatedTarget, node: newAnchor } = insertNodeAtEdge(
+            targetPoly,
+            snap.edgeIndex,
+            snap.point,
+          );
+          effectivePoint = { x: newAnchor.x, y: newAnchor.y };
+          const before = clonePolygons(polygonsRef.current);
+          pushPolygonHistory(before);
+          polygonsRef.current = polygonsRef.current.map((p) => (p.id === updatedTarget.id ? updatedTarget : p));
+          operationsRef.current = polygonOperation(polygonsRef.current);
+          polygonModeRef.current = true;
+          humanActionRef.current = 'MODIFIED';
+          notifyChange('MODIFIED');
+          onMessage('Đã tạo anchor mới trên biên của mask cũ.');
+        }
+      }
+
       const first = draftPolygonRef.current[0];
       if (first && draftPolygonRef.current.length >= 3 && Math.hypot(first.x - effectivePoint.x, first.y - effectivePoint.y) <= 14 / viewRef.current.scale) {
         completePolygon();
       } else if (first && draftPolygonRef.current.length >= 2 && snap && draftAutofillRef.current) {
+        draftPolygonRef.current = [...draftPolygonRef.current, { id: crypto.randomUUID(), ...effectivePoint, isAnchor: true }];
         completePolygon();
       } else {
         draftEditingRef.current = true;
         draftUndoRef.current.push(draftPolygonRef.current);
         draftRedoRef.current = [];
-        draftPolygonRef.current = [...draftPolygonRef.current, { id: crypto.randomUUID(), ...effectivePoint }];
+        draftPolygonRef.current = [...draftPolygonRef.current, { id: crypto.randomUUID(), ...effectivePoint, isAnchor: true }];
         render();
       }
       return;
@@ -2035,7 +2070,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         for (const polygon of polygonsRef.current) {
           if (polygon.nodes.length < 3) continue;
           context.beginPath();
-          drawSmoothClosedPath(context, polygon.nodes, 0.16);
+          drawSmoothClosedPath(context, polygon.nodes, 0.08);
           context.fill();
         }
         return toBlob(canvas);
