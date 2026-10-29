@@ -17,15 +17,20 @@ import type {
   PolygonNode,
 } from '@/types';
 import {
+  clipPolygonDifference,
   clonePolygons,
   computeSmoothNodeDisplacements,
   createCirclePolygon,
   createRectanglePolygon,
   drawSmoothClosedPath,
+  ensurePolygonHasNodeAt,
+  findSnapTargetToPolygons,
+  getSharedBoundaryAutofillPath,
   insertNodeAtEdge,
   mergePolygonsIntoSingle,
   pointInPolygon,
   splitPolygonWithCut,
+  type SnapTarget,
 } from '@/lib/polygon-geometry';
 
 export type EditorTool = 'polygon' | 'rectangle' | 'circle' | 'anchor' | 'select' | 'cut' | 'point' | 'pan';
@@ -360,6 +365,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   const hoveredNodeRef = useRef<PolygonNode | null>(null);
   const lastHistoryRef = useRef('');
   const polygonHoverRef = useRef<ImagePoint | null>(null);
+  const snapTargetRef = useRef<SnapTarget | null>(null);
+  const draftAutofillRef = useRef<{ polygon: AnnotationPolygon; nodes: Array<{ id: string; x: number; y: number; isAnchor: boolean }> } | null>(null);
   const anchorHoverRef = useRef<{ polygon: AnnotationPolygon; edgeIndex: number; point: ImagePoint } | null>(null);
   const cutPathRef = useRef<PolygonNode[]>([]);
   const marqueeRef = useRef<Marquee | null>(null);
@@ -503,7 +510,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     const draft = draftPolygonRef.current;
     if (draft.length) {
       const hover = polygonHoverRef.current;
-      const preview = hover ? [...draft, { id: 'preview', ...hover }] : draft;
+      const autofill = draftAutofillRef.current;
+      const preview = hover
+        ? (autofill ? [...draft, { id: 'preview', ...hover }, ...autofill.nodes] : [...draft, { id: 'preview', ...hover }])
+        : (autofill ? [...draft, ...autofill.nodes] : draft);
       context.beginPath();
       if (preview.length >= 3) {
         drawSmoothClosedPath(context, preview, 0.16);
@@ -513,7 +523,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         context.globalAlpha = 1;
         context.setLineDash([8 / view.scale, 5 / view.scale]);
         context.lineWidth = 2 / view.scale;
-        context.strokeStyle = '#6d4ef2';
+        context.strokeStyle = autofill ? '#10b981' : '#6d4ef2';
         context.stroke();
         context.setLineDash([]);
       } else {
@@ -527,6 +537,22 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         context.arc(node.x, node.y, 3.5 / view.scale, 0, Math.PI * 2);
         context.fillStyle = '#7c5cfa';
         context.fill();
+      }
+      if (autofill && autofill.nodes.length) {
+        context.beginPath();
+        autofill.nodes.forEach((node, idx) => {
+          if (idx === 0) context.moveTo(node.x, node.y);
+          else context.lineTo(node.x, node.y);
+        });
+        context.lineWidth = 2.5 / view.scale;
+        context.strokeStyle = '#10b981';
+        context.stroke();
+        for (const node of autofill.nodes) {
+          context.beginPath();
+          context.arc(node.x, node.y, 2.5 / view.scale, 0, Math.PI * 2);
+          context.fillStyle = '#10b981';
+          context.fill();
+        }
       }
     }
 
@@ -734,6 +760,21 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       context.restore();
     }
 
+    const snapTarget = snapTargetRef.current;
+    if (snapTarget && (toolRef.current === 'polygon' || toolRef.current === 'anchor')) {
+      context.save();
+      context.beginPath();
+      context.arc(snapTarget.point.x, snapTarget.point.y, 6.5 / view.scale, 0, Math.PI * 2);
+      context.strokeStyle = '#10b981';
+      context.lineWidth = 2 / view.scale;
+      context.stroke();
+      context.beginPath();
+      context.arc(snapTarget.point.x, snapTarget.point.y, 2.5 / view.scale, 0, Math.PI * 2);
+      context.fillStyle = '#10b981';
+      context.fill();
+      context.restore();
+    }
+
     /* Wart overlay temporarily hidden.
     for (const point of breakpointsRef.current.points) {
       context.beginPath();
@@ -936,24 +977,68 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
 
   const completePolygon = useCallback(() => {
     const draft = draftPolygonRef.current;
-    if (draft.length < 3) {
+    const autofill = draftAutofillRef.current;
+    let finalNodes: PolygonNode[] = [];
+
+    if (autofill && autofill.nodes.length >= 0) {
+      finalNodes = [
+        ...draft.map((node) => ({ ...node, isAnchor: true })),
+        ...autofill.nodes.map((node) => ({ ...node, isAnchor: true })),
+      ];
+    } else {
+      finalNodes = draft.map((node) => ({ ...node, isAnchor: true }));
+    }
+
+    if (finalNodes.length < 3) {
       onMessage('Đa giác cần ít nhất 3 node.');
       return false;
     }
+
+    let nextPolygons = [...polygonsRef.current];
+
+    if (autofill) {
+      const targetPoly = nextPolygons.find((p) => p.id === autofill.polygon.id);
+      if (targetPoly) {
+        let updated = targetPoly;
+        if (draft[0]) {
+          const res = ensurePolygonHasNodeAt(updated, draft[0]);
+          updated = res.polygon;
+        }
+        const lastDraftNode = draft[draft.length - 1];
+        if (lastDraftNode) {
+          const res = ensurePolygonHasNodeAt(updated, lastDraftNode);
+          updated = res.polygon;
+        }
+        nextPolygons = nextPolygons.map((p) => p.id === updated.id ? updated : p);
+      }
+    } else {
+      for (const existing of nextPolygons) {
+        const clipped = clipPolygonDifference(finalNodes, existing.nodes);
+        if (clipped && clipped.length >= 3) {
+          finalNodes = clipped;
+        }
+      }
+    }
+
     const created: AnnotationPolygon = {
       id: crypto.randomUUID(),
       label: 'Vùng hư hại',
-      nodes: draft.map((node) => ({ ...node, isAnchor: true })),
+      nodes: finalNodes,
     };
     draftPolygonRef.current = [];
     draftEditingRef.current = false;
     draftUndoRef.current = [];
     draftRedoRef.current = [];
+    draftAutofillRef.current = null;
+    snapTargetRef.current = null;
     hoveredNodeRef.current = null;
     polygonHoverRef.current = null;
     selectedNodeIdsRef.current.clear();
     selectedPolygonIdsRef.current = new Set([created.id]);
-    commitPolygons([...polygonsRef.current, created]);
+    commitPolygons([...nextPolygons, created]);
+    if (autofill) {
+      onMessage('Đã tự động nối biên chung với mask kế bên.');
+    }
     onPolygonComplete?.();
     return true;
   }, [commitPolygons, onMessage, onPolygonComplete]);
@@ -963,6 +1048,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     draftEditingRef.current = false;
     draftUndoRef.current = [];
     draftRedoRef.current = [];
+    draftAutofillRef.current = null;
+    snapTargetRef.current = null;
     hoveredNodeRef.current = null;
     polygonHoverRef.current = null;
     cutPathRef.current = [];
@@ -1161,14 +1248,19 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       return;
     }
     if (tool === 'polygon') {
+      const snapTolerance = 14 / viewRef.current.scale;
+      const snap = findSnapTargetToPolygons(polygonsRef.current, point, snapTolerance);
+      const effectivePoint = snap ? snap.point : point;
       const first = draftPolygonRef.current[0];
-      if (first && draftPolygonRef.current.length >= 3 && Math.hypot(first.x - point.x, first.y - point.y) <= 14 / viewRef.current.scale) {
+      if (first && draftPolygonRef.current.length >= 3 && Math.hypot(first.x - effectivePoint.x, first.y - effectivePoint.y) <= 14 / viewRef.current.scale) {
+        completePolygon();
+      } else if (first && draftPolygonRef.current.length >= 2 && snap && draftAutofillRef.current) {
         completePolygon();
       } else {
         draftEditingRef.current = true;
         draftUndoRef.current.push(draftPolygonRef.current);
         draftRedoRef.current = [];
-        draftPolygonRef.current = [...draftPolygonRef.current, { id: crypto.randomUUID(), ...point }];
+        draftPolygonRef.current = [...draftPolygonRef.current, { id: crypto.randomUUID(), ...effectivePoint }];
         render();
       }
       return;
@@ -1342,8 +1434,11 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       if (draftPolygonRef.current.length > 1) {
         draftPolygonRef.current = draftUndoRef.current.pop() ?? draftPolygonRef.current.slice(0, -1);
       }
-      if (draftPolygonRef.current.length >= 3) completePolygon();
-      else render();
+      if ((draftPolygonRef.current.length >= 2 && draftAutofillRef.current) || draftPolygonRef.current.length >= 3) {
+        completePolygon();
+      } else {
+        render();
+      }
       return;
     }
     if (tool !== 'select' || !readyRef.current) return;
@@ -1473,16 +1568,33 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         if (needsRender) render();
         return;
       }
-      const hovered = tool === 'polygon'
-        ? draftPolygonRef.current.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale) ?? null
-        : null;
-      if (hoveredNodeRef.current?.id !== hovered?.id) {
-        hoveredNodeRef.current = hovered;
+      if (tool === 'polygon') {
+        const snapTolerance = 14 / viewRef.current.scale;
+        const snap = findSnapTargetToPolygons(polygonsRef.current, point, snapTolerance);
+        snapTargetRef.current = snap;
+        const effectivePoint = snap ? snap.point : point;
+
+        if (draftPolygonRef.current.length) {
+          polygonHoverRef.current = effectivePoint;
+          const draft = draftPolygonRef.current;
+          const firstSnap = findSnapTargetToPolygons(polygonsRef.current, draft[0], snapTolerance);
+          if (firstSnap && snap && firstSnap.polygonId === snap.polygonId) {
+            const autofill = getSharedBoundaryAutofillPath(snap.polygon, draft[0], effectivePoint, draft);
+            draftAutofillRef.current = autofill ? { polygon: snap.polygon, nodes: autofill } : null;
+          } else {
+            draftAutofillRef.current = null;
+          }
+        } else {
+          polygonHoverRef.current = null;
+          draftAutofillRef.current = null;
+        }
+
+        const hovered = draftPolygonRef.current.find((node) => Math.hypot(node.x - effectivePoint.x, node.y - effectivePoint.y) <= 12 / viewRef.current.scale) ?? null;
+        if (hoveredNodeRef.current?.id !== hovered?.id) {
+          hoveredNodeRef.current = hovered;
+        }
         render();
-      }
-      if (tool === 'polygon' && draftPolygonRef.current.length) {
-        polygonHoverRef.current = imagePoint(event);
-        render();
+        return;
       }
       return;
     }
@@ -1548,11 +1660,32 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         });
       } else {
         const nodeIds = active.nodeIds;
+        let effectiveDeltaX = deltaX;
+        let effectiveDeltaY = deltaY;
+
+        if (nodeIds.size === 1) {
+          const draggedId = nodeIds.values().next().value;
+          const origPoly = active.original.find((p) => p.nodes.some((n) => n.id === draggedId));
+          const origNode = origPoly?.nodes.find((n) => n.id === draggedId);
+          if (origNode && origPoly) {
+            const targetPos = { x: origNode.x + deltaX, y: origNode.y + deltaY };
+            const snapTolerance = 14 / viewRef.current.scale;
+            const snap = findSnapTargetToPolygons(polygonsRef.current, targetPos, snapTolerance, origPoly.id);
+            if (snap) {
+              effectiveDeltaX = snap.point.x - origNode.x;
+              effectiveDeltaY = snap.point.y - origNode.y;
+              snapTargetRef.current = snap;
+            } else {
+              snapTargetRef.current = null;
+            }
+          }
+        }
+
         polygonsRef.current = active.original.map((polygon) => {
           if (!polygon.nodes.some((node) => nodeIds.has(node.id))) return polygon;
           return {
             ...polygon,
-            nodes: computeSmoothNodeDisplacements(polygon.nodes, nodeIds, deltaX, deltaY, width, height),
+            nodes: computeSmoothNodeDisplacements(polygon.nodes, nodeIds, effectiveDeltaX, effectiveDeltaY, width, height),
           };
         });
       }
@@ -1588,6 +1721,23 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (!active || active.id !== event.pointerId) return;
     pointerRef.current = null;
     if (active.mode === 'nodes' || active.mode === 'polygons') {
+      const snap = snapTargetRef.current;
+      snapTargetRef.current = null;
+
+      if (active.mode === 'nodes' && active.moved && snap) {
+        const targetPoly = polygonsRef.current.find((p) => p.id === snap.polygonId);
+        if (targetPoly) {
+          const { polygon: updatedTarget } = ensurePolygonHasNodeAt(targetPoly, snap.point);
+          polygonsRef.current = polygonsRef.current.map((p) => {
+            if (p.id === snap.polygonId) return updatedTarget;
+            if (!p.nodes.some((n) => active.nodeIds.has(n.id))) return p;
+            const clipped = clipPolygonDifference(p.nodes, updatedTarget.nodes);
+            return clipped && clipped.length >= 3 ? { ...p, nodes: clipped } : p;
+          });
+          onMessage('Đã tự động khớp biên chung với mask kế bên.');
+        }
+      }
+
       if (active.mode === 'nodes' && active.historyBefore) {
         pushPolygonHistory(active.historyBefore);
         operationsRef.current = polygonOperation(polygonsRef.current);

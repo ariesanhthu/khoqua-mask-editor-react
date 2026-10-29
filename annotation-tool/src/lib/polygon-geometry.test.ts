@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  clipPolygonDifference,
   computeSmoothNodeDisplacements,
   createCirclePolygon,
   createRectanglePolygon,
   drawSmoothClosedPath,
+  ensurePolygonHasNodeAt,
+  findSnapTargetToPolygons,
+  getSharedBoundaryAutofillPath,
   insertNodeAtEdge,
   mergePolygonsIntoSingle,
   polygonArea,
@@ -294,5 +298,111 @@ describe('computeSmoothNodeDisplacements', () => {
     // Counter-clockwise side still moves smoothly
     expect(updated[2].y).toBe(4.5);
     expect(updated[1].y).toBe(1.8);
+  });
+});
+
+describe('findSnapTargetToPolygons', () => {
+  const rect = createRectanglePolygon({ x: 0, y: 0 }, { x: 100, y: 100 });
+
+  it('snaps to vertex when within vertex tolerance', () => {
+    const snap = findSnapTargetToPolygons([rect], { x: 2, y: 1 }, 10);
+    expect(snap).not.toBeNull();
+    expect(snap?.isVertex).toBe(true);
+    expect(snap?.point).toEqual({ x: 0, y: 0 });
+  });
+
+  it('snaps to edge when near edge but far from vertices', () => {
+    const snap = findSnapTargetToPolygons([rect], { x: 50, y: 3 }, 10);
+    expect(snap).not.toBeNull();
+    expect(snap?.isVertex).toBe(false);
+    expect(snap?.point.x).toBeCloseTo(50);
+    expect(snap?.point.y).toBeCloseTo(0);
+  });
+
+  it('respects excludePolygonId', () => {
+    const snap = findSnapTargetToPolygons([rect], { x: 50, y: 3 }, 10, rect.id);
+    expect(snap).toBeNull();
+  });
+});
+
+describe('getSharedBoundaryAutofillPath', () => {
+  it('extracts shared boundary between two touch points on adjacent mask without enclosing it', () => {
+    // Target wart A: 100x100 square
+    const wartA = createRectanglePolygon({ x: 0, y: 0 }, { x: 100, y: 100 });
+    // User drawing Wart B adjacent to the right of Wart A:
+    // Start at (100, 20), loops outside to (150, 50), ends at (100, 80)
+    const startPoint = { x: 100, y: 20 };
+    const draftNodes = [
+      startPoint,
+      { x: 150, y: 50 },
+      { x: 100, y: 80 },
+    ];
+    const endPoint = { x: 100, y: 80 };
+
+    const sharedPath = getSharedBoundaryAutofillPath(wartA, startPoint, endPoint, draftNodes);
+    expect(sharedPath).not.toBeNull();
+    // Since start and end are on edge 1 (from (100,0) to (100,100)),
+    // the direct edge connects (100, 80) directly back to (100, 20)
+    // without wrapping around vertices (0,100), (0,0), (100,0)
+    expect(sharedPath?.length).toBe(0);
+  });
+
+  it('includes intermediate boundary vertices when contact points span multiple edges', () => {
+    // 8-gon approximating a round wart
+    const wartA = createCirclePolygon({ x: 100, y: 100 }, 50, 50, 8);
+    // Touching at node 1 and node 3
+    const pStart = { x: wartA.nodes[1].x, y: wartA.nodes[1].y };
+    const pEnd = { x: wartA.nodes[3].x, y: wartA.nodes[3].y };
+    const draft = [
+      pStart,
+      { x: 200, y: 100 },
+      pEnd,
+    ];
+
+    const sharedPath = getSharedBoundaryAutofillPath(wartA, pStart, pEnd, draft);
+    expect(sharedPath).not.toBeNull();
+    // Shorter path along wart A between node 3 and node 1 passes through node 2
+    expect(sharedPath?.some((n) => Math.hypot(n.x - wartA.nodes[2].x, n.y - wartA.nodes[2].y) < 1)).toBe(true);
+  });
+});
+
+describe('ensurePolygonHasNodeAt', () => {
+  it('reuses existing vertex if point is within tolerance', () => {
+    const rect = createRectanglePolygon({ x: 0, y: 0 }, { x: 100, y: 100 });
+    const { polygon: updated, node, inserted } = ensurePolygonHasNodeAt(rect, { x: 1, y: 0 }, 4);
+    expect(inserted).toBe(false);
+    expect(node.id).toBe(rect.nodes[0].id);
+    expect(updated.nodes.length).toBe(4);
+  });
+
+  it('inserts a new node on the edge if not matching any existing vertex', () => {
+    const rect = createRectanglePolygon({ x: 0, y: 0 }, { x: 100, y: 100 });
+    const { polygon: updated, node, inserted } = ensurePolygonHasNodeAt(rect, { x: 50, y: 0 }, 2);
+    expect(inserted).toBe(true);
+    expect(updated.nodes.length).toBe(5);
+    expect(node.x).toBe(50);
+    expect(node.y).toBe(0);
+  });
+});
+
+describe('clipPolygonDifference', () => {
+  it('clips overlapping area from subject polygon so its boundary conforms to clip polygon', () => {
+    // Subject Wart B: [80, 0] to [180, 100]
+    const wartB = createRectanglePolygon({ x: 80, y: 0 }, { x: 180, y: 100 });
+    // Adjacent Wart A: [0, 0] to [100, 100]
+    const wartA = createRectanglePolygon({ x: 0, y: 0 }, { x: 100, y: 100 });
+
+    const clipped = clipPolygonDifference(wartB.nodes, wartA.nodes);
+    expect(clipped).not.toBeNull();
+    // Clipped Wart B should now start at x=100 instead of overlapping from x=80
+    expect(clipped!.every((node) => node.x >= 99.9)).toBe(true);
+    expect(clipped!.some((node) => Math.abs(node.x - 100) < 1)).toBe(true);
+  });
+
+  it('returns null when polygons do not intersect meaningfully', () => {
+    const wartB = createRectanglePolygon({ x: 120, y: 0 }, { x: 200, y: 100 });
+    const wartA = createRectanglePolygon({ x: 0, y: 0 }, { x: 100, y: 100 });
+    const clipped = clipPolygonDifference(wartB.nodes, wartA.nodes);
+    expect(clipped).toBeNull();
   });
 });

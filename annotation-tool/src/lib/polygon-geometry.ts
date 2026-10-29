@@ -598,3 +598,297 @@ export function splitPolygonWithCut(polygon: AnnotationPolygon, cutPath: Polygon
     ],
   };
 }
+
+export function closestPointOnSegment(
+  point: { x: number; y: number },
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+): { point: { x: number; y: number }; distance: number; projection: number } {
+  const segmentX = end.x - start.x;
+  const segmentY = end.y - start.y;
+  const lengthSquared = segmentX * segmentX + segmentY * segmentY;
+  if (lengthSquared <= 1e-12) {
+    return { point: { ...start }, distance: Math.hypot(point.x - start.x, point.y - start.y), projection: 0 };
+  }
+  const projection = Math.max(0, Math.min(1, ((point.x - start.x) * segmentX + (point.y - start.y) * segmentY) / lengthSquared));
+  const projectedPoint = {
+    x: Math.round((start.x + projection * segmentX) * 10) / 10,
+    y: Math.round((start.y + projection * segmentY) * 10) / 10,
+  };
+  return {
+    point: projectedPoint,
+    distance: Math.hypot(point.x - projectedPoint.x, point.y - projectedPoint.y),
+    projection,
+  };
+}
+
+export interface SnapTarget {
+  polygonId: string;
+  polygon: AnnotationPolygon;
+  edgeIndex: number;
+  point: { x: number; y: number };
+  distance: number;
+  isVertex: boolean;
+  vertexId?: string;
+  vertexIndex?: number;
+}
+
+export function findSnapTargetToPolygons(
+  polygons: AnnotationPolygon[],
+  point: { x: number; y: number },
+  tolerance: number,
+  excludePolygonId?: string,
+): SnapTarget | null {
+  let closest: SnapTarget | null = null;
+  const vertexTolerance = Math.max(tolerance * 0.75, 6);
+
+  for (const polygon of polygons) {
+    if (excludePolygonId && polygon.id === excludePolygonId) continue;
+    if (polygon.nodes.length < 3) continue;
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const node of polygon.nodes) {
+      if (node.x < minX) minX = node.x;
+      if (node.x > maxX) maxX = node.x;
+      if (node.y < minY) minY = node.y;
+      if (node.y > maxY) maxY = node.y;
+    }
+    if (
+      point.x < minX - tolerance ||
+      point.x > maxX + tolerance ||
+      point.y < minY - tolerance ||
+      point.y > maxY + tolerance
+    ) {
+      continue;
+    }
+
+    // Check vertices
+    for (let i = 0; i < polygon.nodes.length; i += 1) {
+      const node = polygon.nodes[i];
+      const d = Math.hypot(point.x - node.x, point.y - node.y);
+      if (d <= vertexTolerance && (!closest || d < closest.distance)) {
+        closest = {
+          polygonId: polygon.id,
+          polygon,
+          edgeIndex: i,
+          point: { x: node.x, y: node.y },
+          distance: d,
+          isVertex: true,
+          vertexId: node.id,
+          vertexIndex: i,
+        };
+      }
+    }
+
+    if (closest && closest.isVertex) return closest;
+
+    // Check edges
+    for (let edgeIndex = 0; edgeIndex < polygon.nodes.length; edgeIndex += 1) {
+      const start = polygon.nodes[edgeIndex];
+      const end = polygon.nodes[(edgeIndex + 1) % polygon.nodes.length];
+      const candidate = closestPointOnSegment(point, start, end);
+      if (candidate.distance <= tolerance && (!closest || candidate.distance < closest.distance)) {
+        closest = {
+          polygonId: polygon.id,
+          polygon,
+          edgeIndex,
+          point: candidate.point,
+          distance: candidate.distance,
+          isVertex: false,
+        };
+      }
+    }
+  }
+
+  return closest;
+}
+
+export function getSharedBoundaryAutofillPath(
+  targetPolygon: AnnotationPolygon,
+  startPoint: { x: number; y: number },
+  endPoint: { x: number; y: number },
+  draftNodes: Array<{ x: number; y: number }>,
+): Array<{ id: string; x: number; y: number; isAnchor: boolean }> | null {
+  const n = targetPolygon.nodes.length;
+  if (n < 3) return null;
+
+  let edgeStart = 0;
+  let minStartDist = Infinity;
+  let edgeEnd = 0;
+  let minEndDist = Infinity;
+
+  for (let i = 0; i < n; i += 1) {
+    const a = targetPolygon.nodes[i];
+    const b = targetPolygon.nodes[(i + 1) % n];
+    const candStart = closestPointOnSegment(startPoint, a, b);
+    if (candStart.distance < minStartDist) {
+      minStartDist = candStart.distance;
+      edgeStart = i;
+    }
+    const candEnd = closestPointOnSegment(endPoint, a, b);
+    if (candEnd.distance < minEndDist) {
+      minEndDist = candEnd.distance;
+      edgeEnd = i;
+    }
+  }
+
+  // Path 1 (Forward from endPoint towards startPoint):
+  // endPoint -> V_{(edgeEnd + 1) % n} -> ... -> V_{edgeStart} -> startPoint
+  const pathForward: Array<{ id: string; x: number; y: number; isAnchor: boolean }> = [];
+  let curr = (edgeEnd + 1) % n;
+  let guard = 0;
+  while (curr !== (edgeStart + 1) % n && guard <= n) {
+    const v = targetPolygon.nodes[curr];
+    if (Math.hypot(v.x - endPoint.x, v.y - endPoint.y) > 2 && Math.hypot(v.x - startPoint.x, v.y - startPoint.y) > 2) {
+      pathForward.push({ id: createId(), x: v.x, y: v.y, isAnchor: true });
+    }
+    curr = (curr + 1) % n;
+    guard += 1;
+  }
+
+  // Path 2 (Backward from endPoint towards startPoint):
+  // endPoint -> V_{edgeEnd} -> ... -> V_{(edgeStart + 1) % n} -> startPoint
+  const pathBackward: Array<{ id: string; x: number; y: number; isAnchor: boolean }> = [];
+  curr = edgeEnd;
+  guard = 0;
+  while (curr !== edgeStart && guard <= n) {
+    const v = targetPolygon.nodes[curr];
+    if (Math.hypot(v.x - endPoint.x, v.y - endPoint.y) > 2 && Math.hypot(v.x - startPoint.x, v.y - startPoint.y) > 2) {
+      pathBackward.push({ id: createId(), x: v.x, y: v.y, isAnchor: true });
+    }
+    curr = (curr - 1 + n) % n;
+    guard += 1;
+  }
+
+  const pathLen = (pts: Array<{ x: number; y: number }>) => {
+    let sum = 0;
+    let prev = endPoint;
+    for (const p of pts) {
+      sum += Math.hypot(p.x - prev.x, p.y - prev.y);
+      prev = p;
+    }
+    sum += Math.hypot(startPoint.x - prev.x, startPoint.y - prev.y);
+    return sum;
+  };
+
+  const lenForward = pathLen(pathForward);
+  const lenBackward = pathLen(pathBackward);
+
+  const targetRing = normalizeRing(targetPolygon.nodes.map((p): GeometryPoint => [p.x, p.y]));
+  const targetTotalArea = targetRing ? Math.abs(ringArea(targetRing)) : 0;
+
+  const candidate1Ring = normalizeRing([...draftNodes, ...pathForward].map((p): GeometryPoint => [p.x, p.y]));
+  const candidate2Ring = normalizeRing([...draftNodes, ...pathBackward].map((p): GeometryPoint => [p.x, p.y]));
+
+  let areaIntersect1 = 0;
+  let areaIntersect2 = 0;
+
+  if (targetRing && candidate1Ring) {
+    try {
+      const inter1 = polygonClipping.intersection([candidate1Ring], [targetRing]);
+      for (const p of inter1) for (const r of p) areaIntersect1 += Math.abs(ringArea(r));
+    } catch {
+      areaIntersect1 = 0;
+    }
+  }
+
+  if (targetRing && candidate2Ring) {
+    try {
+      const inter2 = polygonClipping.intersection([candidate2Ring], [targetRing]);
+      for (const p of inter2) for (const r of p) areaIntersect2 += Math.abs(ringArea(r));
+    } catch {
+      areaIntersect2 = 0;
+    }
+  }
+
+  if (targetTotalArea > 10) {
+    if (areaIntersect1 > targetTotalArea * 0.4 && areaIntersect2 <= targetTotalArea * 0.4) {
+      return pathBackward;
+    }
+    if (areaIntersect2 > targetTotalArea * 0.4 && areaIntersect1 <= targetTotalArea * 0.4) {
+      return pathForward;
+    }
+  }
+
+  return lenForward <= lenBackward ? pathForward : pathBackward;
+}
+
+export function ensurePolygonHasNodeAt(
+  polygon: AnnotationPolygon,
+  point: { x: number; y: number },
+  tolerance = 4,
+): { polygon: AnnotationPolygon; node: PolygonNode; inserted: boolean } {
+  const existingIndex = polygon.nodes.findIndex((n) => Math.hypot(n.x - point.x, n.y - point.y) <= tolerance);
+  if (existingIndex !== -1) {
+    return { polygon, node: polygon.nodes[existingIndex], inserted: false };
+  }
+  let closestEdge = 0;
+  let minDistance = Infinity;
+  let closestPoint = point;
+  for (let i = 0; i < polygon.nodes.length; i += 1) {
+    const start = polygon.nodes[i];
+    const end = polygon.nodes[(i + 1) % polygon.nodes.length];
+    const cand = closestPointOnSegment(point, start, end);
+    if (cand.distance < minDistance) {
+      minDistance = cand.distance;
+      closestEdge = i;
+      closestPoint = cand.point;
+    }
+  }
+  const result = insertNodeAtEdge(polygon, closestEdge, closestPoint);
+  return { polygon: result.polygon, node: result.node, inserted: true };
+}
+
+export function clipPolygonDifference(
+  subjectNodes: PolygonNode[],
+  clipPolygonNodes: PolygonNode[],
+): PolygonNode[] | null {
+  if (subjectNodes.length < 3 || clipPolygonNodes.length < 3) return null;
+  const subjectRing = normalizeRing(subjectNodes.map((n): GeometryPoint => [n.x, n.y]));
+  const clipRing = normalizeRing(clipPolygonNodes.map((n): GeometryPoint => [n.x, n.y]));
+  if (!subjectRing || !clipRing) return null;
+
+  try {
+    const intersection = polygonClipping.intersection([subjectRing], [clipRing]);
+    if (!intersection || intersection.length === 0) return null;
+    let intersectionArea = 0;
+    for (const poly of intersection) {
+      for (const ring of poly) {
+        intersectionArea += Math.abs(ringArea(ring));
+      }
+    }
+    if (intersectionArea < 15) return null;
+
+    const diff = polygonClipping.difference([subjectRing], [clipRing]);
+    if (!diff || diff.length === 0) return null;
+
+    let largestPoly: GeometryPolygon | null = null;
+    let maxArea = -1;
+    for (const poly of diff) {
+      if (poly.length > 0) {
+        const area = Math.abs(ringArea(poly[0]));
+        if (area > maxArea) {
+          maxArea = area;
+          largestPoly = poly;
+        }
+      }
+    }
+    if (!largestPoly || largestPoly.length === 0 || maxArea < 10) return null;
+
+    const outerRing = largestPoly[0];
+    const points = outerRing.slice(0, outerRing.length - 1);
+    if (points.length < 3) return null;
+
+    return points.map(([x, y]) => ({
+      id: createId(),
+      x: Math.round(x * 10) / 10,
+      y: Math.round(y * 10) / 10,
+      isAnchor: true,
+    }));
+  } catch {
+    return null;
+  }
+}
