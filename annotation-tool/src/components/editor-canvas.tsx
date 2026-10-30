@@ -271,7 +271,7 @@ function vectorizeMask(source: HTMLCanvasElement): AnnotationPolygon[] {
     if (component.length >= 6) components.push(component);
   }
 
-  return components.flatMap((component, componentIndex) => {
+  return components.flatMap((component) => {
     const cellSet = new Set(component.map(([x, y]) => `${x},${y}`));
     const edges = new Map<string, ImagePoint[]>();
     const addEdge = (start: ImagePoint, end: ImagePoint) => {
@@ -306,7 +306,7 @@ function vectorizeMask(source: HTMLCanvasElement): AnnotationPolygon[] {
     if (simplified.length < 3) return [];
     return [{
       id: crypto.randomUUID(),
-      label: componentIndex === 0 ? 'Vùng hư hại' : `Vùng hư hại ${componentIndex + 1}`,
+      label: 'wart_flesh',
       nodes: simplified.map((point) => ({ id: crypto.randomUUID(), ...point })),
     }];
   });
@@ -1059,7 +1059,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
 
     const created: AnnotationPolygon = {
       id: crypto.randomUUID(),
-      label: 'Vùng hư hại',
+      label: 'wart_flesh',
       nodes: finalNodes,
     };
     draftPolygonRef.current = [];

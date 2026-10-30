@@ -383,6 +383,16 @@ describe('findSnapTargetToPolygons', () => {
     expect(snap?.point.y).toBeCloseTo(0);
   });
 
+  it('allows clicking along the edge without forcing snap to nearby existing vertex (> 3px away)', () => {
+    // A point at x=8, y=1 along the top edge (8px away from corner (0,0))
+    // Should NOT be forced to snap to (0,0), but should snap to edge at x=8, y=0 to allow creating a new anchor
+    const snap = findSnapTargetToPolygons([rect], { x: 8, y: 1 }, 10);
+    expect(snap).not.toBeNull();
+    expect(snap?.isVertex).toBe(false);
+    expect(snap?.point.x).toBeCloseTo(8);
+    expect(snap?.point.y).toBeCloseTo(0);
+  });
+
   it('respects excludePolygonId', () => {
     const snap = findSnapTargetToPolygons([rect], { x: 50, y: 3 }, 10, rect.id);
     expect(snap).toBeNull();

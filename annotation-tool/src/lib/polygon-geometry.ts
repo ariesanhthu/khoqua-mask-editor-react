@@ -302,7 +302,7 @@ export function clonePolygons(polygons: AnnotationPolygon[]): AnnotationPolygon[
 export function createRectanglePolygon(
   start: Pick<PolygonNode, 'x' | 'y'>,
   end: Pick<PolygonNode, 'x' | 'y'>,
-  label = 'Vùng hư hại',
+  label = 'wart_flesh',
 ): AnnotationPolygon {
   const minX = Math.min(start.x, end.x);
   const maxX = Math.max(start.x, end.x);
@@ -331,7 +331,7 @@ export function createCirclePolygon(
   rx: number,
   ry: number = rx,
   samples = 32,
-  label = 'Vùng hư hại',
+  label = 'wart_flesh',
 ): AnnotationPolygon {
   const count = Math.max(8, samples);
   const nodes: PolygonNode[] = [];
@@ -822,8 +822,10 @@ export function findSnapTargetToPolygons(
   tolerance: number,
   excludePolygonId?: string,
 ): SnapTarget | null {
-  let closest: SnapTarget | null = null;
-  const vertexTolerance = Math.max(tolerance * 0.75, 6);
+  let closestEdge: SnapTarget | null = null;
+  let closestAnchor: SnapTarget | null = null;
+  // Tight tolerance: only snap directly to a vertex if it is an existing anchor and cursor is directly on it
+  const anchorTolerance = Math.min(tolerance * 0.35, 4.0);
 
   for (const polygon of polygons) {
     if (excludePolygonId && polygon.id === excludePolygonId) continue;
@@ -848,12 +850,13 @@ export function findSnapTargetToPolygons(
       continue;
     }
 
-    // Check vertices
+    // Check vertices: only snap directly as a vertex if cursor is right on it (within 3px) or directly on an explicit anchor
     for (let i = 0; i < polygon.nodes.length; i += 1) {
       const node = polygon.nodes[i];
       const d = Math.hypot(point.x - node.x, point.y - node.y);
-      if (d <= vertexTolerance && (!closest || d < closest.distance)) {
-        closest = {
+      const isDirectHit = (node.isAnchor && d <= anchorTolerance) || d <= 3.0;
+      if (isDirectHit && (!closestAnchor || d < closestAnchor.distance)) {
+        closestAnchor = {
           polygonId: polygon.id,
           polygon,
           edgeIndex: i,
@@ -866,15 +869,13 @@ export function findSnapTargetToPolygons(
       }
     }
 
-    if (closest && closest.isVertex) return closest;
-
-    // Check edges
+    // Check edges: allow clicking anywhere on boundary to create a new anchor
     for (let edgeIndex = 0; edgeIndex < polygon.nodes.length; edgeIndex += 1) {
       const start = polygon.nodes[edgeIndex];
       const end = polygon.nodes[(edgeIndex + 1) % polygon.nodes.length];
       const candidate = closestPointOnSegment(point, start, end);
-      if (candidate.distance <= tolerance && (!closest || candidate.distance < closest.distance)) {
-        closest = {
+      if (candidate.distance <= tolerance && (!closestEdge || candidate.distance < closestEdge.distance)) {
+        closestEdge = {
           polygonId: polygon.id,
           polygon,
           edgeIndex,
@@ -886,7 +887,13 @@ export function findSnapTargetToPolygons(
     }
   }
 
-  return closest;
+  // If user clicked directly on an existing anchor point, snap to it
+  if (closestAnchor) {
+    return closestAnchor;
+  }
+
+  // Otherwise, return edge target (so clicking anywhere on the edge creates a new anchor)
+  return closestEdge;
 }
 
 export function getSharedBoundaryAutofillPath(
