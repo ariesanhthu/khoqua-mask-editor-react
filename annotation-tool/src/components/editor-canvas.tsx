@@ -24,8 +24,8 @@ import {
   createRectanglePolygon,
   drawSmoothClosedPath,
   ensurePolygonHasNodeAt,
+  findMultiPolygonAutofillPath,
   findSnapTargetToPolygons,
-  getSharedBoundaryAutofillPath,
   getSmoothSegmentControlPoints,
   insertNodeAtEdge,
   mergePolygonsIntoSingle,
@@ -367,7 +367,12 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   const lastHistoryRef = useRef('');
   const polygonHoverRef = useRef<ImagePoint | null>(null);
   const snapTargetRef = useRef<SnapTarget | null>(null);
-  const draftAutofillRef = useRef<{ polygon: AnnotationPolygon; nodes: Array<{ id: string; x: number; y: number; isAnchor: boolean }> } | null>(null);
+  const draftAutofillRef = useRef<{
+    polygon?: AnnotationPolygon;
+    targetPolygons?: AnnotationPolygon[];
+    nodes: Array<{ id: string; x: number; y: number; isAnchor: boolean }>;
+    closingToStart?: boolean;
+  } | null>(null);
   const anchorHoverRef = useRef<{ polygon: AnnotationPolygon; edgeIndex: number; point: ImagePoint } | null>(null);
   const cutPathRef = useRef<PolygonNode[]>([]);
   const marqueeRef = useRef<Marquee | null>(null);
@@ -515,7 +520,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       const hover = polygonHoverRef.current;
       const autofill = draftAutofillRef.current;
       const preview = hover
-        ? (autofill ? [...draft, { id: 'preview', ...hover }, ...autofill.nodes] : [...draft, { id: 'preview', ...hover }])
+        ? (autofill
+            ? (autofill.closingToStart ? [...draft, ...autofill.nodes] : [...draft, { id: 'preview', ...hover }, ...autofill.nodes])
+            : [...draft, { id: 'preview', ...hover }])
         : (autofill ? [...draft, ...autofill.nodes] : draft);
       context.beginPath();
       if (preview.length >= 3) {
@@ -989,7 +996,22 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
 
   const completePolygon = useCallback(() => {
     const draft = draftPolygonRef.current;
-    const autofill = draftAutofillRef.current;
+    let autofill = draftAutofillRef.current;
+
+    if (!autofill && draft.length >= 2) {
+      const snapTolerance = 14 / viewRef.current.scale;
+      const first = draft[0];
+      const last = draft[draft.length - 1];
+      const autoRes = findMultiPolygonAutofillPath(polygonsRef.current, first, last, draft, snapTolerance);
+      if (autoRes) {
+        autofill = {
+          nodes: autoRes.nodes,
+          targetPolygons: autoRes.targetPolygons,
+          closingToStart: true,
+        };
+      }
+    }
+
     let finalNodes: PolygonNode[] = [];
 
     if (autofill && autofill.nodes.length >= 0) {
@@ -1009,26 +1031,29 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     let nextPolygons = [...polygonsRef.current];
 
     if (autofill) {
-      const targetPoly = nextPolygons.find((p) => p.id === autofill.polygon.id);
-      if (targetPoly) {
-        let updated = targetPoly;
-        if (draft[0]) {
-          const res = ensurePolygonHasNodeAt(updated, draft[0]);
-          updated = res.polygon;
+      const targetPolys = autofill.targetPolygons || (autofill.polygon ? [autofill.polygon] : []);
+      for (const targetPoly of targetPolys) {
+        const polyInNext = nextPolygons.find((p) => p.id === targetPoly.id);
+        if (polyInNext) {
+          let updated = polyInNext;
+          if (draft[0]) {
+            const res = ensurePolygonHasNodeAt(updated, draft[0]);
+            updated = res.polygon;
+          }
+          const lastDraftNode = draft[draft.length - 1];
+          if (lastDraftNode) {
+            const res = ensurePolygonHasNodeAt(updated, lastDraftNode);
+            updated = res.polygon;
+          }
+          nextPolygons = nextPolygons.map((p) => (p.id === updated.id ? updated : p));
         }
-        const lastDraftNode = draft[draft.length - 1];
-        if (lastDraftNode) {
-          const res = ensurePolygonHasNodeAt(updated, lastDraftNode);
-          updated = res.polygon;
-        }
-        nextPolygons = nextPolygons.map((p) => p.id === updated.id ? updated : p);
       }
-    } else {
-      for (const existing of nextPolygons) {
-        const clipped = clipPolygonDifference(finalNodes, existing.nodes);
-        if (clipped && clipped.length >= 3) {
-          finalNodes = clipped;
-        }
+    }
+
+    for (const existing of nextPolygons) {
+      const clipped = clipPolygonDifference(finalNodes, existing.nodes);
+      if (clipped && clipped.length >= 3) {
+        finalNodes = clipped;
       }
     }
 
@@ -1285,9 +1310,12 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       }
 
       const first = draftPolygonRef.current[0];
-      if (first && draftPolygonRef.current.length >= 3 && Math.hypot(first.x - effectivePoint.x, first.y - effectivePoint.y) <= 14 / viewRef.current.scale) {
+      const isClosingClick = first && draftPolygonRef.current.length >= 2 &&
+        Math.hypot(first.x - effectivePoint.x, first.y - effectivePoint.y) <= snapTolerance;
+
+      if (isClosingClick) {
         completePolygon();
-      } else if (first && draftPolygonRef.current.length >= 2 && snap && draftAutofillRef.current) {
+      } else if (first && draftPolygonRef.current.length >= 2 && snap && draftAutofillRef.current && !draftAutofillRef.current.closingToStart) {
         draftPolygonRef.current = [...draftPolygonRef.current, { id: crypto.randomUUID(), ...effectivePoint, isAnchor: true }];
         completePolygon();
       } else {
@@ -1611,10 +1639,30 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         if (draftPolygonRef.current.length) {
           polygonHoverRef.current = effectivePoint;
           const draft = draftPolygonRef.current;
-          const firstSnap = findSnapTargetToPolygons(polygonsRef.current, draft[0], snapTolerance);
-          if (firstSnap && snap && firstSnap.polygonId === snap.polygonId) {
-            const autofill = getSharedBoundaryAutofillPath(snap.polygon, draft[0], effectivePoint, draft);
-            draftAutofillRef.current = autofill ? { polygon: snap.polygon, nodes: autofill } : null;
+          const isNearStart = draft.length >= 2 && Math.hypot(draft[0].x - effectivePoint.x, draft[0].y - effectivePoint.y) <= snapTolerance;
+
+          if (isNearStart) {
+            const autofill = findMultiPolygonAutofillPath(
+              polygonsRef.current,
+              draft[0],
+              draft[draft.length - 1],
+              draft,
+              snapTolerance,
+            );
+            draftAutofillRef.current = autofill
+              ? { targetPolygons: autofill.targetPolygons, nodes: autofill.nodes, closingToStart: true }
+              : null;
+          } else if (snap) {
+            const autofill = findMultiPolygonAutofillPath(
+              polygonsRef.current,
+              draft[0],
+              effectivePoint,
+              [...draft, effectivePoint],
+              snapTolerance,
+            );
+            draftAutofillRef.current = autofill
+              ? { targetPolygons: autofill.targetPolygons, nodes: autofill.nodes, closingToStart: false }
+              : null;
           } else {
             draftAutofillRef.current = null;
           }

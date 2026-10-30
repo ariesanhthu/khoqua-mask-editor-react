@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  arePolygonsTouching,
   clipPolygonDifference,
   computeSmoothNodeDisplacements,
   createCirclePolygon,
   createRectanglePolygon,
   drawSmoothClosedPath,
   ensurePolygonHasNodeAt,
+  findMultiPolygonAutofillPath,
   findSnapTargetToPolygons,
   getSharedBoundaryAutofillPath,
   getSmoothSegmentControlPoints,
@@ -466,5 +468,62 @@ describe('clipPolygonDifference', () => {
     const wartA = createRectanglePolygon({ x: 0, y: 0 }, { x: 100, y: 100 });
     const clipped = clipPolygonDifference(wartB.nodes, wartA.nodes);
     expect(clipped).toBeNull();
+  });
+});
+
+describe('arePolygonsTouching', () => {
+  it('returns true for polygons sharing an edge', () => {
+    const p1 = rectangle('p1', 0, 0, 100, 100);
+    const p2 = rectangle('p2', 100, 0, 200, 100);
+    expect(arePolygonsTouching(p1, p2)).toBe(true);
+  });
+
+  it('returns false for distant disconnected polygons', () => {
+    const p1 = rectangle('p1', 0, 0, 100, 100);
+    const p2 = rectangle('p2', 150, 0, 250, 100);
+    expect(arePolygonsTouching(p1, p2)).toBe(false);
+  });
+});
+
+describe('findMultiPolygonAutofillPath', () => {
+  it('finds autofill path across 3 adjacent touching polygons (chain connection)', () => {
+    // 3 touching warts in a row: [0, 100], [100, 200], [200, 300] along x
+    const p1 = rectangle('p1', 0, 0, 100, 100);
+    const p2 = rectangle('p2', 100, 0, 200, 100);
+    const p3 = rectangle('p3', 200, 0, 300, 100);
+
+    const startPoint = { x: 50, y: 0 };
+    const endPoint = { x: 250, y: 0 };
+    const draftNodes = [
+      startPoint,
+      { x: 100, y: -50 },
+      { x: 200, y: -50 },
+      endPoint,
+    ];
+
+    const result = findMultiPolygonAutofillPath(
+      [p1, p2, p3],
+      startPoint,
+      endPoint,
+      draftNodes,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.targetPolygons.map((p) => p.id)).toEqual(['p1', 'p2', 'p3']);
+    // Intermediate junctions on the top edge at x=200 and x=100 should be traversed
+    const nodes = result!.nodes;
+    expect(nodes.some((n) => Math.abs(n.x - 200) <= 2 && Math.abs(n.y - 0) <= 2)).toBe(true);
+    expect(nodes.some((n) => Math.abs(n.x - 100) <= 2 && Math.abs(n.y - 0) <= 2)).toBe(true);
+  });
+
+  it('returns null if start and end are on disconnected polygons', () => {
+    const p1 = rectangle('p1', 0, 0, 100, 100);
+    const p2 = rectangle('p2', 300, 0, 400, 100);
+    const startPoint = { x: 50, y: 0 };
+    const endPoint = { x: 350, y: 0 };
+    const draftNodes = [startPoint, { x: 200, y: -50 }, endPoint];
+
+    const result = findMultiPolygonAutofillPath([p1, p2], startPoint, endPoint, draftNodes);
+    expect(result).toBeNull();
   });
 });

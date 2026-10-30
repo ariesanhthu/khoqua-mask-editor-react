@@ -999,6 +999,185 @@ export function getSharedBoundaryAutofillPath(
   return lenForward <= lenBackward ? pathForward : pathBackward;
 }
 
+export interface MultiPolygonAutofillResult {
+  nodes: Array<{ id: string; x: number; y: number; isAnchor: boolean }>;
+  targetPolygons: AnnotationPolygon[];
+}
+
+export function arePolygonsTouching(
+  polyA: AnnotationPolygon,
+  polyB: AnnotationPolygon,
+  tolerance = 4,
+): boolean {
+  if (polyA.id === polyB.id) return true;
+  if (!polyA.nodes.length || !polyB.nodes.length) return false;
+
+  let minXA = Infinity;
+  let maxXA = -Infinity;
+  let minYA = Infinity;
+  let maxYA = -Infinity;
+  for (const n of polyA.nodes) {
+    if (n.x < minXA) minXA = n.x;
+    if (n.x > maxXA) maxXA = n.x;
+    if (n.y < minYA) minYA = n.y;
+    if (n.y > maxYA) maxYA = n.y;
+  }
+  let minXB = Infinity;
+  let maxXB = -Infinity;
+  let minYB = Infinity;
+  let maxYB = -Infinity;
+  for (const n of polyB.nodes) {
+    if (n.x < minXB) minXB = n.x;
+    if (n.x > maxXB) maxXB = n.x;
+    if (n.y < minYB) minYB = n.y;
+    if (n.y > maxYB) maxYB = n.y;
+  }
+  if (
+    minXA > maxXB + tolerance ||
+    maxXA < minXB - tolerance ||
+    minYA > maxYB + tolerance ||
+    maxYA < minYB - tolerance
+  ) {
+    return false;
+  }
+
+  // Check vertices of A against segments of B
+  for (const na of polyA.nodes) {
+    for (let i = 0; i < polyB.nodes.length; i += 1) {
+      const b1 = polyB.nodes[i];
+      const b2 = polyB.nodes[(i + 1) % polyB.nodes.length];
+      if (closestPointOnSegment(na, b1, b2).distance <= tolerance) return true;
+    }
+  }
+
+  // Check vertices of B against segments of A
+  for (const nb of polyB.nodes) {
+    for (let i = 0; i < polyA.nodes.length; i += 1) {
+      const a1 = polyA.nodes[i];
+      const a2 = polyA.nodes[(i + 1) % polyA.nodes.length];
+      if (closestPointOnSegment(nb, a1, a2).distance <= tolerance) return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Finds shared boundary autofill path between startPoint and endPoint across one or multiple touching polygons.
+ * If startPoint and endPoint lie on different polygons that touch directly or through intermediate polygons,
+ * merges the connected chain and extracts the outer boundary path without enclosing the existing polygons.
+ */
+export function findMultiPolygonAutofillPath(
+  allPolygons: AnnotationPolygon[],
+  startPoint: { x: number; y: number },
+  endPoint: { x: number; y: number },
+  draftNodes: Array<{ x: number; y: number }>,
+  tolerance = 14,
+): MultiPolygonAutofillResult | null {
+  if (Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y) < 1.0) {
+    return null;
+  }
+  const startSnap = findSnapTargetToPolygons(allPolygons, startPoint, tolerance);
+  const endSnap = findSnapTargetToPolygons(allPolygons, endPoint, tolerance);
+  if (!startSnap || !endSnap) return null;
+
+  // Single polygon case
+  if (startSnap.polygonId === endSnap.polygonId) {
+    const singlePath = getSharedBoundaryAutofillPath(
+      startSnap.polygon,
+      startSnap.point,
+      endSnap.point,
+      draftNodes,
+    );
+    if (singlePath && singlePath.length >= 0) {
+      return {
+        nodes: singlePath,
+        targetPolygons: [startSnap.polygon],
+      };
+    }
+    return null;
+  }
+
+  // Multi-polygon case: find shortest chain of adjacent polygons from start to end
+  const queue: string[][] = [[startSnap.polygonId]];
+  const visited = new Set<string>([startSnap.polygonId]);
+  let foundChainIds: string[] | null = null;
+
+  while (queue.length > 0) {
+    const currentPath = queue.shift()!;
+    const currentId = currentPath[currentPath.length - 1];
+    if (currentId === endSnap.polygonId) {
+      foundChainIds = currentPath;
+      break;
+    }
+    const currentPoly = allPolygons.find((p) => p.id === currentId);
+    if (!currentPoly) continue;
+
+    for (const other of allPolygons) {
+      if (visited.has(other.id)) continue;
+      if (arePolygonsTouching(currentPoly, other, Math.max(tolerance * 0.5, 4))) {
+        visited.add(other.id);
+        queue.push([...currentPath, other.id]);
+      }
+    }
+  }
+
+  if (!foundChainIds || foundChainIds.length < 2) return null;
+
+  const chainPolygons = foundChainIds
+    .map((id) => allPolygons.find((p) => p.id === id))
+    .filter((p): p is AnnotationPolygon => Boolean(p));
+
+  const mergeResult = mergePolygonsIntoSingle(chainPolygons);
+  if (!mergeResult.polygon) return null;
+
+  const unionPoly = mergeResult.polygon;
+  const autofillNodes = getSharedBoundaryAutofillPath(
+    unionPoly,
+    startSnap.point,
+    endSnap.point,
+    draftNodes,
+  );
+  if (!autofillNodes) return null;
+
+  // Enrich path with all original boundary nodes from chainPolygons that lie along the segments
+  const fullPathPoints: Array<{ id: string; x: number; y: number; isAnchor: boolean }> = [];
+  const waypoints = [endSnap.point, ...autofillNodes, startSnap.point];
+
+  for (let i = 0; i < waypoints.length - 1; i += 1) {
+    const p1 = waypoints[i];
+    const p2 = waypoints[i + 1];
+    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    if (segLen < 1e-4) continue;
+
+    const intermediateNodes: Array<{ node: { x: number; y: number }; t: number }> = [];
+    for (const poly of chainPolygons) {
+      for (const node of poly.nodes) {
+        const cand = closestPointOnSegment(node, p1, p2);
+        if (cand.distance <= 2.5 && cand.projection > 0.02 && cand.projection < 0.98) {
+          const already = intermediateNodes.some((item) => Math.hypot(item.node.x - node.x, item.node.y - node.y) < 1.0);
+          if (!already) {
+            intermediateNodes.push({ node: { x: node.x, y: node.y }, t: cand.projection });
+          }
+        }
+      }
+    }
+    intermediateNodes.sort((a, b) => a.t - b.t);
+
+    for (const item of intermediateNodes) {
+      fullPathPoints.push({ id: createId(), x: item.node.x, y: item.node.y, isAnchor: true });
+    }
+    if (i < waypoints.length - 2) {
+      fullPathPoints.push({ id: createId(), x: p2.x, y: p2.y, isAnchor: true });
+    }
+  }
+
+  return {
+    nodes: fullPathPoints,
+    targetPolygons: chainPolygons,
+  };
+}
+
 export function ensurePolygonHasNodeAt(
   polygon: AnnotationPolygon,
   point: { x: number; y: number },
