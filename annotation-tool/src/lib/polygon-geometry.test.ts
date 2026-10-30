@@ -438,6 +438,59 @@ describe('getSharedBoundaryAutofillPath', () => {
     // Shorter path along wart A between node 3 and node 1 passes through node 2
     expect(sharedPath?.some((n) => Math.hypot(n.x - wartA.nodes[2].x, n.y - wartA.nodes[2].y) < 1)).toBe(true);
   });
+
+  it('selects closest boundary to draft even when the farther boundary has a shorter perimeter', () => {
+    // Polygon where top edge is bumpy (lots of zig-zags, longer perimeter)
+    // and bottom edge is a simple straight line (shorter perimeter)
+    const wart = polygon('bumpy-wart', [
+      [0, 50],
+      [20, 30],
+      [40, 50],
+      [60, 30],
+      [80, 50],
+      [100, 30],
+      [120, 50],
+      [120, 150], // right edge
+      [0, 150],   // bottom edge (flat, distance 120)
+    ]);
+
+    const startPoint = { x: 0, y: 50 };
+    const endPoint = { x: 120, y: 50 };
+    // User is drawing a flesh polygon above the bumpy top edge
+    const draftNodes = [
+      startPoint,
+      { x: 30, y: 10 },
+      { x: 60, y: 10 },
+      { x: 90, y: 10 },
+      endPoint,
+    ];
+
+    const result = getSharedBoundaryAutofillPath(wart, startPoint, endPoint, draftNodes);
+    expect(result).not.toBeNull();
+    // Must select the bumpy top boundary (close to draftNodes at y ~ 30-50),
+    // NOT the bottom boundary (at y = 150)
+    expect(result!.every((n) => n.y <= 60)).toBe(true);
+    expect(result!.some((n) => n.y === 30)).toBe(true);
+  });
+
+  it('selects closest boundary even when draft nodes have self-intersections', () => {
+    const wart = rectangle('wart', 0, 50, 100, 150);
+    const startPoint = { x: 0, y: 50 };
+    const endPoint = { x: 100, y: 50 };
+    // Draft nodes loop back / cross over themselves (e.g. erratic mouse motion)
+    const draftNodes = [
+      startPoint,
+      { x: 40, y: 10 },
+      { x: 80, y: 20 },
+      { x: 30, y: 15 }, // crosses back over (40, 10) -> (80, 20)
+      endPoint,
+    ];
+
+    const result = getSharedBoundaryAutofillPath(wart, startPoint, endPoint, draftNodes);
+    expect(result).not.toBeNull();
+    // Must not fall back to bottom boundary (y=150)
+    expect(result!.every((n) => n.y <= 60)).toBe(true);
+  });
 });
 
 describe('ensurePolygonHasNodeAt', () => {
@@ -535,5 +588,37 @@ describe('findMultiPolygonAutofillPath', () => {
 
     const result = findMultiPolygonAutofillPath([p1, p2], startPoint, endPoint, draftNodes);
     expect(result).toBeNull();
+  });
+
+  it('selects adjacent chain closest to draft instead of lower row shortcut', () => {
+    // Top row (y: 0..100): 3 warts pTop1, pTop2, pTop3
+    const pTop1 = rectangle('pTop1', 0, 0, 100, 100);
+    const pTop2 = rectangle('pTop2', 100, 0, 200, 100);
+    const pTop3 = rectangle('pTop3', 200, 0, 300, 100);
+
+    // Bottom row (y: 100..200): 1 big wart pBot spanning 0..300 that touches both pTop1 and pTop3
+    const pBot = rectangle('pBot', 0, 100, 300, 200);
+
+    const startPoint = { x: 50, y: 0 };
+    const endPoint = { x: 250, y: 0 };
+    // User draws draft nodes along the top of row 1 (y: -30)
+    const draftNodes = [
+      startPoint,
+      { x: 100, y: -30 },
+      { x: 200, y: -30 },
+      endPoint,
+    ];
+
+    // An unweighted BFS might take the 2-hop shortcut: pTop1 -> pBot -> pTop3.
+    // Proximity-weighted Dijkstra must stay on the top row: pTop1 -> pTop2 -> pTop3.
+    const result = findMultiPolygonAutofillPath(
+      [pTop1, pTop2, pTop3, pBot],
+      startPoint,
+      endPoint,
+      draftNodes,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.targetPolygons.map((p) => p.id)).toEqual(['pTop1', 'pTop2', 'pTop3']);
   });
 });

@@ -967,6 +967,16 @@ export function getSharedBoundaryAutofillPath(
   const lenForward = pathLen(pathForward);
   const lenBackward = pathLen(pathBackward);
 
+  const hasDraft = Boolean(draftNodes && draftNodes.length >= 2);
+  const distForward = hasDraft ? pathDistanceToDraft(pathForward, startPoint, endPoint, draftNodes) : 0;
+  const distBackward = hasDraft ? pathDistanceToDraft(pathBackward, startPoint, endPoint, draftNodes) : 0;
+
+  // Primary rule: Choose the boundary closest to draftNodes ("biên gần nhất").
+  // If one candidate boundary is closer to what the user is drawing, choose it.
+  if (hasDraft && Math.abs(distForward - distBackward) > 1.0) {
+    return distForward < distBackward ? pathForward : pathBackward;
+  }
+
   const targetRing = normalizeRing(targetPolygon.nodes.map((p): GeometryPoint => [p.x, p.y]));
   const targetTotalArea = targetRing ? Math.abs(ringArea(targetRing)) : 0;
 
@@ -1003,7 +1013,77 @@ export function getSharedBoundaryAutofillPath(
     }
   }
 
+  if (hasDraft) {
+    return distForward <= distBackward ? pathForward : pathBackward;
+  }
+
   return lenForward <= lenBackward ? pathForward : pathBackward;
+}
+
+/**
+ * Calculates the average distance from sample points along a candidate boundary path to draftNodes.
+ * Used to select the closest boundary ("biên gần nhất") to the user's drawing.
+ */
+export function pathDistanceToDraft(
+  path: Array<{ x: number; y: number }>,
+  startPoint: { x: number; y: number },
+  endPoint: { x: number; y: number },
+  draftNodes: Array<{ x: number; y: number }>,
+): number {
+  if (!draftNodes || draftNodes.length < 2) return 0;
+
+  const candidateNodes = [endPoint, ...path, startPoint];
+  const samplePoints: Array<{ x: number; y: number }> = [];
+
+  for (const p of path) {
+    samplePoints.push(p);
+  }
+
+  for (let i = 0; i < candidateNodes.length - 1; i += 1) {
+    const a = candidateNodes[i];
+    const b = candidateNodes[i + 1];
+    const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+    samplePoints.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+    if (segLen > 15) {
+      samplePoints.push({ x: a.x + 0.25 * (b.x - a.x), y: a.y + 0.25 * (b.y - a.y) });
+      samplePoints.push({ x: a.x + 0.75 * (b.x - a.x), y: a.y + 0.75 * (b.y - a.y) });
+    }
+  }
+
+  if (samplePoints.length === 0) return 0;
+
+  let totalDist = 0;
+  for (const pt of samplePoints) {
+    let minDistToDraft = Infinity;
+    for (let j = 0; j < draftNodes.length - 1; j += 1) {
+      const d1 = draftNodes[j];
+      const d2 = draftNodes[j + 1];
+      const d = closestPointOnSegment(pt, d1, d2).distance;
+      if (d < minDistToDraft) {
+        minDistToDraft = d;
+      }
+    }
+    totalDist += minDistToDraft;
+  }
+
+  return totalDist / samplePoints.length;
+}
+
+export function polygonDistanceToDraft(
+  polygon: AnnotationPolygon,
+  draftNodes: Array<{ x: number; y: number }>,
+): number {
+  if (!draftNodes || draftNodes.length < 2 || !polygon.nodes.length) return 0;
+  let minD = Infinity;
+  for (const n of polygon.nodes) {
+    for (let j = 0; j < draftNodes.length - 1; j += 1) {
+      const d = closestPointOnSegment(n, draftNodes[j], draftNodes[j + 1]).distance;
+      if (d < minD) {
+        minD = d;
+      }
+    }
+  }
+  return minD;
 }
 
 export interface MultiPolygonAutofillResult {
@@ -1105,26 +1185,60 @@ export function findMultiPolygonAutofillPath(
     return null;
   }
 
-  // Multi-polygon case: find shortest chain of adjacent polygons from start to end
-  const queue: string[][] = [[startSnap.polygonId]];
-  const visited = new Set<string>([startSnap.polygonId]);
+  // Multi-polygon case: find chain of adjacent polygons from start to end closest to draftNodes
+  interface SearchNode {
+    path: string[];
+    cost: number;
+  }
+  const polyDistCache = new Map<string, number>();
+  const getPolyDist = (polyId: string) => {
+    let d = polyDistCache.get(polyId);
+    if (d === undefined) {
+      const poly = allPolygons.find((p) => p.id === polyId);
+      d = poly ? polygonDistanceToDraft(poly, draftNodes) : 0;
+      polyDistCache.set(polyId, d);
+    }
+    return d;
+  };
+
+  const queue: SearchNode[] = [{
+    path: [startSnap.polygonId],
+    cost: getPolyDist(startSnap.polygonId),
+  }];
+  const bestCost = new Map<string, number>();
+  bestCost.set(startSnap.polygonId, queue[0].cost);
+
   let foundChainIds: string[] | null = null;
 
   while (queue.length > 0) {
-    const currentPath = queue.shift()!;
+    queue.sort((a, b) => a.cost - b.cost);
+    const { path: currentPath, cost: currentCost } = queue.shift()!;
     const currentId = currentPath[currentPath.length - 1];
+
     if (currentId === endSnap.polygonId) {
       foundChainIds = currentPath;
       break;
     }
+
+    if (currentCost > (bestCost.get(currentId) ?? Infinity)) {
+      continue;
+    }
+
     const currentPoly = allPolygons.find((p) => p.id === currentId);
     if (!currentPoly) continue;
 
     for (const other of allPolygons) {
-      if (visited.has(other.id)) continue;
+      if (currentPath.includes(other.id)) continue;
       if (arePolygonsTouching(currentPoly, other, Math.max(tolerance * 0.5, 4))) {
-        visited.add(other.id);
-        queue.push([...currentPath, other.id]);
+        const stepCost = 1.0 + getPolyDist(other.id);
+        const nextCost = currentCost + stepCost;
+        if (nextCost < (bestCost.get(other.id) ?? Infinity)) {
+          bestCost.set(other.id, nextCost);
+          queue.push({
+            path: [...currentPath, other.id],
+            cost: nextCost,
+          });
+        }
       }
     }
   }
