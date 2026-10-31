@@ -7,6 +7,7 @@ import {
   createRectanglePolygon,
   drawSmoothClosedPath,
   ensurePolygonHasNodeAt,
+  findEnclosedPocketAtPoint,
   findMultiPolygonAutofillPath,
   findSnapTargetToPolygons,
   getSharedBoundaryAutofillPath,
@@ -14,7 +15,9 @@ import {
   insertNodeAtEdge,
   isSegmentOnPolygonsBoundary,
   mergePolygonsIntoSingle,
+  pointInPolygon,
   polygonArea,
+  raySegmentIntersection,
 } from './polygon-geometry';
 
 const polygon = (id: string, points: Array<[number, number]>, label = 'damage') => ({
@@ -655,5 +658,72 @@ describe('findMultiPolygonAutofillPath', () => {
     // Internal seams at y=50 and y=100 between rows must be completely dissolved
     expect(result!.nodes.every((n) => Math.abs(n.y - 0) <= 2)).toBe(true);
     expect(result!.targetPolygons.map((p) => p.id)).toEqual(['w1', 'w2', 'w3']);
+  });
+});
+
+describe('raySegmentIntersection', () => {
+  it('returns positive distance when ray hits segment ahead', () => {
+    const origin = { x: 0, y: 0 };
+    const hit = raySegmentIntersection(origin, 1, 0, { x: 50, y: -20 }, { x: 50, y: 20 });
+    expect(hit).toBeCloseTo(50, 2);
+  });
+
+  it('returns null when ray points away or misses segment', () => {
+    const origin = { x: 0, y: 0 };
+    // Ray points right (+x), but segment is behind at x = -50
+    const behind = raySegmentIntersection(origin, 1, 0, { x: -50, y: -20 }, { x: -50, y: 20 });
+    expect(behind).toBeNull();
+
+    // Ray points right along y=0, but segment is entirely at y in [20, 40]
+    const misses = raySegmentIntersection(origin, 1, 0, { x: 50, y: 20 }, { x: 50, y: 40 });
+    expect(misses).toBeNull();
+  });
+});
+
+describe('findEnclosedPocketAtPoint', () => {
+  it('returns null if clicked point is already inside an existing polygon', () => {
+    const p1 = rectangle('p1', 0, 0, 100, 100);
+    const p2 = rectangle('p2', 100, 0, 200, 100);
+    const res = findEnclosedPocketAtPoint([p1, p2], { x: 50, y: 50 });
+    expect(res).toBeNull();
+  });
+
+  it('returns null if clicked point is in an open/exterior region', () => {
+    const p1 = rectangle('p1', 0, 0, 100, 100);
+    const p2 = rectangle('p2', 100, 0, 200, 100);
+    // Point outside in open space
+    const res = findEnclosedPocketAtPoint([p1, p2], { x: 50, y: -50 });
+    expect(res).toBeNull();
+  });
+
+  it('auto-fills pocket completely surrounded by 4 touching polygons', () => {
+    // 4 squares surrounding a 100x100 pocket at [100, 100] to [200, 200]:
+    // Top: [100, 0] to [200, 100]
+    const top = rectangle('top', 100, 0, 200, 100);
+    // Bottom: [100, 200] to [200, 300]
+    const bottom = rectangle('bottom', 100, 200, 200, 300);
+    // Left: [0, 100] to [100, 200]
+    const left = rectangle('left', 0, 100, 100, 200);
+    // Right: [200, 100] to [300, 200]
+    const right = rectangle('right', 200, 100, 300, 200);
+
+    // Center point in the middle of the empty pocket
+    const centerPoint = { x: 150, y: 150 };
+
+    const pocket = findEnclosedPocketAtPoint([top, bottom, left, right], centerPoint);
+    expect(pocket).not.toBeNull();
+    expect(pocket!.label).toBe('wart_flesh');
+    expect(pocket!.nodes.length).toBeGreaterThanOrEqual(4);
+
+    // Bounding box of the pocket should match [100, 100] to [200, 200]
+    const xs = pocket!.nodes.map((n) => n.x);
+    const ys = pocket!.nodes.map((n) => n.y);
+    expect(Math.min(...xs)).toBeCloseTo(100, 0);
+    expect(Math.max(...xs)).toBeCloseTo(200, 0);
+    expect(Math.min(...ys)).toBeCloseTo(100, 0);
+    expect(Math.max(...ys)).toBeCloseTo(200, 0);
+
+    // Center point should be strictly inside the resulting pocket
+    expect(pointInPolygon(centerPoint, pocket!.nodes)).toBe(true);
   });
 });

@@ -1429,3 +1429,273 @@ export function clipPolygonDifference(
     return null;
   }
 }
+
+export function raySegmentIntersection(
+  origin: { x: number; y: number },
+  dirX: number,
+  dirY: number,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+): number | null {
+  const vX = end.x - start.x;
+  const vY = end.y - start.y;
+  const denom = dirX * vY - dirY * vX;
+  if (Math.abs(denom) < 1e-7) return null;
+
+  const dX = start.x - origin.x;
+  const dY = start.y - origin.y;
+  const t = (dX * vY - dY * vX) / denom;
+  const u = (dX * dirY - dY * dirX) / denom;
+
+  if (t > 1e-3 && u >= -1e-4 && u <= 1 + 1e-4) {
+    return t;
+  }
+  return null;
+}
+
+/**
+ * Checks if a query point lies in an empty void/pocket completely surrounded by existing polygons.
+ * If surrounded, computes and returns the new polygon that fills this enclosed void with 100% boundary adherence.
+ */
+export function findEnclosedPocketAtPoint(
+  allPolygons: AnnotationPolygon[],
+  point: { x: number; y: number },
+  maxRadius = 250,
+): AnnotationPolygon | null {
+  if (!allPolygons || allPolygons.length < 2) return null;
+
+  // 1. Must not be inside any existing polygon
+  for (const poly of allPolygons) {
+    if (pointInPolygon(point, poly.nodes)) return null;
+  }
+
+  // 2. Must not be right on an edge (within 3px) - that's for edge snapping / anchor creation
+  for (const poly of allPolygons) {
+    const len = poly.nodes.length;
+    for (let i = 0; i < len; i += 1) {
+      const a = poly.nodes[i];
+      const b = poly.nodes[(i + 1) % len];
+      if (closestPointOnSegment(point, a, b).distance <= 3.0) return null;
+    }
+  }
+
+  // 3. Filter nearby polygons
+  const nearby = allPolygons.filter((p) => {
+    return p.nodes.some((n) => Math.hypot(n.x - point.x, n.y - point.y) <= maxRadius + 50);
+  });
+  if (nearby.length < 2) return null;
+
+  // 4. Radial enclosure test: cast rays in 12 directions (every 30 deg).
+  // All 12 rays MUST hit a polygon boundary within maxRadius.
+  const numRays = 12;
+  let maxHit = 0;
+  for (let r = 0; r < numRays; r += 1) {
+    const angle = (r * 2 * Math.PI) / numRays;
+    const rayCos = Math.cos(angle);
+    const raySin = Math.sin(angle);
+    let closestHit = Infinity;
+    for (const poly of nearby) {
+      const n = poly.nodes.length;
+      for (let i = 0; i < n; i += 1) {
+        const a = poly.nodes[i];
+        const b = poly.nodes[(i + 1) % n];
+        const hit = raySegmentIntersection(point, rayCos, raySin, a, b);
+        if (hit !== null && hit > 1.0 && hit < closestHit) {
+          closestHit = hit;
+        }
+      }
+    }
+    if (closestHit > maxRadius) {
+      return null; // Open to exterior
+    }
+    if (closestHit > maxHit) {
+      maxHit = closestHit;
+    }
+  }
+  if (maxHit < 4.0) return null;
+
+  const buildPocketPolygon = (
+    rawNodes: Array<{ x: number; y: number }>,
+    surroundingPolys: AnnotationPolygon[],
+  ): AnnotationPolygon | null => {
+    const area = polygonArea(rawNodes);
+    let nodes = area < 0 ? [...rawNodes].reverse() : [...rawNodes];
+
+    // Snap each node to closest boundary of surrounding polygons
+    nodes = nodes.map((nd) => {
+      let bestPt = { x: nd.x, y: nd.y };
+      let bestDist = Infinity;
+      for (const poly of surroundingPolys) {
+        const n = poly.nodes.length;
+        for (let i = 0; i < n; i += 1) {
+          const a = poly.nodes[i];
+          const b = poly.nodes[(i + 1) % n];
+          const cand = closestPointOnSegment(nd, a, b);
+          if (cand.distance < bestDist) {
+            bestDist = cand.distance;
+            bestPt = cand.point;
+          }
+        }
+      }
+      if (bestDist <= 6.0) {
+        return { ...nd, x: bestPt.x, y: bestPt.y };
+      }
+      return nd;
+    });
+
+    // Enrich edges with any original nodes from surroundingPolys
+    const enriched: Array<{ x: number; y: number }> = [];
+    const count = nodes.length;
+    for (let i = 0; i < count; i += 1) {
+      const p1 = nodes[i];
+      const p2 = nodes[(i + 1) % count];
+      enriched.push(p1);
+
+      const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      if (segLen > 2.0) {
+        const inter: Array<{ pt: { x: number; y: number }; t: number }> = [];
+        for (const poly of surroundingPolys) {
+          for (const orig of poly.nodes) {
+            const cand = closestPointOnSegment(orig, p1, p2);
+            if (cand.distance <= 2.5 && cand.projection > 0.03 && cand.projection < 0.97) {
+              const dup = inter.some((item) => Math.hypot(item.pt.x - orig.x, item.pt.y - orig.y) < 1.0);
+              if (!dup) {
+                inter.push({ pt: { x: orig.x, y: orig.y }, t: cand.projection });
+              }
+            }
+          }
+        }
+        inter.sort((a, b) => a.t - b.t);
+        for (const item of inter) {
+          enriched.push(item.pt);
+        }
+      }
+    }
+
+    // Filter near-duplicates
+    const filtered = enriched.filter((pt, idx) =>
+      idx === 0 || Math.hypot(pt.x - enriched[idx - 1].x, pt.y - enriched[idx - 1].y) >= 1.0
+    );
+
+    if (filtered.length < 3 || Math.abs(polygonArea(filtered)) < 15) {
+      return null;
+    }
+
+    return {
+      id: createId(),
+      label: 'wart_flesh',
+      nodes: filtered.map((pt) => ({
+        id: createId(),
+        x: Math.round(pt.x * 10) / 10,
+        y: Math.round(pt.y * 10) / 10,
+        isAnchor: true,
+      })),
+    };
+  };
+
+  // Method 1: Check holes in the union of nearby polygons
+  const rings: GeometryRing[] = nearby
+    .map((p) => normalizeRing(p.nodes.map((n): GeometryPoint => [n.x, n.y])))
+    .filter((r): r is GeometryRing => Boolean(r));
+
+  if (rings.length >= 2) {
+    let unionComps: GeometryMultiPolygon = [];
+    try {
+      unionComps = unionGeometries(rings.map((r) => [r]));
+    } catch {
+      unionComps = [];
+    }
+
+    for (const comp of unionComps) {
+      for (let h = 1; h < comp.length; h += 1) {
+        const holeRing = comp[h];
+        const holeNodes = holeRing.map(([x, y]) => ({ id: createId(), x, y, isAnchor: true }));
+        if (pointInPolygon(point, holeNodes)) {
+          return buildPocketPolygon(holeNodes, nearby);
+        }
+      }
+    }
+
+    // Method 2: Bridge components across small gaps <= 8px and check holes
+    if (unionComps.length > 1) {
+      const edges: Array<{ from: number; to: number; distance: number; pointA: { x: number; y: number }; pointB: { x: number; y: number } }> = [];
+      for (let from = 0; from < unionComps.length; from += 1) {
+        for (let to = from + 1; to < unionComps.length; to += 1) {
+          const bp = closestBoundaryPoints(unionComps[from][0], unionComps[to][0]);
+          if (bp.distance <= 8.0) {
+            edges.push({ from, to, ...bp });
+          }
+        }
+      }
+      if (edges.length > 0) {
+        const bridges: GeometryPolygon[] = [];
+        for (const edge of edges) {
+          bridges.push(createBridge(edge.pointA, edge.pointB, 3));
+        }
+        try {
+          const bridgedComps = unionGeometries([...unionComps, ...bridges]);
+          for (const comp of bridgedComps) {
+            for (let h = 1; h < comp.length; h += 1) {
+              const holeRing = comp[h];
+              const holeNodes = holeRing.map(([x, y]) => ({ id: createId(), x, y, isAnchor: true }));
+              if (pointInPolygon(point, holeNodes)) {
+                return buildPocketPolygon(holeNodes, nearby);
+              }
+            }
+          }
+        } catch {
+          // Fall through to Method 3
+        }
+      }
+    }
+  }
+
+  // Method 3: Box difference with dilated rings
+  const boxRadius = maxHit + 30;
+  const boxRing: GeometryRing = [
+    [point.x - boxRadius, point.y - boxRadius],
+    [point.x + boxRadius, point.y - boxRadius],
+    [point.x + boxRadius, point.y + boxRadius],
+    [point.x - boxRadius, point.y + boxRadius],
+  ];
+
+  try {
+    const dilatedPolygons: GeometryPolygon[] = [];
+    for (const poly of nearby) {
+      const pRing = normalizeRing(poly.nodes.map((n): GeometryPoint => [n.x, n.y]));
+      if (!pRing) continue;
+      const segBridges: GeometryPolygon[] = [];
+      const n = poly.nodes.length;
+      for (let i = 0; i < n; i += 1) {
+        segBridges.push(createBridge(poly.nodes[i], poly.nodes[(i + 1) % n], 4));
+      }
+      try {
+        const dilated = unionGeometries([[pRing], ...segBridges]);
+        dilatedPolygons.push(...dilated);
+      } catch {
+        dilatedPolygons.push([pRing]);
+      }
+    }
+
+    const diff = polygonClipping.difference([boxRing], ...dilatedPolygons);
+    for (const comp of diff) {
+      const outerRing = comp[0];
+      const outerNodes = outerRing.map(([x, y]) => ({ id: createId(), x, y, isAnchor: true }));
+      if (pointInPolygon(point, outerNodes)) {
+        const touchesBox = outerRing.some(([x, y]) =>
+          Math.abs(x - (point.x - boxRadius)) < 3 ||
+          Math.abs(x - (point.x + boxRadius)) < 3 ||
+          Math.abs(y - (point.y - boxRadius)) < 3 ||
+          Math.abs(y - (point.y + boxRadius)) < 3
+        );
+        if (!touchesBox) {
+          return buildPocketPolygon(outerNodes, nearby);
+        }
+      }
+    }
+  } catch {
+    // Difference error
+  }
+
+  return null;
+}

@@ -24,6 +24,7 @@ import {
   createRectanglePolygon,
   drawSmoothClosedPath,
   ensurePolygonHasNodeAt,
+  findEnclosedPocketAtPoint,
   findMultiPolygonAutofillPath,
   findSnapTargetToPolygons,
   getSmoothSegmentControlPoints,
@@ -374,6 +375,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     closingToStart?: boolean;
   } | null>(null);
   const anchorHoverRef = useRef<{ polygon: AnnotationPolygon; edgeIndex: number; point: ImagePoint } | null>(null);
+  const enclosedPocketHoverRef = useRef<AnnotationPolygon | null>(null);
+  const enclosedPocketCursorRef = useRef<ImagePoint | null>(null);
   const cutPathRef = useRef<PolygonNode[]>([]);
   const marqueeRef = useRef<Marquee | null>(null);
   const breakpointsRef = useRef(copyBreakpoints(initialBreakpoints));
@@ -564,6 +567,44 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           context.fill();
         }
       }
+    }
+
+    const enclosedPocket = enclosedPocketHoverRef.current;
+    if (toolRef.current === 'polygon' && !draft.length && enclosedPocket && !pointerRef.current) {
+      context.save();
+      context.beginPath();
+      drawSmoothClosedPath(context, enclosedPocket.nodes, 0.08, polygonsRef.current);
+      context.globalAlpha = Math.min(0.65, Math.max(0.25, display.maskOpacity * 0.85));
+      context.fillStyle = '#10b981';
+      context.fill();
+      context.globalAlpha = 1;
+      context.setLineDash([6 / view.scale, 4 / view.scale]);
+      context.lineWidth = 2.5 / view.scale;
+      context.strokeStyle = '#10b981';
+      context.stroke();
+      context.setLineDash([]);
+
+      for (const node of enclosedPocket.nodes) {
+        context.beginPath();
+        context.arc(node.x, node.y, 2.5 / view.scale, 0, Math.PI * 2);
+        context.fillStyle = '#10b981';
+        context.fill();
+      }
+
+      if (enclosedPocketCursorRef.current) {
+        const pt = enclosedPocketCursorRef.current;
+        context.font = `600 ${11 / view.scale}px ui-sans-serif, system-ui, sans-serif`;
+        const text = '+ Điền kín vùng (click)';
+        const tw = context.measureText(text).width;
+        const bx = pt.x + 8 / view.scale;
+        const by = pt.y - 10 / view.scale;
+        context.fillStyle = 'rgba(16, 185, 129, 0.95)';
+        context.fillRect(bx, by - 12 / view.scale, tw + 8 / view.scale, 16 / view.scale);
+        context.fillStyle = '#ffffff';
+        context.textBaseline = 'middle';
+        context.fillText(text, bx + 4 / view.scale, by - 4 / view.scale);
+      }
+      context.restore();
     }
 
     const cutPath = cutPathRef.current;
@@ -853,6 +894,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     }
     hoveredNodeRef.current = null;
     anchorHoverRef.current = null;
+    enclosedPocketHoverRef.current = null;
+    enclosedPocketCursorRef.current = null;
     toolRef.current = tool;
     render();
   }, [render, tool]);
@@ -1070,6 +1113,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     snapTargetRef.current = null;
     hoveredNodeRef.current = null;
     polygonHoverRef.current = null;
+    enclosedPocketHoverRef.current = null;
+    enclosedPocketCursorRef.current = null;
     selectedNodeIdsRef.current.clear();
     selectedPolygonIdsRef.current = new Set([created.id]);
     commitPolygons([...nextPolygons, created]);
@@ -1089,6 +1134,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     snapTargetRef.current = null;
     hoveredNodeRef.current = null;
     polygonHoverRef.current = null;
+    enclosedPocketHoverRef.current = null;
+    enclosedPocketCursorRef.current = null;
     cutPathRef.current = [];
     marqueeRef.current = null;
     render();
@@ -1306,6 +1353,36 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           humanActionRef.current = 'MODIFIED';
           notifyChange('MODIFIED');
           onMessage('Đã tạo anchor mới trên biên của mask cũ.');
+        }
+      }
+
+      if (!draftPolygonRef.current.length && !snap) {
+        const pocket = enclosedPocketHoverRef.current || findEnclosedPocketAtPoint(polygonsRef.current, point, 250 / viewRef.current.scale);
+        if (pocket) {
+          let finalNodes = pocket.nodes;
+          for (const existing of polygonsRef.current) {
+            const clipped = clipPolygonDifference(finalNodes, existing.nodes);
+            if (clipped && clipped.length >= 3) {
+              finalNodes = clipped;
+            }
+          }
+          const created: AnnotationPolygon = {
+            id: crypto.randomUUID(),
+            label: 'wart_flesh',
+            nodes: finalNodes,
+          };
+          const before = clonePolygons(polygonsRef.current);
+          pushPolygonHistory(before);
+          const next = [...polygonsRef.current, created];
+          commitPolygons(next);
+          enclosedPocketHoverRef.current = null;
+          enclosedPocketCursorRef.current = null;
+          selectedNodeIdsRef.current.clear();
+          selectedPolygonIdsRef.current = new Set([created.id]);
+          onMessage('Đã tự động điền kín vùng giữa các mask.');
+          onPolygonComplete?.();
+          render();
+          return;
         }
       }
 
@@ -1637,6 +1714,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         const effectivePoint = snap ? snap.point : point;
 
         if (draftPolygonRef.current.length) {
+          enclosedPocketHoverRef.current = null;
+          enclosedPocketCursorRef.current = null;
           polygonHoverRef.current = effectivePoint;
           const draft = draftPolygonRef.current;
           const isNearStart = draft.length >= 2 && Math.hypot(draft[0].x - effectivePoint.x, draft[0].y - effectivePoint.y) <= snapTolerance;
@@ -1669,6 +1748,14 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         } else {
           polygonHoverRef.current = null;
           draftAutofillRef.current = null;
+          if (!snap) {
+            const pocket = findEnclosedPocketAtPoint(polygonsRef.current, point, 250 / viewRef.current.scale);
+            enclosedPocketHoverRef.current = pocket;
+            enclosedPocketCursorRef.current = pocket ? point : null;
+          } else {
+            enclosedPocketHoverRef.current = null;
+            enclosedPocketCursorRef.current = null;
+          }
         }
 
         const hovered = draftPolygonRef.current.find((node) => Math.hypot(node.x - effectivePoint.x, node.y - effectivePoint.y) <= 12 / viewRef.current.scale) ?? null;
