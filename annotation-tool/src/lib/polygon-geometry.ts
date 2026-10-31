@@ -1149,10 +1149,103 @@ export function arePolygonsTouching(
   return false;
 }
 
+export function arePolygonsConnected(
+  allPolygons: AnnotationPolygon[],
+  startId: string,
+  endId: string,
+  tolerance = 14,
+): boolean {
+  if (startId === endId) return true;
+  const visited = new Set<string>([startId]);
+  const queue = [startId];
+
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    if (currentId === endId) return true;
+    const currentPoly = allPolygons.find((p) => p.id === currentId);
+    if (!currentPoly) continue;
+
+    for (const other of allPolygons) {
+      if (visited.has(other.id)) continue;
+      if (arePolygonsTouching(currentPoly, other, Math.max(tolerance * 0.5, 4))) {
+        visited.add(other.id);
+        queue.push(other.id);
+      }
+    }
+  }
+
+  return false;
+}
+
+export function getConnectedPolygonCluster(
+  allPolygons: AnnotationPolygon[],
+  seedPolygonIds: string[],
+  tolerance = 14,
+): AnnotationPolygon[] {
+  const visited = new Set<string>(seedPolygonIds);
+  const queue = [...seedPolygonIds];
+
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    const currentPoly = allPolygons.find((p) => p.id === currentId);
+    if (!currentPoly) continue;
+
+    for (const other of allPolygons) {
+      if (visited.has(other.id)) continue;
+      if (arePolygonsTouching(currentPoly, other, Math.max(tolerance * 0.5, 4))) {
+        visited.add(other.id);
+        queue.push(other.id);
+      }
+    }
+  }
+
+  return allPolygons.filter((p) => visited.has(p.id));
+}
+
+export function closestPointOnPolygon(
+  polygon: AnnotationPolygon,
+  point: { x: number; y: number },
+): { point: { x: number; y: number }; edgeIndex: number; distance: number } {
+  let minD = Infinity;
+  let bestPoint = point;
+  let bestEdge = 0;
+  const n = polygon.nodes.length;
+  for (let i = 0; i < n; i += 1) {
+    const a = polygon.nodes[i];
+    const b = polygon.nodes[(i + 1) % n];
+    const cand = closestPointOnSegment(point, a, b);
+    if (cand.distance < minD) {
+      minD = cand.distance;
+      bestPoint = cand.point;
+      bestEdge = i;
+    }
+  }
+  return { point: bestPoint, edgeIndex: bestEdge, distance: minD };
+}
+
+const collectiveCache = new Map<string, AnnotationPolygon>();
+
+export function getCachedCollectivePolygon(polygons: AnnotationPolygon[]): AnnotationPolygon | null {
+  if (polygons.length === 0) return null;
+  if (polygons.length === 1) return polygons[0];
+
+  const key = polygons.map((p) => `${p.id}_${p.nodes.length}`).sort().join('|');
+  const cached = collectiveCache.get(key);
+  if (cached) return cached;
+
+  const res = mergePolygonsIntoSingle(polygons);
+  if (res.polygon) {
+    if (collectiveCache.size > 20) collectiveCache.clear();
+    collectiveCache.set(key, res.polygon);
+    return res.polygon;
+  }
+  return null;
+}
+
 /**
  * Finds shared boundary autofill path between startPoint and endPoint across one or multiple touching polygons.
- * If startPoint and endPoint lie on different polygons that touch directly or through intermediate polygons,
- * merges the connected chain and extracts the outer boundary path without enclosing the existing polygons.
+ * Groups all existing touching polygons into a collective first so internal seams between adjacent
+ * polygons are completely dissolved, and traces the outer boundary of the collective closest to draftNodes.
  */
 export function findMultiPolygonAutofillPath(
   allPolygons: AnnotationPolygon[],
@@ -1161,6 +1254,7 @@ export function findMultiPolygonAutofillPath(
   draftNodes: Array<{ x: number; y: number }>,
   tolerance = 14,
 ): MultiPolygonAutofillResult | null {
+  if (!allPolygons || allPolygons.length === 0) return null;
   if (Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y) < 1.0) {
     return null;
   }
@@ -1168,100 +1262,47 @@ export function findMultiPolygonAutofillPath(
   const endSnap = findSnapTargetToPolygons(allPolygons, endPoint, tolerance);
   if (!startSnap || !endSnap) return null;
 
-  // Single polygon case
-  if (startSnap.polygonId === endSnap.polygonId) {
-    const singlePath = getSharedBoundaryAutofillPath(
-      startSnap.polygon,
-      startSnap.point,
-      endSnap.point,
-      draftNodes,
-    );
-    if (singlePath && singlePath.length >= 0) {
-      return {
-        nodes: singlePath,
-        targetPolygons: [startSnap.polygon],
-      };
-    }
-    return null;
-  }
-
-  // Multi-polygon case: find chain of adjacent polygons from start to end closest to draftNodes
-  interface SearchNode {
-    path: string[];
-    cost: number;
-  }
-  const polyDistCache = new Map<string, number>();
-  const getPolyDist = (polyId: string) => {
-    let d = polyDistCache.get(polyId);
-    if (d === undefined) {
-      const poly = allPolygons.find((p) => p.id === polyId);
-      d = poly ? polygonDistanceToDraft(poly, draftNodes) : 0;
-      polyDistCache.set(polyId, d);
-    }
-    return d;
-  };
-
-  const queue: SearchNode[] = [{
-    path: [startSnap.polygonId],
-    cost: getPolyDist(startSnap.polygonId),
-  }];
-  const bestCost = new Map<string, number>();
-  bestCost.set(startSnap.polygonId, queue[0].cost);
-
-  let foundChainIds: string[] | null = null;
-
-  while (queue.length > 0) {
-    queue.sort((a, b) => a.cost - b.cost);
-    const { path: currentPath, cost: currentCost } = queue.shift()!;
-    const currentId = currentPath[currentPath.length - 1];
-
-    if (currentId === endSnap.polygonId) {
-      foundChainIds = currentPath;
-      break;
-    }
-
-    if (currentCost > (bestCost.get(currentId) ?? Infinity)) {
-      continue;
-    }
-
-    const currentPoly = allPolygons.find((p) => p.id === currentId);
-    if (!currentPoly) continue;
-
-    for (const other of allPolygons) {
-      if (currentPath.includes(other.id)) continue;
-      if (arePolygonsTouching(currentPoly, other, Math.max(tolerance * 0.5, 4))) {
-        const stepCost = 1.0 + getPolyDist(other.id);
-        const nextCost = currentCost + stepCost;
-        if (nextCost < (bestCost.get(other.id) ?? Infinity)) {
-          bestCost.set(other.id, nextCost);
-          queue.push({
-            path: [...currentPath, other.id],
-            cost: nextCost,
-          });
-        }
-      }
+  // If start and end are on different polygons, ensure they are connected by a touching chain
+  if (startSnap.polygonId !== endSnap.polygonId) {
+    if (!arePolygonsConnected(allPolygons, startSnap.polygonId, endSnap.polygonId, tolerance)) {
+      return null;
     }
   }
 
-  if (!foundChainIds || foundChainIds.length < 2) return null;
+  // 1. Group all existing touching polygons into a unified collective
+  // (Dissolves all internal seams between warts, leaving only the true outer contour)
+  const clusterPolygons = getConnectedPolygonCluster(
+    allPolygons,
+    startSnap.polygonId === endSnap.polygonId ? [startSnap.polygonId] : [startSnap.polygonId, endSnap.polygonId],
+    tolerance,
+  );
 
-  const chainPolygons = foundChainIds
-    .map((id) => allPolygons.find((p) => p.id === id))
-    .filter((p): p is AnnotationPolygon => Boolean(p));
+  let collectivePoly: AnnotationPolygon | null = null;
+  if (clusterPolygons.length === 1) {
+    collectivePoly = clusterPolygons[0];
+  } else {
+    collectivePoly = getCachedCollectivePolygon(clusterPolygons);
+    if (!collectivePoly) {
+      collectivePoly = getCachedCollectivePolygon(allPolygons) ?? clusterPolygons[0];
+    }
+  }
 
-  const mergeResult = mergePolygonsIntoSingle(chainPolygons);
-  if (!mergeResult.polygon) return null;
+  if (!collectivePoly) return null;
 
-  const unionPoly = mergeResult.polygon;
+  // 2. Project startSnap.point and endSnap.point onto the outer contour of the collective
+  const collectiveStart = closestPointOnPolygon(collectivePoly, startSnap.point).point;
+  const collectiveEnd = closestPointOnPolygon(collectivePoly, endSnap.point).point;
+
+  // 3. Extract shared boundary path along the outer contour of the collective closest to draftNodes
   const autofillNodes = getSharedBoundaryAutofillPath(
-    unionPoly,
-    startSnap.point,
-    endSnap.point,
+    collectivePoly,
+    collectiveStart,
+    collectiveEnd,
     draftNodes,
   );
   if (!autofillNodes) return null;
 
-  // Enrich path with all original boundary nodes from chainPolygons that lie along the segments
+  // 4. Enrich path with all original boundary nodes from clusterPolygons that lie along the segments
   const fullPathPoints: Array<{ id: string; x: number; y: number; isAnchor: boolean }> = [];
   const waypoints = [endSnap.point, ...autofillNodes, startSnap.point];
 
@@ -1272,10 +1313,10 @@ export function findMultiPolygonAutofillPath(
     if (segLen < 1e-4) continue;
 
     const intermediateNodes: Array<{ node: { x: number; y: number }; t: number }> = [];
-    for (const poly of chainPolygons) {
+    for (const poly of clusterPolygons) {
       for (const node of poly.nodes) {
         const cand = closestPointOnSegment(node, p1, p2);
-        if (cand.distance <= 2.5 && cand.projection > 0.02 && cand.projection < 0.98) {
+        if (cand.distance <= 3.0 && cand.projection > 0.02 && cand.projection < 0.98) {
           const already = intermediateNodes.some((item) => Math.hypot(item.node.x - node.x, item.node.y - node.y) < 1.0);
           if (!already) {
             intermediateNodes.push({ node: { x: node.x, y: node.y }, t: cand.projection });
@@ -1293,9 +1334,22 @@ export function findMultiPolygonAutofillPath(
     }
   }
 
+  // 5. Filter clusterPolygons to only those that actually contribute to the chosen boundary
+  const pathPoints = [endSnap.point, ...fullPathPoints, startSnap.point];
+  const contributingPolygons = clusterPolygons.filter((poly) => {
+    return pathPoints.some((pt) => {
+      for (let i = 0; i < poly.nodes.length; i += 1) {
+        const a = poly.nodes[i];
+        const b = poly.nodes[(i + 1) % poly.nodes.length];
+        if (closestPointOnSegment(pt, a, b).distance <= 2.5) return true;
+      }
+      return false;
+    });
+  });
+
   return {
     nodes: fullPathPoints,
-    targetPolygons: chainPolygons,
+    targetPolygons: contributingPolygons.length > 0 ? contributingPolygons : clusterPolygons,
   };
 }
 

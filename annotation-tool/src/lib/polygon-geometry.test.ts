@@ -621,4 +621,39 @@ describe('findMultiPolygonAutofillPath', () => {
     expect(result).not.toBeNull();
     expect(result!.targetPolygons.map((p) => p.id)).toEqual(['pTop1', 'pTop2', 'pTop3']);
   });
+
+  it('groups all touching polygons into collective so internal seams are dissolved and never picked', () => {
+    // 3 rows of warts touching each other:
+    // Row 1 (y: 0..50): w1 (0..100), w2 (100..200), w3 (200..300)
+    // Row 2 (y: 50..100): w4 (0..100), w5 (100..200), w6 (200..300)
+    // Row 3 (y: 100..150): w7 (0..100), w8 (100..200), w9 (200..300)
+    const warts = [
+      rectangle('w1', 0, 0, 100, 50),
+      rectangle('w2', 100, 0, 200, 50),
+      rectangle('w3', 200, 0, 300, 50),
+      rectangle('w4', 0, 50, 100, 100),
+      rectangle('w5', 100, 50, 200, 100),
+      rectangle('w6', 200, 50, 200, 100),
+      rectangle('w7', 0, 100, 100, 150),
+      rectangle('w8', 100, 100, 200, 150),
+      rectangle('w9', 200, 100, 300, 150),
+    ];
+
+    const startPoint = { x: 20, y: 0 };
+    const endPoint = { x: 280, y: 0 };
+    const draftNodes = [
+      startPoint,
+      { x: 100, y: -40 },
+      { x: 200, y: -40 },
+      endPoint,
+    ];
+
+    const result = findMultiPolygonAutofillPath(warts, startPoint, endPoint, draftNodes);
+    expect(result).not.toBeNull();
+
+    // The boundary path must stay strictly on the outer top contour at y = 0
+    // Internal seams at y=50 and y=100 between rows must be completely dissolved
+    expect(result!.nodes.every((n) => Math.abs(n.y - 0) <= 2)).toBe(true);
+    expect(result!.targetPolygons.map((p) => p.id)).toEqual(['w1', 'w2', 'w3']);
+  });
 });
