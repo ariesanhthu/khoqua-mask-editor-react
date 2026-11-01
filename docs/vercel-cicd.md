@@ -119,23 +119,17 @@ Workflow nam o:
 
 Y nghia:
 
-- Pull request vao `master`: chay test/typecheck/build va tao Preview Deployment.
-- Push hoac merge vao `master`: chay test/typecheck/build va deploy Production.
-- `workflow_dispatch`: cho phep chay Production thu cong tu GitHub Actions.
+- Pull request vao `master`: GitHub Actions chay test/lint/typecheck/build; Vercel Git integration tao Preview Deployment.
+- Push hoac merge vao `master`: GitHub Actions kiem tra chat luong; Vercel Git integration deploy Production tu dung commit tren remote.
+- `workflow_dispatch`: chay lai kiem tra chat luong, khong tao them mot deployment CLI.
 
-## GitHub Secrets cho CI/CD
+## Co che deploy hien tai (2026-11-01)
 
-Them repository secrets tai:
+Project da ket noi GitHub truc tiep trong Vercel. Khong can `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` trong GitHub Actions cho luong nay.
 
-```text
-GitHub -> Settings -> Secrets and variables -> Actions
-```
+Workflow cu deploy them bang CLI sau khi Vercel Git da deploy, nhung repository khong co cac secrets tren: `vercel pull --token=` that bai. Da bo hai job CLI trung lap, giu day du kiem tra chat luong. Khong thay doi environment variables cua project Vercel hoac database/storage.
 
-| Secret | Gia tri |
-| --- | --- |
-| `VERCEL_TOKEN` | Access token tao tai Vercel Account Settings -> Tokens |
-| `VERCEL_ORG_ID` | `orgId` trong `.vercel/project.json` |
-| `VERCEL_PROJECT_ID` | `projectId` trong `.vercel/project.json` |
+Sau khi push, doi Vercel bao `READY`, doi chieu Git SHA cua deployment voi `git rev-parse HEAD`, kiem `/api/health`, UI phan quyen va checksum du lieu. Thong tin backup/doi chieu lan khoi phuc v2: `annotation-tool/docs/MERGE_RECOVERY_20261101.md`.
 
 ## Luu y ve Git
 

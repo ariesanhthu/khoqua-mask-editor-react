@@ -52,6 +52,13 @@ Toàn bộ truy vấn kiểm tra và sao lưu dùng transaction `REPEATABLE READ
 - Bản sao toàn bộ database và danh mục Blob trước phát hành lưu ngoài repository tại `F:/ANHTHU/1-HCMUS/0-KLTN/server-backup-20261101-before-v2-redeploy/`. Chỉ coi bản sao hợp lệ khi `backup-report.json` có `complete: true` và giải nén/đối chiếu SHA-256 thành công.
 - Sau deploy phải so checksum toàn bộ annotation/phiên bản, các hàng file/nhóm/phân công và danh mục Blob với bản trước deploy, rồi kiểm API nhóm và annotation của `label03`. Không xin khóa hoặc gửi annotation thật trong phép kiểm này.
 
+## Kết quả phát hành và thay đổi phân công trong lúc kiểm tra
+
+- Commit `6312539` đã push lên `master` và deploy qua Vercel Git, deployment `dpl_EKKcMrCtn1z77Jmn8qu65bvQJbCY` báo READY; health trả đúng fingerprint database/Blob hiện có.
+- Đối chiếu lúc **2026-11-01 20:19:38 (UTC+7)**: đủ và không đổi 16 annotation, 106 version, 128 file, 11 nhóm, 2 phân công và 1.002 đối tượng Blob. Cả 5 annotation của label03 trả đúng dữ liệu lưu; báo cáo `post-deploy-verification.json` ngoài repo có `ok: true`.
+- Sau phép đối chiếu, phân công nhóm `8582` được thay sang tài khoản khác lúc **2026-11-01 20:20:35 (UTC+7)**. Đây là thay đổi dữ liệu diễn ra sau deploy/kiểm tra, không phải mất annotation. Không tự ghi đè phân công mới bằng bản sao trước deploy. Giao diện label03 cần phản ánh phân công hiện tại (nhóm 8964); bản lưu cũ ở 8582 vẫn được giữ trong database và ADMIN xem được.
+- GitHub job deploy CLI phụ thất bại do thiếu cả ba Vercel secrets; Vercel Git vẫn deploy thành công. Workflow đã được sửa để chỉ chạy test/lint/typecheck/build, dùng Vercel Git integration đang hoạt động để deploy, tránh hai hệ thống deploy trùng nhau. Không thay secret hoặc project settings.
+
 ## Kiểm chứng bản gộp
 
 - `npm run typecheck`, `npm --prefix annotation-tool test -- --reporter=dot`: 248 test / 28 file qua, gồm quyền theo nhóm, giữ annotation đã lưu, version, prelabel cũ/mới, brush và hình học từ cả hai nhánh.

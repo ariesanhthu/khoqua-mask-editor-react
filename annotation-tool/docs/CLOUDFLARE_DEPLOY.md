@@ -1,5 +1,22 @@
 # Triển khai lên Cloudflare Containers
 
+## Lỗi 10143 khi deploy Worker `khoqua` (2026-11-01)
+
+Log `WORKER_SELF_REFERENCE` trỏ đến `annotation-tool` là cấu hình của adapter OpenNext, khác cấu hình Containers trong repo này (repo không có binding đó). Tên Worker thực tế trong log là `khoqua`, nên self-reference phải dùng chính `khoqua`:
+
+```jsonc
+{
+  "name": "khoqua",
+  "services": [
+    { "binding": "WORKER_SELF_REFERENCE", "service": "khoqua" }
+  ]
+}
+```
+
+Đây chỉ là phần cần khớp trong cấu hình OpenNext đang được dùng, không thay toàn bộ file Wrangler bằng đoạn trên; giữ các binding, assets, cache và secret khác. Lệnh deploy và cấu hình theo environment cũng phải dùng cùng tên. Xem [quy tắc self-reference của OpenNext](https://opennext.js.org/cloudflare/caching).
+
+Cấu hình đã commit của repo là `cloudflare/wrangler.jsonc`, tên `khoqua-mask-editor-react`, chạy Containers và không dùng `WORKER_SELF_REFERENCE`. Cần xác định Root directory, Build command và Deploy command của Worker `khoqua` trước khi sửa cấu hình thực sự; không tự chuyển kiến trúc hoặc tạo Worker `annotation-tool` để lấp lỗi sai tên. Kiểm tra Cloudflare API bằng thông tin cục bộ ngày 2026-11-01 trả 401; chưa thay cấu hình hoặc deploy Cloudflare trong lần sửa này. Lỗi upload Worker không phải thao tác xóa database/annotation.
+
 Cập nhật: 2026-10-25. **Trạng thái: đã chuẩn bị code/cấu hình, CHƯA deploy.** Production hiện vẫn chạy trên Vercel (`docs/vercel-cicd.md` ở gốc repo). Tài liệu này mô tả phương án thứ hai chạy song song, không thay thế Vercel.
 
 ## Quyết định (người dùng xác nhận 2026-10-25)

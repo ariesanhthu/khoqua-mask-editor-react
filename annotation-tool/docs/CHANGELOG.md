@@ -21,6 +21,14 @@ Mẫu một mục:
 
 ---
 
+## 2026-11-01 — Sửa CI deploy trùng và ghi nhận kiểm tra production
+
+- **Lỗi đã xác định:** Vercel Git đã deploy thành công, nhưng GitHub job CLI gọi `vercel pull --token=` vì repository không có Vercel secrets, khiến workflow báo đỏ.
+- **Sửa:** giữ test/lint/typecheck/build trên GitHub, để Vercel Git integration hiện có quản lý preview/production; bỏ hai job CLI deploy trùng. Không đổi mã ứng dụng, biến môi trường hay dữ liệu.
+- **Đã kiểm chứng:** deployment `6312539` READY; kiểm checksum trước/sau ban đầu không mất/đổi 16 annotation, 106 version, 128 ảnh, 11 nhóm, 2 phân công, 1.002 Blob. Kiểm trình duyệt production admin/label03 sau đó 12/12, không gửi request ghi.
+- **Thay đổi bên ngoài trong lúc kiểm tra:** nhóm 8582 được giao lại cho editor01 lúc 20:20:35 (UTC+7); giữ phân công mới, không khôi phục bản cũ. Label03 còn nhóm 8964, dữ liệu label trước đó vẫn nằm trong DB.
+- **Cloudflare:** log Worker khoqua có self-reference sai tên annotation-tool; đã ghi cách sửa đúng trong CLOUDFLARE_DEPLOY.md. Cấu hình OpenNext gây lỗi không có trong checkout này; đang chờ Root directory/build/deploy command để xác định file thực tế, API cục bộ trả 401 nên chưa sửa hoặc deploy Cloudflare.
+
 ## 2026-11-01 — Phát hành lại v2 từ master đã gộp, bảo toàn dữ liệu
 
 - **Người dùng xác nhận:** push master và deploy lại Vercel, giữ dữ liệu label/phân công trước đó.
