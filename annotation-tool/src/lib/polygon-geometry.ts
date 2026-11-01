@@ -317,6 +317,373 @@ export function clonePolygons(polygons: AnnotationPolygon[]): AnnotationPolygon[
   }));
 }
 
+/**
+ * Creates a rectangular AnnotationPolygon from two opposite corners.
+ * Vertices are ordered clockwise: top-left, top-right, bottom-right, bottom-left.
+ */
+export function createRectanglePolygon(
+  start: Pick<PolygonNode, 'x' | 'y'>,
+  end: Pick<PolygonNode, 'x' | 'y'>,
+  label = 'wart_flesh',
+): AnnotationPolygon {
+  const minX = Math.min(start.x, end.x);
+  const maxX = Math.max(start.x, end.x);
+  const minY = Math.min(start.y, end.y);
+  const maxY = Math.max(start.y, end.y);
+
+  return {
+    id: createId(),
+    label,
+    nodes: [
+      { id: createId(), x: Math.round(minX * 10) / 10, y: Math.round(minY * 10) / 10 },
+      { id: createId(), x: Math.round(maxX * 10) / 10, y: Math.round(minY * 10) / 10 },
+      { id: createId(), x: Math.round(maxX * 10) / 10, y: Math.round(maxY * 10) / 10 },
+      { id: createId(), x: Math.round(minX * 10) / 10, y: Math.round(maxY * 10) / 10 },
+    ],
+    meta: { source: 'human' },
+  };
+}
+
+/**
+ * Creates a circular/elliptical AnnotationPolygon with N samples around a center point.
+ * Vertices are ordered clockwise.
+ */
+export function createCirclePolygon(
+  center: Pick<PolygonNode, 'x' | 'y'>,
+  rx: number,
+  ry: number = rx,
+  samples = 32,
+  label = 'wart_flesh',
+): AnnotationPolygon {
+  const count = Math.max(8, samples);
+  const nodes: PolygonNode[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const angle = (index * 2 * Math.PI) / count;
+    nodes.push({
+      id: createId(),
+      x: Math.round((center.x + rx * Math.cos(angle)) * 10) / 10,
+      y: Math.round((center.y + ry * Math.sin(angle)) * 10) / 10,
+    });
+  }
+
+  return {
+    id: createId(),
+    label,
+    nodes,
+    meta: { source: 'human' },
+  };
+}
+
+/**
+ * Inserts a new node into a polygon at a specific edge index, returning the updated polygon and new node.
+ */
+export function insertNodeAtEdge(
+  polygon: AnnotationPolygon,
+  edgeIndex: number,
+  point: Pick<PolygonNode, 'x' | 'y'>,
+): { polygon: AnnotationPolygon; node: PolygonNode } {
+  const node: PolygonNode = {
+    id: createId(),
+    x: Math.round(point.x * 10) / 10,
+    y: Math.round(point.y * 10) / 10,
+    isAnchor: true,
+  };
+  const nodes = [
+    ...polygon.nodes.slice(0, edgeIndex + 1),
+    node,
+    ...polygon.nodes.slice(edgeIndex + 1),
+  ];
+  return {
+    polygon: {
+      ...polygon,
+      nodes,
+      meta: { ...polygon.meta, source: 'human' },
+    },
+    node,
+  };
+}
+
+/**
+ * Calculates cubic Bézier control points for a gentle smooth curve segment from `curr` to `next`.
+ * Applies smooth curvature across vertices with subtle intensity (tension = 0.08),
+ * while strictly capping control point offsets (<= 22% of segment length) so curves
+ * never overshoot, loop, or form protruding lumps ("cục lòi ra").
+ */
+export function getSmoothSegmentControlPoints(
+  prev: { x: number; y: number },
+  curr: { x: number; y: number },
+  next: { x: number; y: number },
+  next2: { x: number; y: number },
+  tension = 0.08,
+): { cp1: { x: number; y: number }; cp2: { x: number; y: number } } {
+  const dSegX = next.x - curr.x;
+  const dSegY = next.y - curr.y;
+  const dSeg = Math.hypot(dSegX, dSegY);
+
+  if (dSeg < 1e-4) {
+    return { cp1: { ...curr }, cp2: { ...next } };
+  }
+
+  const uSegX = dSegX / dSeg;
+  const uSegY = dSegY / dSeg;
+
+  // Incoming direction at curr: (curr - prev)
+  const dInX = curr.x - prev.x;
+  const dInY = curr.y - prev.y;
+  const dIn = Math.hypot(dInX, dInY);
+  const uInX = dIn > 1e-6 ? dInX / dIn : uSegX;
+  const uInY = dIn > 1e-6 ? dInY / dIn : uSegY;
+
+  // Outgoing direction at next: (next2 - next)
+  const dOutX = next2.x - next.x;
+  const dOutY = next2.y - next.y;
+  const dOut = Math.hypot(dOutX, dOutY);
+  const uOutX = dOut > 1e-6 ? dOutX / dOut : uSegX;
+  const uOutY = dOut > 1e-6 ? dOutY / dOut : uSegY;
+
+  // Tangent at curr: smooth normalized bisector
+  const sumCurrX = uInX + uSegX;
+  const sumCurrY = uInY + uSegY;
+  const lenSumCurr = Math.hypot(sumCurrX, sumCurrY);
+  let tCurrX = lenSumCurr > 1e-6 ? sumCurrX / lenSumCurr : uSegX;
+  let tCurrY = lenSumCurr > 1e-6 ? sumCurrY / lenSumCurr : uSegY;
+
+  // Tangent at next: smooth normalized bisector
+  const sumNextX = uSegX + uOutX;
+  const sumNextY = uSegY + uOutY;
+  const lenSumNext = Math.hypot(sumNextX, sumNextY);
+  let tNextX = lenSumNext > 1e-6 ? sumNextX / lenSumNext : uSegX;
+  let tNextY = lenSumNext > 1e-6 ? sumNextY / lenSumNext : uSegY;
+
+  // Severe hairpin reversal guard (> 135 deg reversal)
+  const dotCurr = uInX * uSegX + uInY * uSegY;
+  const dotNext = uSegX * uOutX + uSegY * uOutY;
+  if (dotCurr < -0.7) {
+    tCurrX = uSegX;
+    tCurrY = uSegY;
+  }
+  if (dotNext < -0.7) {
+    tNextX = uSegX;
+    tNextY = uSegY;
+  }
+
+  // Gentle intensity offset: clamped to max 22% of segment length
+  const maxOffset = dSeg * 0.22;
+  const len1 = Math.min(maxOffset, Math.max(0, Math.min(dIn, dSeg) * tension * 1.5));
+  const len2 = Math.min(maxOffset, Math.max(0, Math.min(dSeg, dOut) * tension * 1.5));
+
+  return {
+    cp1: {
+      x: curr.x + tCurrX * len1,
+      y: curr.y + tCurrY * len1,
+    },
+    cp2: {
+      x: next.x - tNextX * len2,
+      y: next.y - tNextY * len2,
+    },
+  };
+}
+
+/**
+ * Checks if a line segment between `start` and `end` lies directly on the boundary of any polygon in `otherPolygons`.
+ * Uses endpoints and midpoint proximity so interior chords or crossing edges are not falsely matched.
+ */
+export function isSegmentOnPolygonsBoundary(
+  start: Pick<PolygonNode, 'x' | 'y'>,
+  end: Pick<PolygonNode, 'x' | 'y'>,
+  otherPolygons: AnnotationPolygon[],
+  tolerance = 2.0,
+): boolean {
+  if (!otherPolygons || !otherPolygons.length) return false;
+  const midX = (start.x + end.x) / 2;
+  const midY = (start.y + end.y) / 2;
+  const segMinX = Math.min(start.x, end.x) - tolerance;
+  const segMaxX = Math.max(start.x, end.x) + tolerance;
+  const segMinY = Math.min(start.y, end.y) - tolerance;
+  const segMaxY = Math.max(start.y, end.y) + tolerance;
+
+  for (const poly of otherPolygons) {
+    if (poly.nodes.length < 2) continue;
+
+    let polyMinX = Infinity;
+    let polyMaxX = -Infinity;
+    let polyMinY = Infinity;
+    let polyMaxY = -Infinity;
+    for (const node of poly.nodes) {
+      if (node.x < polyMinX) polyMinX = node.x;
+      if (node.x > polyMaxX) polyMaxX = node.x;
+      if (node.y < polyMinY) polyMinY = node.y;
+      if (node.y > polyMaxY) polyMaxY = node.y;
+    }
+    if (
+      segMaxX < polyMinX - tolerance ||
+      segMinX > polyMaxX + tolerance ||
+      segMaxY < polyMinY - tolerance ||
+      segMinY > polyMaxY + tolerance
+    ) {
+      continue;
+    }
+
+    let startNear = false;
+    let endNear = false;
+    let midNear = false;
+
+    for (let i = 0; i < poly.nodes.length; i += 1) {
+      const a = poly.nodes[i];
+      const b = poly.nodes[(i + 1) % poly.nodes.length];
+      if (!startNear && closestPointOnSegment(start, a, b).distance <= tolerance) startNear = true;
+      if (!endNear && closestPointOnSegment(end, a, b).distance <= tolerance) endNear = true;
+      if (!midNear && closestPointOnSegment({ x: midX, y: midY }, a, b).distance <= tolerance) midNear = true;
+      if (startNear && endNear && midNear) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Draws a closed smooth path with gentle curvature through given points.
+ * Segments that lie on an existing polygon's boundary are drawn with straight lines (`lineTo`)
+ * without applying smoothing, guaranteeing 100% boundary adherence ("bám dính")
+ * without protruding lumps ("cục lòi ra").
+ */
+export function drawSmoothClosedPath(
+  context: {
+    moveTo(x: number, y: number): void;
+    lineTo(x: number, y: number): void;
+    bezierCurveTo(cp1x: number, cp1y: number, cp2x: number, cp2y: number, x: number, y: number): void;
+    closePath(): void;
+  },
+  nodes: Array<Pick<PolygonNode, 'x' | 'y'>>,
+  tension = 0.08,
+  otherPolygons?: AnnotationPolygon[],
+): void {
+  const n = nodes.length;
+  if (n < 2) return;
+  if (n === 2) {
+    context.moveTo(nodes[0].x, nodes[0].y);
+    context.lineTo(nodes[1].x, nodes[1].y);
+    return;
+  }
+
+  // Precompute which segments are straight/shared boundary segments
+  const isStraight: boolean[] = new Array(n).fill(false);
+  if (otherPolygons && otherPolygons.length > 0) {
+    for (let i = 0; i < n; i += 1) {
+      const curr = nodes[i];
+      const next = nodes[(i + 1) % n];
+      if (isSegmentOnPolygonsBoundary(curr, next, otherPolygons)) {
+        isStraight[i] = true;
+      }
+    }
+  }
+
+  context.moveTo(nodes[0].x, nodes[0].y);
+  for (let i = 0; i < n; i += 1) {
+    const prev = nodes[(i - 1 + n) % n];
+    const curr = nodes[i];
+    const next = nodes[(i + 1) % n];
+    const next2 = nodes[(i + 2) % n];
+
+    if (isStraight[i]) {
+      // Shared boundary segment: follow existing boundary directly without smoothing
+      context.lineTo(next.x, next.y);
+    } else {
+      // Free smoothed segment
+      const prevStraight = isStraight[(i - 1 + n) % n];
+      const nextStraight = isStraight[(i + 1) % n];
+
+      const dSegX = next.x - curr.x;
+      const dSegY = next.y - curr.y;
+      const dSeg = Math.hypot(dSegX, dSegY);
+      if (dSeg < 1e-6) {
+        context.lineTo(next.x, next.y);
+        continue;
+      }
+      const uSegX = dSegX / dSeg;
+      const uSegY = dSegY / dSeg;
+
+      let cp1: { x: number; y: number };
+      let cp2: { x: number; y: number };
+
+      if (prevStraight || nextStraight) {
+        const fullCP = getSmoothSegmentControlPoints(prev, curr, next, next2, tension);
+        cp1 = prevStraight
+          ? { x: curr.x + uSegX * Math.min(dSeg * 0.15, 6), y: curr.y + uSegY * Math.min(dSeg * 0.15, 6) }
+          : fullCP.cp1;
+        cp2 = nextStraight
+          ? { x: next.x - uSegX * Math.min(dSeg * 0.15, 6), y: next.y - uSegY * Math.min(dSeg * 0.15, 6) }
+          : fullCP.cp2;
+      } else {
+        const fullCP = getSmoothSegmentControlPoints(prev, curr, next, next2, tension);
+        cp1 = fullCP.cp1;
+        cp2 = fullCP.cp2;
+      }
+
+      context.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, next.x, next.y);
+    }
+  }
+  context.closePath();
+}
+
+/**
+ * Computes smooth displacements for polygon nodes when dragging an anchor point,
+ * diffusing movement to immediate neighbors with an elastic falloff so corners stay smooth.
+ * Falloff stops at other pinned anchor points (`isAnchor === true`).
+ */
+export function computeSmoothNodeDisplacements(
+  nodes: PolygonNode[],
+  activeNodeIds: Set<string>,
+  deltaX: number,
+  deltaY: number,
+  width: number,
+  height: number,
+): PolygonNode[] {
+  const n = nodes.length;
+  if (activeNodeIds.size !== 1 || n < 5) {
+    return nodes.map((node) => activeNodeIds.has(node.id)
+      ? {
+          ...node,
+          x: Math.max(0, Math.min(width, Math.round((node.x + deltaX) * 10) / 10)),
+          y: Math.max(0, Math.min(height, Math.round((node.y + deltaY) * 10) / 10)),
+        }
+      : node);
+  }
+
+  const draggedId = activeNodeIds.values().next().value;
+  const targetIndex = nodes.findIndex((node) => node.id === draggedId);
+  if (targetIndex === -1) return nodes;
+
+  const weights = new Float64Array(n);
+  weights[targetIndex] = 1.0;
+
+  const maxFalloffDist = n >= 16 ? 3 : n >= 8 ? 2 : 1;
+  const falloffLevels = [0.45, 0.18, 0.05];
+
+  // Positive direction (clockwise)
+  for (let dist = 1; dist <= maxFalloffDist; dist += 1) {
+    const idx = (targetIndex + dist) % n;
+    if (nodes[idx].isAnchor) break;
+    weights[idx] = falloffLevels[dist - 1];
+  }
+
+  // Negative direction (counter-clockwise)
+  for (let dist = 1; dist <= maxFalloffDist; dist += 1) {
+    const idx = (targetIndex - dist + n) % n;
+    if (nodes[idx].isAnchor) break;
+    weights[idx] = falloffLevels[dist - 1];
+  }
+
+  return nodes.map((node, i) => {
+    const w = weights[i];
+    if (w === 0) return node;
+    return {
+      ...node,
+      x: Math.max(0, Math.min(width, Math.round((node.x + deltaX * w) * 10) / 10)),
+      y: Math.max(0, Math.min(height, Math.round((node.y + deltaY * w) * 10) / 10)),
+    };
+  });
+}
+
 export function polygonArea(nodes: Array<Pick<PolygonNode, 'x' | 'y'>>): number {
   let area = 0;
   for (let index = 0; index < nodes.length; index += 1) {
@@ -755,4 +1122,922 @@ export function applyBrushStroke(
     }
   }
   return { error: 'Không xử lý được nét vẽ này. Hãy vẽ lại một nét ngắn hơn.' };
+}
+
+export function closestPointOnSegment(
+  point: { x: number; y: number },
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+): { point: { x: number; y: number }; distance: number; projection: number } {
+  const segmentX = end.x - start.x;
+  const segmentY = end.y - start.y;
+  const lengthSquared = segmentX * segmentX + segmentY * segmentY;
+  if (lengthSquared <= 1e-12) {
+    return { point: { ...start }, distance: Math.hypot(point.x - start.x, point.y - start.y), projection: 0 };
+  }
+  const projection = Math.max(0, Math.min(1, ((point.x - start.x) * segmentX + (point.y - start.y) * segmentY) / lengthSquared));
+  const projectedPoint = {
+    x: Math.round((start.x + projection * segmentX) * 10) / 10,
+    y: Math.round((start.y + projection * segmentY) * 10) / 10,
+  };
+  return {
+    point: projectedPoint,
+    distance: Math.hypot(point.x - projectedPoint.x, point.y - projectedPoint.y),
+    projection,
+  };
+}
+
+export interface SnapTarget {
+  polygonId: string;
+  polygon: AnnotationPolygon;
+  edgeIndex: number;
+  point: { x: number; y: number };
+  distance: number;
+  isVertex: boolean;
+  vertexId?: string;
+  vertexIndex?: number;
+}
+
+export function findSnapTargetToPolygons(
+  polygons: AnnotationPolygon[],
+  point: { x: number; y: number },
+  tolerance: number,
+  excludePolygonId?: string,
+): SnapTarget | null {
+  let closestEdge: SnapTarget | null = null;
+  let closestAnchor: SnapTarget | null = null;
+  // Tight tolerance: only snap directly to a vertex if it is an existing anchor and cursor is directly on it
+  const anchorTolerance = Math.min(tolerance * 0.35, 4.0);
+
+  for (const polygon of polygons) {
+    if (excludePolygonId && polygon.id === excludePolygonId) continue;
+    if (polygon.nodes.length < 3) continue;
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const node of polygon.nodes) {
+      if (node.x < minX) minX = node.x;
+      if (node.x > maxX) maxX = node.x;
+      if (node.y < minY) minY = node.y;
+      if (node.y > maxY) maxY = node.y;
+    }
+    if (
+      point.x < minX - tolerance ||
+      point.x > maxX + tolerance ||
+      point.y < minY - tolerance ||
+      point.y > maxY + tolerance
+    ) {
+      continue;
+    }
+
+    // Check vertices: only snap directly as a vertex if cursor is right on it (within 3px) or directly on an explicit anchor
+    for (let i = 0; i < polygon.nodes.length; i += 1) {
+      const node = polygon.nodes[i];
+      const d = Math.hypot(point.x - node.x, point.y - node.y);
+      const isDirectHit = (node.isAnchor && d <= anchorTolerance) || d <= 3.0;
+      if (isDirectHit && (!closestAnchor || d < closestAnchor.distance)) {
+        closestAnchor = {
+          polygonId: polygon.id,
+          polygon,
+          edgeIndex: i,
+          point: { x: node.x, y: node.y },
+          distance: d,
+          isVertex: true,
+          vertexId: node.id,
+          vertexIndex: i,
+        };
+      }
+    }
+
+    // Check edges: allow clicking anywhere on boundary to create a new anchor
+    for (let edgeIndex = 0; edgeIndex < polygon.nodes.length; edgeIndex += 1) {
+      const start = polygon.nodes[edgeIndex];
+      const end = polygon.nodes[(edgeIndex + 1) % polygon.nodes.length];
+      const candidate = closestPointOnSegment(point, start, end);
+      if (candidate.distance <= tolerance && (!closestEdge || candidate.distance < closestEdge.distance)) {
+        closestEdge = {
+          polygonId: polygon.id,
+          polygon,
+          edgeIndex,
+          point: candidate.point,
+          distance: candidate.distance,
+          isVertex: false,
+        };
+      }
+    }
+  }
+
+  // If user clicked directly on an existing anchor point, snap to it
+  if (closestAnchor) {
+    return closestAnchor;
+  }
+
+  // Otherwise, return edge target (so clicking anywhere on the edge creates a new anchor)
+  return closestEdge;
+}
+
+export function getSharedBoundaryAutofillPath(
+  targetPolygon: AnnotationPolygon,
+  startPoint: { x: number; y: number },
+  endPoint: { x: number; y: number },
+  draftNodes: Array<{ x: number; y: number }>,
+): Array<{ id: string; x: number; y: number; isAnchor: boolean }> | null {
+  const n = targetPolygon.nodes.length;
+  if (n < 3) return null;
+
+  let edgeStart = 0;
+  let minStartDist = Infinity;
+  let edgeEnd = 0;
+  let minEndDist = Infinity;
+
+  for (let i = 0; i < n; i += 1) {
+    const a = targetPolygon.nodes[i];
+    const b = targetPolygon.nodes[(i + 1) % n];
+    const candStart = closestPointOnSegment(startPoint, a, b);
+    if (candStart.distance < minStartDist) {
+      minStartDist = candStart.distance;
+      edgeStart = i;
+    }
+    const candEnd = closestPointOnSegment(endPoint, a, b);
+    if (candEnd.distance < minEndDist) {
+      minEndDist = candEnd.distance;
+      edgeEnd = i;
+    }
+  }
+
+  // Path 1 (Forward from endPoint towards startPoint):
+  // endPoint -> V_{(edgeEnd + 1) % n} -> ... -> V_{edgeStart} -> startPoint
+  const pathForward: Array<{ id: string; x: number; y: number; isAnchor: boolean }> = [];
+  let curr = (edgeEnd + 1) % n;
+  let guard = 0;
+  while (curr !== (edgeStart + 1) % n && guard <= n) {
+    const v = targetPolygon.nodes[curr];
+    if (Math.hypot(v.x - endPoint.x, v.y - endPoint.y) > 2 && Math.hypot(v.x - startPoint.x, v.y - startPoint.y) > 2) {
+      pathForward.push({ id: createId(), x: v.x, y: v.y, isAnchor: true });
+    }
+    curr = (curr + 1) % n;
+    guard += 1;
+  }
+
+  // Path 2 (Backward from endPoint towards startPoint):
+  // endPoint -> V_{edgeEnd} -> ... -> V_{(edgeStart + 1) % n} -> startPoint
+  const pathBackward: Array<{ id: string; x: number; y: number; isAnchor: boolean }> = [];
+  curr = edgeEnd;
+  guard = 0;
+  while (curr !== edgeStart && guard <= n) {
+    const v = targetPolygon.nodes[curr];
+    if (Math.hypot(v.x - endPoint.x, v.y - endPoint.y) > 2 && Math.hypot(v.x - startPoint.x, v.y - startPoint.y) > 2) {
+      pathBackward.push({ id: createId(), x: v.x, y: v.y, isAnchor: true });
+    }
+    curr = (curr - 1 + n) % n;
+    guard += 1;
+  }
+
+  const pathLen = (pts: Array<{ x: number; y: number }>) => {
+    let sum = 0;
+    let prev = endPoint;
+    for (const p of pts) {
+      sum += Math.hypot(p.x - prev.x, p.y - prev.y);
+      prev = p;
+    }
+    sum += Math.hypot(startPoint.x - prev.x, startPoint.y - prev.y);
+    return sum;
+  };
+
+  const lenForward = pathLen(pathForward);
+  const lenBackward = pathLen(pathBackward);
+
+  const hasDraft = Boolean(draftNodes && draftNodes.length >= 2);
+  const distForward = hasDraft ? pathDistanceToDraft(pathForward, startPoint, endPoint, draftNodes) : 0;
+  const distBackward = hasDraft ? pathDistanceToDraft(pathBackward, startPoint, endPoint, draftNodes) : 0;
+
+  // Primary rule: Choose the boundary closest to draftNodes ("biên gần nhất").
+  // If one candidate boundary is closer to what the user is drawing, choose it.
+  if (hasDraft && Math.abs(distForward - distBackward) > 1.0) {
+    return distForward < distBackward ? pathForward : pathBackward;
+  }
+
+  const targetRing = normalizeRing(targetPolygon.nodes.map((p): GeometryPoint => [p.x, p.y]));
+  const targetTotalArea = targetRing ? Math.abs(ringArea(targetRing)) : 0;
+
+  const candidate1Ring = normalizeRing([...draftNodes, ...pathForward].map((p): GeometryPoint => [p.x, p.y]));
+  const candidate2Ring = normalizeRing([...draftNodes, ...pathBackward].map((p): GeometryPoint => [p.x, p.y]));
+
+  let areaIntersect1 = 0;
+  let areaIntersect2 = 0;
+
+  if (targetRing && candidate1Ring) {
+    try {
+      const inter1 = polygonClipping.intersection([candidate1Ring], [targetRing]);
+      for (const p of inter1) for (const r of p) areaIntersect1 += Math.abs(ringArea(r));
+    } catch {
+      areaIntersect1 = 0;
+    }
+  }
+
+  if (targetRing && candidate2Ring) {
+    try {
+      const inter2 = polygonClipping.intersection([candidate2Ring], [targetRing]);
+      for (const p of inter2) for (const r of p) areaIntersect2 += Math.abs(ringArea(r));
+    } catch {
+      areaIntersect2 = 0;
+    }
+  }
+
+  if (targetTotalArea > 10) {
+    if (areaIntersect1 > targetTotalArea * 0.4 && areaIntersect2 <= targetTotalArea * 0.4) {
+      return pathBackward;
+    }
+    if (areaIntersect2 > targetTotalArea * 0.4 && areaIntersect1 <= targetTotalArea * 0.4) {
+      return pathForward;
+    }
+  }
+
+  if (hasDraft) {
+    return distForward <= distBackward ? pathForward : pathBackward;
+  }
+
+  return lenForward <= lenBackward ? pathForward : pathBackward;
+}
+
+/**
+ * Calculates the average distance from sample points along a candidate boundary path to draftNodes.
+ * Used to select the closest boundary ("biên gần nhất") to the user's drawing.
+ */
+export function pathDistanceToDraft(
+  path: Array<{ x: number; y: number }>,
+  startPoint: { x: number; y: number },
+  endPoint: { x: number; y: number },
+  draftNodes: Array<{ x: number; y: number }>,
+): number {
+  if (!draftNodes || draftNodes.length < 2) return 0;
+
+  const candidateNodes = [endPoint, ...path, startPoint];
+  const samplePoints: Array<{ x: number; y: number }> = [];
+
+  for (const p of path) {
+    samplePoints.push(p);
+  }
+
+  for (let i = 0; i < candidateNodes.length - 1; i += 1) {
+    const a = candidateNodes[i];
+    const b = candidateNodes[i + 1];
+    const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+    samplePoints.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+    if (segLen > 15) {
+      samplePoints.push({ x: a.x + 0.25 * (b.x - a.x), y: a.y + 0.25 * (b.y - a.y) });
+      samplePoints.push({ x: a.x + 0.75 * (b.x - a.x), y: a.y + 0.75 * (b.y - a.y) });
+    }
+  }
+
+  if (samplePoints.length === 0) return 0;
+
+  let totalDist = 0;
+  for (const pt of samplePoints) {
+    let minDistToDraft = Infinity;
+    for (let j = 0; j < draftNodes.length - 1; j += 1) {
+      const d1 = draftNodes[j];
+      const d2 = draftNodes[j + 1];
+      const d = closestPointOnSegment(pt, d1, d2).distance;
+      if (d < minDistToDraft) {
+        minDistToDraft = d;
+      }
+    }
+    totalDist += minDistToDraft;
+  }
+
+  return totalDist / samplePoints.length;
+}
+
+export function polygonDistanceToDraft(
+  polygon: AnnotationPolygon,
+  draftNodes: Array<{ x: number; y: number }>,
+): number {
+  if (!draftNodes || draftNodes.length < 2 || !polygon.nodes.length) return 0;
+  let minD = Infinity;
+  for (const n of polygon.nodes) {
+    for (let j = 0; j < draftNodes.length - 1; j += 1) {
+      const d = closestPointOnSegment(n, draftNodes[j], draftNodes[j + 1]).distance;
+      if (d < minD) {
+        minD = d;
+      }
+    }
+  }
+  return minD;
+}
+
+export interface MultiPolygonAutofillResult {
+  nodes: Array<{ id: string; x: number; y: number; isAnchor: boolean }>;
+  targetPolygons: AnnotationPolygon[];
+}
+
+export function arePolygonsTouching(
+  polyA: AnnotationPolygon,
+  polyB: AnnotationPolygon,
+  tolerance = 4,
+): boolean {
+  if (polyA.id === polyB.id) return true;
+  if (!polyA.nodes.length || !polyB.nodes.length) return false;
+
+  let minXA = Infinity;
+  let maxXA = -Infinity;
+  let minYA = Infinity;
+  let maxYA = -Infinity;
+  for (const n of polyA.nodes) {
+    if (n.x < minXA) minXA = n.x;
+    if (n.x > maxXA) maxXA = n.x;
+    if (n.y < minYA) minYA = n.y;
+    if (n.y > maxYA) maxYA = n.y;
+  }
+  let minXB = Infinity;
+  let maxXB = -Infinity;
+  let minYB = Infinity;
+  let maxYB = -Infinity;
+  for (const n of polyB.nodes) {
+    if (n.x < minXB) minXB = n.x;
+    if (n.x > maxXB) maxXB = n.x;
+    if (n.y < minYB) minYB = n.y;
+    if (n.y > maxYB) maxYB = n.y;
+  }
+  if (
+    minXA > maxXB + tolerance ||
+    maxXA < minXB - tolerance ||
+    minYA > maxYB + tolerance ||
+    maxYA < minYB - tolerance
+  ) {
+    return false;
+  }
+
+  // Check vertices of A against segments of B
+  for (const na of polyA.nodes) {
+    for (let i = 0; i < polyB.nodes.length; i += 1) {
+      const b1 = polyB.nodes[i];
+      const b2 = polyB.nodes[(i + 1) % polyB.nodes.length];
+      if (closestPointOnSegment(na, b1, b2).distance <= tolerance) return true;
+    }
+  }
+
+  // Check vertices of B against segments of A
+  for (const nb of polyB.nodes) {
+    for (let i = 0; i < polyA.nodes.length; i += 1) {
+      const a1 = polyA.nodes[i];
+      const a2 = polyA.nodes[(i + 1) % polyA.nodes.length];
+      if (closestPointOnSegment(nb, a1, a2).distance <= tolerance) return true;
+    }
+  }
+
+  return false;
+}
+
+export function arePolygonsConnected(
+  allPolygons: AnnotationPolygon[],
+  startId: string,
+  endId: string,
+  tolerance = 14,
+): boolean {
+  if (startId === endId) return true;
+  const visited = new Set<string>([startId]);
+  const queue = [startId];
+
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    if (currentId === endId) return true;
+    const currentPoly = allPolygons.find((p) => p.id === currentId);
+    if (!currentPoly) continue;
+
+    for (const other of allPolygons) {
+      if (visited.has(other.id)) continue;
+      if (arePolygonsTouching(currentPoly, other, Math.max(tolerance * 0.5, 4))) {
+        visited.add(other.id);
+        queue.push(other.id);
+      }
+    }
+  }
+
+  return false;
+}
+
+export function getConnectedPolygonCluster(
+  allPolygons: AnnotationPolygon[],
+  seedPolygonIds: string[],
+  tolerance = 14,
+): AnnotationPolygon[] {
+  const visited = new Set<string>(seedPolygonIds);
+  const queue = [...seedPolygonIds];
+
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    const currentPoly = allPolygons.find((p) => p.id === currentId);
+    if (!currentPoly) continue;
+
+    for (const other of allPolygons) {
+      if (visited.has(other.id)) continue;
+      if (arePolygonsTouching(currentPoly, other, Math.max(tolerance * 0.5, 4))) {
+        visited.add(other.id);
+        queue.push(other.id);
+      }
+    }
+  }
+
+  return allPolygons.filter((p) => visited.has(p.id));
+}
+
+export function closestPointOnPolygon(
+  polygon: AnnotationPolygon,
+  point: { x: number; y: number },
+): { point: { x: number; y: number }; edgeIndex: number; distance: number } {
+  let minD = Infinity;
+  let bestPoint = point;
+  let bestEdge = 0;
+  const n = polygon.nodes.length;
+  for (let i = 0; i < n; i += 1) {
+    const a = polygon.nodes[i];
+    const b = polygon.nodes[(i + 1) % n];
+    const cand = closestPointOnSegment(point, a, b);
+    if (cand.distance < minD) {
+      minD = cand.distance;
+      bestPoint = cand.point;
+      bestEdge = i;
+    }
+  }
+  return { point: bestPoint, edgeIndex: bestEdge, distance: minD };
+}
+
+const collectiveCache = new Map<string, AnnotationPolygon>();
+
+export function getCachedCollectivePolygon(polygons: AnnotationPolygon[]): AnnotationPolygon | null {
+  if (polygons.length === 0) return null;
+  if (polygons.length === 1) return polygons[0];
+
+  const key = polygons.map((p) => `${p.id}_${p.nodes.length}`).sort().join('|');
+  const cached = collectiveCache.get(key);
+  if (cached) return cached;
+
+  const res = mergePolygonsIntoSingle(polygons);
+  if (res.polygon) {
+    if (collectiveCache.size > 20) collectiveCache.clear();
+    collectiveCache.set(key, res.polygon);
+    return res.polygon;
+  }
+  return null;
+}
+
+/**
+ * Finds shared boundary autofill path between startPoint and endPoint across one or multiple touching polygons.
+ * Groups all existing touching polygons into a collective first so internal seams between adjacent
+ * polygons are completely dissolved, and traces the outer boundary of the collective closest to draftNodes.
+ */
+export function findMultiPolygonAutofillPath(
+  allPolygons: AnnotationPolygon[],
+  startPoint: { x: number; y: number },
+  endPoint: { x: number; y: number },
+  draftNodes: Array<{ x: number; y: number }>,
+  tolerance = 14,
+): MultiPolygonAutofillResult | null {
+  if (!allPolygons || allPolygons.length === 0) return null;
+  if (Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y) < 1.0) {
+    return null;
+  }
+  const startSnap = findSnapTargetToPolygons(allPolygons, startPoint, tolerance);
+  const endSnap = findSnapTargetToPolygons(allPolygons, endPoint, tolerance);
+  if (!startSnap || !endSnap) return null;
+
+  // If start and end are on different polygons, ensure they are connected by a touching chain
+  if (startSnap.polygonId !== endSnap.polygonId) {
+    if (!arePolygonsConnected(allPolygons, startSnap.polygonId, endSnap.polygonId, tolerance)) {
+      return null;
+    }
+  }
+
+  // 1. Group all existing touching polygons into a unified collective
+  // (Dissolves all internal seams between warts, leaving only the true outer contour)
+  const clusterPolygons = getConnectedPolygonCluster(
+    allPolygons,
+    startSnap.polygonId === endSnap.polygonId ? [startSnap.polygonId] : [startSnap.polygonId, endSnap.polygonId],
+    tolerance,
+  );
+
+  let collectivePoly: AnnotationPolygon | null = null;
+  if (clusterPolygons.length === 1) {
+    collectivePoly = clusterPolygons[0];
+  } else {
+    collectivePoly = getCachedCollectivePolygon(clusterPolygons);
+    if (!collectivePoly) {
+      collectivePoly = getCachedCollectivePolygon(allPolygons) ?? clusterPolygons[0];
+    }
+  }
+
+  if (!collectivePoly) return null;
+
+  // 2. Project startSnap.point and endSnap.point onto the outer contour of the collective
+  const collectiveStart = closestPointOnPolygon(collectivePoly, startSnap.point).point;
+  const collectiveEnd = closestPointOnPolygon(collectivePoly, endSnap.point).point;
+
+  // 3. Extract shared boundary path along the outer contour of the collective closest to draftNodes
+  const autofillNodes = getSharedBoundaryAutofillPath(
+    collectivePoly,
+    collectiveStart,
+    collectiveEnd,
+    draftNodes,
+  );
+  if (!autofillNodes) return null;
+
+  // 4. Enrich path with all original boundary nodes from clusterPolygons that lie along the segments
+  const fullPathPoints: Array<{ id: string; x: number; y: number; isAnchor: boolean }> = [];
+  const waypoints = [endSnap.point, ...autofillNodes, startSnap.point];
+
+  for (let i = 0; i < waypoints.length - 1; i += 1) {
+    const p1 = waypoints[i];
+    const p2 = waypoints[i + 1];
+    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    if (segLen < 1e-4) continue;
+
+    const intermediateNodes: Array<{ node: { x: number; y: number }; t: number }> = [];
+    for (const poly of clusterPolygons) {
+      for (const node of poly.nodes) {
+        const cand = closestPointOnSegment(node, p1, p2);
+        if (cand.distance <= 3.0 && cand.projection > 0.02 && cand.projection < 0.98) {
+          const already = intermediateNodes.some((item) => Math.hypot(item.node.x - node.x, item.node.y - node.y) < 1.0);
+          if (!already) {
+            intermediateNodes.push({ node: { x: node.x, y: node.y }, t: cand.projection });
+          }
+        }
+      }
+    }
+    intermediateNodes.sort((a, b) => a.t - b.t);
+
+    for (const item of intermediateNodes) {
+      fullPathPoints.push({ id: createId(), x: item.node.x, y: item.node.y, isAnchor: true });
+    }
+    if (i < waypoints.length - 2) {
+      fullPathPoints.push({ id: createId(), x: p2.x, y: p2.y, isAnchor: true });
+    }
+  }
+
+  // 5. Filter clusterPolygons to only those that actually contribute to the chosen boundary
+  const pathPoints = [endSnap.point, ...fullPathPoints, startSnap.point];
+  const contributingPolygons = clusterPolygons.filter((poly) => {
+    return pathPoints.some((pt) => {
+      for (let i = 0; i < poly.nodes.length; i += 1) {
+        const a = poly.nodes[i];
+        const b = poly.nodes[(i + 1) % poly.nodes.length];
+        if (closestPointOnSegment(pt, a, b).distance <= 2.5) return true;
+      }
+      return false;
+    });
+  });
+
+  return {
+    nodes: fullPathPoints,
+    targetPolygons: contributingPolygons.length > 0 ? contributingPolygons : clusterPolygons,
+  };
+}
+
+export function ensurePolygonHasNodeAt(
+  polygon: AnnotationPolygon,
+  point: { x: number; y: number },
+  tolerance = 4,
+): { polygon: AnnotationPolygon; node: PolygonNode; inserted: boolean } {
+  const existingIndex = polygon.nodes.findIndex((n) => Math.hypot(n.x - point.x, n.y - point.y) <= tolerance);
+  if (existingIndex !== -1) {
+    return { polygon, node: polygon.nodes[existingIndex], inserted: false };
+  }
+  let closestEdge = 0;
+  let minDistance = Infinity;
+  let closestPoint = point;
+  for (let i = 0; i < polygon.nodes.length; i += 1) {
+    const start = polygon.nodes[i];
+    const end = polygon.nodes[(i + 1) % polygon.nodes.length];
+    const cand = closestPointOnSegment(point, start, end);
+    if (cand.distance < minDistance) {
+      minDistance = cand.distance;
+      closestEdge = i;
+      closestPoint = cand.point;
+    }
+  }
+  const result = insertNodeAtEdge(polygon, closestEdge, closestPoint);
+  return { polygon: result.polygon, node: result.node, inserted: true };
+}
+
+export function clipPolygonDifference(
+  subjectNodes: PolygonNode[],
+  clipPolygonNodes: PolygonNode[],
+): PolygonNode[] | null {
+  if (subjectNodes.length < 3 || clipPolygonNodes.length < 3) return null;
+  const subjectRing = normalizeRing(subjectNodes.map((n): GeometryPoint => [n.x, n.y]));
+  const clipRing = normalizeRing(clipPolygonNodes.map((n): GeometryPoint => [n.x, n.y]));
+  if (!subjectRing || !clipRing) return null;
+
+  try {
+    const intersection = polygonClipping.intersection([subjectRing], [clipRing]);
+    if (!intersection || intersection.length === 0) return null;
+    let intersectionArea = 0;
+    for (const poly of intersection) {
+      for (const ring of poly) {
+        intersectionArea += Math.abs(ringArea(ring));
+      }
+    }
+    if (intersectionArea < 15) return null;
+
+    const diff = polygonClipping.difference([subjectRing], [clipRing]);
+    if (!diff || diff.length === 0) return null;
+
+    let largestPoly: GeometryPolygon | null = null;
+    let maxArea = -1;
+    for (const poly of diff) {
+      if (poly.length > 0) {
+        const area = Math.abs(ringArea(poly[0]));
+        if (area > maxArea) {
+          maxArea = area;
+          largestPoly = poly;
+        }
+      }
+    }
+    if (!largestPoly || largestPoly.length === 0 || maxArea < 10) return null;
+
+    const outerRing = largestPoly[0];
+    const points = outerRing.slice(0, outerRing.length - 1);
+    if (points.length < 3) return null;
+
+    return points.map(([x, y]) => ({
+      id: createId(),
+      x: Math.round(x * 10) / 10,
+      y: Math.round(y * 10) / 10,
+      isAnchor: true,
+    }));
+  } catch {
+    return null;
+  }
+}
+
+export function raySegmentIntersection(
+  origin: { x: number; y: number },
+  dirX: number,
+  dirY: number,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+): number | null {
+  const vX = end.x - start.x;
+  const vY = end.y - start.y;
+  const denom = dirX * vY - dirY * vX;
+  if (Math.abs(denom) < 1e-7) return null;
+
+  const dX = start.x - origin.x;
+  const dY = start.y - origin.y;
+  const t = (dX * vY - dY * vX) / denom;
+  const u = (dX * dirY - dY * dirX) / denom;
+
+  if (t > 1e-3 && u >= -1e-4 && u <= 1 + 1e-4) {
+    return t;
+  }
+  return null;
+}
+
+/**
+ * Checks if a query point lies in an empty void/pocket completely surrounded by existing polygons.
+ * If surrounded, computes and returns the new polygon that fills this enclosed void with 100% boundary adherence.
+ */
+export function findEnclosedPocketAtPoint(
+  allPolygons: AnnotationPolygon[],
+  point: { x: number; y: number },
+  maxRadius = 250,
+): AnnotationPolygon | null {
+  if (!allPolygons || allPolygons.length < 2) return null;
+
+  // 1. Must not be inside any existing polygon
+  for (const poly of allPolygons) {
+    if (pointInPolygon(point, poly.nodes)) return null;
+  }
+
+  // 2. Must not be right on an edge (within 3px) - that's for edge snapping / anchor creation
+  for (const poly of allPolygons) {
+    const len = poly.nodes.length;
+    for (let i = 0; i < len; i += 1) {
+      const a = poly.nodes[i];
+      const b = poly.nodes[(i + 1) % len];
+      if (closestPointOnSegment(point, a, b).distance <= 3.0) return null;
+    }
+  }
+
+  // 3. Filter nearby polygons
+  const nearby = allPolygons.filter((p) => {
+    return p.nodes.some((n) => Math.hypot(n.x - point.x, n.y - point.y) <= maxRadius + 50);
+  });
+  if (nearby.length < 2) return null;
+
+  // 4. Radial enclosure test: cast rays in 12 directions (every 30 deg).
+  // All 12 rays MUST hit a polygon boundary within maxRadius.
+  const numRays = 12;
+  let maxHit = 0;
+  for (let r = 0; r < numRays; r += 1) {
+    const angle = (r * 2 * Math.PI) / numRays;
+    const rayCos = Math.cos(angle);
+    const raySin = Math.sin(angle);
+    let closestHit = Infinity;
+    for (const poly of nearby) {
+      const n = poly.nodes.length;
+      for (let i = 0; i < n; i += 1) {
+        const a = poly.nodes[i];
+        const b = poly.nodes[(i + 1) % n];
+        const hit = raySegmentIntersection(point, rayCos, raySin, a, b);
+        if (hit !== null && hit > 1.0 && hit < closestHit) {
+          closestHit = hit;
+        }
+      }
+    }
+    if (closestHit > maxRadius) {
+      return null; // Open to exterior
+    }
+    if (closestHit > maxHit) {
+      maxHit = closestHit;
+    }
+  }
+  if (maxHit < 4.0) return null;
+
+  const buildPocketPolygon = (
+    rawNodes: Array<{ x: number; y: number }>,
+    surroundingPolys: AnnotationPolygon[],
+  ): AnnotationPolygon | null => {
+    const area = polygonArea(rawNodes);
+    let nodes = area < 0 ? [...rawNodes].reverse() : [...rawNodes];
+
+    // Snap each node to closest boundary of surrounding polygons
+    nodes = nodes.map((nd) => {
+      let bestPt = { x: nd.x, y: nd.y };
+      let bestDist = Infinity;
+      for (const poly of surroundingPolys) {
+        const n = poly.nodes.length;
+        for (let i = 0; i < n; i += 1) {
+          const a = poly.nodes[i];
+          const b = poly.nodes[(i + 1) % n];
+          const cand = closestPointOnSegment(nd, a, b);
+          if (cand.distance < bestDist) {
+            bestDist = cand.distance;
+            bestPt = cand.point;
+          }
+        }
+      }
+      if (bestDist <= 6.0) {
+        return { ...nd, x: bestPt.x, y: bestPt.y };
+      }
+      return nd;
+    });
+
+    // Enrich edges with any original nodes from surroundingPolys
+    const enriched: Array<{ x: number; y: number }> = [];
+    const count = nodes.length;
+    for (let i = 0; i < count; i += 1) {
+      const p1 = nodes[i];
+      const p2 = nodes[(i + 1) % count];
+      enriched.push(p1);
+
+      const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      if (segLen > 2.0) {
+        const inter: Array<{ pt: { x: number; y: number }; t: number }> = [];
+        for (const poly of surroundingPolys) {
+          for (const orig of poly.nodes) {
+            const cand = closestPointOnSegment(orig, p1, p2);
+            if (cand.distance <= 2.5 && cand.projection > 0.03 && cand.projection < 0.97) {
+              const dup = inter.some((item) => Math.hypot(item.pt.x - orig.x, item.pt.y - orig.y) < 1.0);
+              if (!dup) {
+                inter.push({ pt: { x: orig.x, y: orig.y }, t: cand.projection });
+              }
+            }
+          }
+        }
+        inter.sort((a, b) => a.t - b.t);
+        for (const item of inter) {
+          enriched.push(item.pt);
+        }
+      }
+    }
+
+    // Filter near-duplicates
+    const filtered = enriched.filter((pt, idx) =>
+      idx === 0 || Math.hypot(pt.x - enriched[idx - 1].x, pt.y - enriched[idx - 1].y) >= 1.0
+    );
+
+    if (filtered.length < 3 || Math.abs(polygonArea(filtered)) < 15) {
+      return null;
+    }
+
+    return {
+      id: createId(),
+      label: 'wart_flesh',
+      nodes: filtered.map((pt) => ({
+        id: createId(),
+        x: Math.round(pt.x * 10) / 10,
+        y: Math.round(pt.y * 10) / 10,
+        isAnchor: true,
+      })),
+    };
+  };
+
+  // Method 1: Check holes in the union of nearby polygons
+  const rings: GeometryRing[] = nearby
+    .map((p) => normalizeRing(p.nodes.map((n): GeometryPoint => [n.x, n.y])))
+    .filter((r): r is GeometryRing => Boolean(r));
+
+  if (rings.length >= 2) {
+    let unionComps: GeometryMultiPolygon = [];
+    try {
+      unionComps = unionGeometries(rings.map((r) => [r]));
+    } catch {
+      unionComps = [];
+    }
+
+    for (const comp of unionComps) {
+      for (let h = 1; h < comp.length; h += 1) {
+        const holeRing = comp[h];
+        const holeNodes = holeRing.map(([x, y]) => ({ id: createId(), x, y, isAnchor: true }));
+        if (pointInPolygon(point, holeNodes)) {
+          return buildPocketPolygon(holeNodes, nearby);
+        }
+      }
+    }
+
+    // Method 2: Bridge components across small gaps <= 8px and check holes
+    if (unionComps.length > 1) {
+      const edges: Array<{ from: number; to: number; distance: number; pointA: { x: number; y: number }; pointB: { x: number; y: number } }> = [];
+      for (let from = 0; from < unionComps.length; from += 1) {
+        for (let to = from + 1; to < unionComps.length; to += 1) {
+          const bp = closestBoundaryPoints(unionComps[from][0], unionComps[to][0]);
+          if (bp.distance <= 8.0) {
+            edges.push({ from, to, ...bp });
+          }
+        }
+      }
+      if (edges.length > 0) {
+        const bridges: GeometryPolygon[] = [];
+        for (const edge of edges) {
+          bridges.push(createBridge(edge.pointA, edge.pointB, 3));
+        }
+        try {
+          const bridgedComps = unionGeometries([...unionComps, ...bridges]);
+          for (const comp of bridgedComps) {
+            for (let h = 1; h < comp.length; h += 1) {
+              const holeRing = comp[h];
+              const holeNodes = holeRing.map(([x, y]) => ({ id: createId(), x, y, isAnchor: true }));
+              if (pointInPolygon(point, holeNodes)) {
+                return buildPocketPolygon(holeNodes, nearby);
+              }
+            }
+          }
+        } catch {
+          // Fall through to Method 3
+        }
+      }
+    }
+  }
+
+  // Method 3: Box difference with dilated rings
+  const boxRadius = maxHit + 30;
+  const boxRing: GeometryRing = [
+    [point.x - boxRadius, point.y - boxRadius],
+    [point.x + boxRadius, point.y - boxRadius],
+    [point.x + boxRadius, point.y + boxRadius],
+    [point.x - boxRadius, point.y + boxRadius],
+  ];
+
+  try {
+    const dilatedPolygons: GeometryPolygon[] = [];
+    for (const poly of nearby) {
+      const pRing = normalizeRing(poly.nodes.map((n): GeometryPoint => [n.x, n.y]));
+      if (!pRing) continue;
+      const segBridges: GeometryPolygon[] = [];
+      const n = poly.nodes.length;
+      for (let i = 0; i < n; i += 1) {
+        segBridges.push(createBridge(poly.nodes[i], poly.nodes[(i + 1) % n], 4));
+      }
+      try {
+        const dilated = unionGeometries([[pRing], ...segBridges]);
+        dilatedPolygons.push(...dilated);
+      } catch {
+        dilatedPolygons.push([pRing]);
+      }
+    }
+
+    const diff = polygonClipping.difference([boxRing], ...dilatedPolygons);
+    for (const comp of diff) {
+      const outerRing = comp[0];
+      const outerNodes = outerRing.map(([x, y]) => ({ id: createId(), x, y, isAnchor: true }));
+      if (pointInPolygon(point, outerNodes)) {
+        const touchesBox = outerRing.some(([x, y]) =>
+          Math.abs(x - (point.x - boxRadius)) < 3 ||
+          Math.abs(x - (point.x + boxRadius)) < 3 ||
+          Math.abs(y - (point.y - boxRadius)) < 3 ||
+          Math.abs(y - (point.y + boxRadius)) < 3
+        );
+        if (!touchesBox) {
+          return buildPocketPolygon(outerNodes, nearby);
+        }
+      }
+    }
+  } catch {
+    // Difference error
+  }
+
+  return null;
 }

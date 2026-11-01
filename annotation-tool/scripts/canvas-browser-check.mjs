@@ -193,14 +193,14 @@ try {
   await ctrl('y'); await sleep(80); await ctrl('z'); await sleep(200);
   await enter(); await sleep(400);
   s = await state();
-  check('Enter completes polygon with exactly 3 nodes (2 points undone)', field(s.status, 'masks') === '3' && /last=r3:3/.test(s.history), `${s.status} | ${s.history}`);
+  check('Enter completes polygon with exactly 3 nodes (2 points undone)', field(s.status, 'masks') === '3' && /last=w1:3/.test(s.history), `${s.status} | ${s.history}`);
   check('after completion history is global', field(s.history, 'local') === 'false', s.history);
   await ctrl('z'); await sleep(300);
   s = await state();
   check('global Ctrl+Z removes the completed polygon', field(s.status, 'masks') === '2', s.status);
   await ctrl('y'); await sleep(300);
   s = await state();
-  check('global Ctrl+Y restores it', field(s.status, 'masks') === '3' && /last=r3:3/.test(s.history), `${s.status} | ${s.history}`);
+  check('global Ctrl+Y restores it', field(s.status, 'masks') === '3' && /last=w1:3/.test(s.history), `${s.status} | ${s.history}`);
 
   // Toolbar undo/redo (imperative handle) on draft points
   to = await imageToScreen(800, 500);
@@ -213,7 +213,7 @@ try {
   await sleep(100);
   await enter(); await sleep(400);
   s = await state();
-  check('handle redo() restores the point → 4 nodes', /last=r4:4/.test(s.history), s.history);
+  check('handle redo() restores the point → 4 nodes', /last=w2:4/.test(s.history), s.history);
 
   // Double-click completion drops the vertex duplicated by the second pointerdown
   to = await imageToScreen(800, 500);
@@ -221,7 +221,7 @@ try {
   { const p = to(40, 480); await click(p.x, p.y, { clickCount: 1 }); await click(p.x, p.y, { clickCount: 2 }); }
   await sleep(400);
   s = await state();
-  check('double-click completes with 4 nodes (no duplicate)', /last=r5:4/.test(s.history), s.history);
+  check('double-click completes with 4 nodes (no duplicate)', /last=w3:4/.test(s.history), s.history);
 
   // Right-click removes a draft point; Ctrl+Z restores it
   to = await imageToScreen(800, 500);
@@ -231,7 +231,7 @@ try {
   await ctrl('z'); await sleep(150);
   await enter(); await sleep(400);
   s = await state();
-  check('right-click node removal is undoable → 4 nodes', /last=r6:4/.test(s.history), s.history);
+  check('right-click node removal is undoable → 4 nodes', /last=w4:4/.test(s.history), s.history);
 
   // Escape cancels the draft; Enter then adds nothing (< 3 nodes)
   to = await imageToScreen(800, 500);
@@ -269,6 +269,39 @@ try {
   s = await state();
   check('wheel zoom increases scale', Number(field(s.status, 'zoom')) > 1.2, s.status);
   await clickButtonText('Fit'); await sleep(300);
+
+  // The merged tools share the same undo history as the local brush editor.
+  await send('Page.navigate', { url: `${base}/canvas-browser-check` });
+  await waitFor(pageReady, 120000); await sleep(700);
+  await clickButtonText('Fit'); await sleep(200);
+  to = await imageToScreen(800, 500);
+  await clickSelector('button[data-tool=rectangle]'); await sleep(150);
+  await drag(to, [300, 100], [400, 180], 10); await sleep(300);
+  s = await state();
+  check('rectangle creates one four-node instance', field(s.status, 'masks') === '3' && /last=w1:4/.test(s.history), `${s.status} | ${s.history}`);
+  await ctrl('z'); await sleep(200);
+  check('rectangle undo restores the previous mask', (await evaluate(masksOf)) === 2);
+  await ctrl('y'); await sleep(200);
+  await clickSelector('button[data-tool=circle]'); await sleep(150);
+  to = await imageToScreen(800, 500);
+  await drag(to, [340, 280], [430, 360], 10); await sleep(300);
+  s = await state();
+  check('circle creates a 32-node instance after rectangle redo', field(s.status, 'masks') === '4' && /last=w2:32/.test(s.history), `${s.status} | ${s.history}`);
+  await clickSelector('button[data-tool=anchor]'); await sleep(150);
+  to = await imageToScreen(800, 500);
+  await drag(to, [350, 100], [350, 85], 10); await sleep(300);
+  s = await state();
+  check('anchor adds one boundary node while preserving all masks', field(s.status, 'masks') === '4' && field(s.history, 'totalNodes') === '45', `${s.status} | ${s.history}`);
+  await ctrl('z'); await sleep(200);
+  s = await state();
+  check('anchor undo restores the original boundary', field(s.history, 'totalNodes') === '44', s.history);
+  await clickSelector('button[data-tool=select]'); await sleep(150);
+  await ctrl('a'); await sleep(200);
+  check('Ctrl+A selects every polygon', field((await state()).history, 'selected') === '4');
+  await key('Delete', 'Delete', 46); await sleep(200);
+  check('Delete removes selected polygons', (await evaluate(masksOf)) === 0);
+  await ctrl('z'); await sleep(200);
+  check('undo restores all selected polygons', (await evaluate(masksOf)) === 4);
 
   // ── Large polygon-mode file (600 saved polygons, 2400×1600) under 4× CPU throttle ──
   await send('Emulation.setCPUThrottlingRate', { rate: 4 });

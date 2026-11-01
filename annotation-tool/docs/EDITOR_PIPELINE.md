@@ -1,5 +1,7 @@
 # Editor pipeline và hợp đồng chức năng
 
+Merge 2026-11-01: giữ Home theo nhóm/phân công và pipeline lưu/brush/undo v2; thêm công cụ R (hình chữ nhật), C (tròn/oval), A (điểm neo), Ctrl+A chọn toàn bộ, snap/tự nối biên/điền vùng kín từ remote. Polygon mới dùng nhãn `w*`; dữ liệu đã lưu không tự bị đổi khi mở. Các công cụ mới dùng chung lịch sử, revision và đồng bộ raster của local. Xem [MERGE_RECOVERY_20261101.md](MERGE_RECOVERY_20261101.md).
+
 Kiến trúc và backlog: [ARCHITECTURE.md](ARCHITECTURE.md). Bản cập nhật và quy trình bảo toàn dữ liệu ngày 2026-09-14: [DRIVE_NATIVE_20260914.md](DRIVE_NATIVE_20260914.md). Đã deploy Vercel. Tối ưu render 2026-10-25 (đã deploy cùng ngày): [EDITOR_RENDERING.md](EDITOR_RENDERING.md). Thao tác chuột/phím trên canvas được kiểm tra tự động bằng Chrome headless trên trang dữ liệu giả (`scripts/canvas-browser-check.mjs`); chưa kiểm thử tay trên thiết bị thật và dữ liệu thật.
 
 ## Pipeline dữ liệu
@@ -51,3 +53,7 @@ Người dùng nhấn mạnh (2026-10-25) giữ nguyên hành vi này; khóa b�
 - Render: không vẽ lại ảnh gốc cho thay đổi nội dung; không `getImageData` trên lớp hiển thị; raster nhị phân và raster của worker phải đúng từng pixel với `rasterizePolygons`. Danh sách đầy đủ: [EDITOR_RENDERING.md](EDITOR_RENDERING.md) §6.
 - Sau khi sửa canvas: chạy `node scripts/canvas-browser-check.mjs http://localhost:3217` trên dev server cô lập (hướng dẫn ở đầu script) ngoài 4 cổng.
 - Trước khi deploy phải chạy `npm run typecheck`, `npm test`, `npm run lint` và `npm run build`.
+
+## Đọc prelabel — cập nhật 2026-10-30
+
+Ảnh chưa có annotation mở được cả prelabel schema 1.0 và 1.1, nhãn legacy hoặc instance `rN`/`wN`. Bộ đọc không sửa dữ liệu nguồn. Prelabel sai cấu trúc trả lỗi 422 có thông báo, không thay bằng mask rỗng. Annotation đã lưu không bị tái tạo từ prelabel. Chi tiết: [PRELABEL_COMPATIBILITY.md](PRELABEL_COMPATIBILITY.md).

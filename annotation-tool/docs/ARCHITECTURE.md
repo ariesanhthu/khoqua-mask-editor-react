@@ -1,5 +1,7 @@
 # Kiến trúc hệ thống và bàn giao agent
 
+Khôi phục merge 2026-11-01: Home v2, phân công và dữ liệu `label03` được đối chiếu chỉ đọc; chi tiết nguyên nhân, phạm vi dữ liệu và bản sao tại [MERGE_RECOVERY_20261101.md](MERGE_RECOVERY_20261101.md). Bản gộp giữ pipeline brush/vector/undo local và đưa rectangle/circle/anchor, snap/tự nối biên từ remote vào cùng canvas; không reset dữ liệu hay phân công.
+
 Cập nhật: 2026-09-09; bổ sung 2026-10-25 (nhóm ảnh, phân công theo nhóm, nhập thư mục mặc định/COCO 1.0, Home theo nhóm — chi tiết ở [GROUPS_AND_IMPORT.md](GROUPS_AND_IMPORT.md); tối ưu render editor, nhập COCO 1.0 trong editor — [EDITOR_RENDERING.md](EDITOR_RENDERING.md)). Đọc tài liệu này cùng [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) và `../AGENTS.md` trước khi sửa.
 
 ## Trạng thái bàn giao
@@ -271,3 +273,7 @@ Các điểm sau được ghi nhận để agent tiếp tục; **chưa sửa/xá
 - Dev server thử nghiệm port 3100 đã được dừng khi bàn giao. Chỉ gọi `/api/health`, chưa seed, chưa chạy API mutation E2E.
 - `/api/health` chỉ kiểm tra cờ cấu hình Postgres/Blob nên có thể trả 503 khi cố ý chạy PGlite/filesystem; không đủ để kết luận local database hỏng.
 - `.env` và `.env.local` có cấu hình production thật. Không gọi `/api/seed` hoặc test mutation trước khi xác minh kết nối đã cách ly. PowerShell gán env chuỗi rỗng có thể xóa biến và khiến Next tải lại `.env`; gọi `@next/env` trước rồi mới override cũng có thể bị cache env khôi phục. Script hỗ trợ local `artifacts/run-isolated-dev.cjs` đã bỏ bước load env trước override; vẫn phải kiểm tra lại isolation trước mutation. Không chép secret vào tài liệu/log.
+
+## Tương thích prelabel — cập nhật 2026-10-30
+
+`prelabel-service.ts` đọc schema `bitter-melon-prelabel-1.0` và `1.1`, nhãn legacy hoặc instance `rN`/`wN`, giữ nguyên hình học và metadata. API editor trả `422 INVALID_ANNOTATION` nếu prelabel không hợp lệ và vẫn bỏ qua prelabel khi đã có annotation lưu trên server. Không đổi schema DB hoặc storage backend. Xem [PRELABEL_COMPATIBILITY.md](PRELABEL_COMPATIBILITY.md).

@@ -77,7 +77,7 @@ export default function BrowserCheck() {
     setExported('PNG center alpha=' + ctx.getImageData(400, 250, 1, 1).data[3] + '; mask alpha=' + ctx.getImageData(220, 250, 1, 1).data[3]);
   };
   const chooseTool = (next: EditorTool) => {
-    if (next === 'select' || next === 'polygon') ref.current?.beginPolygonEdit();
+    if (next !== 'brush' && next !== 'pan') ref.current?.beginPolygonEdit();
     setTool(next);
   };
   if (scene === undefined) return null;
@@ -93,10 +93,13 @@ export default function BrowserCheck() {
       <button data-tool="select" onClick={() => chooseTool('select')}>Select</button>
       <button data-tool="brush" onClick={() => chooseTool('brush')}>Brush</button>
       <button data-tool="polygon" onClick={() => chooseTool('polygon')}>Polygon</button>
+      <button data-tool="rectangle" onClick={() => chooseTool('rectangle')}>Rectangle</button>
+      <button data-tool="circle" onClick={() => chooseTool('circle')}>Circle</button>
+      <button data-tool="anchor" onClick={() => chooseTool('anchor')}>Anchor</button>
       <button data-action="flush" onClick={async () => { await ref.current?.flushPendingEdits(); await ref.current?.exportMask(); setMessage('flushed'); }}>Flush</button>
     </div>
     <p>Mode={mode}; tool={tool}; masks={polygons.length}; holes={polygons.reduce((n, p) => n + (p.holes?.length ?? 0), 0)}; center filled={String(polygons.some((p) => pointInMask({ x: 400, y: 250 }, p)))}; zoom={zoom.toFixed(4)}</p>
-    <p data-testid="history">history local={String(history.local)}; canUndo={String(history.canUndo)}; canRedo={String(history.canRedo)}; last={polygons.at(-1)?.label ?? '-'}:{polygons.at(-1)?.nodes.length ?? 0}; selected={selected.length}; maxNodes={polygons.reduce((max, polygon) => Math.max(max, polygon.nodes.length + (polygon.holes ?? []).reduce((sum, hole) => sum + hole.length, 0)), 0)}</p>
+    <p data-testid="history">history local={String(history.local)}; canUndo={String(history.canUndo)}; canRedo={String(history.canRedo)}; last={polygons.at(-1)?.label ?? '-'}:{polygons.at(-1)?.nodes.length ?? 0}; selected={selected.length}; totalNodes={polygons.reduce((sum, polygon) => sum + polygon.nodes.length, 0)}; maxNodes={polygons.reduce((max, polygon) => Math.max(max, polygon.nodes.length + (polygon.holes ?? []).reduce((sum, hole) => sum + hole.length, 0)), 0)}</p>
     <p>{message} {exported}</p>
     <div className="editor-shell" style={{ width: 900, height: 580 }}>
       <div className="editor-main" style={{ position: 'relative', width: '100%', height: '100%' }}>

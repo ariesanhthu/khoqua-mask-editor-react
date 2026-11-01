@@ -21,13 +21,13 @@ import type {
 import { photoLevelFor, photoPyramidSizes, renderPixelRatio, zoomViewAt } from '@/lib/canvas-view';
 import { forEachPolygonSpan, normalizeMaskRgba, polygonPixelRect, simplifyRing, smoothPolygon } from '@/lib/mask-pixels';
 import { nextLabel, semanticForLabelKind, type PolygonLabelKind } from '@/lib/polygon-labels';
-import { clonePolygons, mergePolygonsIntoSingle, pointInMask, polygonRings, type BrushMode } from '@/lib/polygon-geometry';
+import { clipPolygonDifference, clonePolygons, computeSmoothNodeDisplacements, createCirclePolygon, createRectanglePolygon, drawSmoothClosedPath, ensurePolygonHasNodeAt, findEnclosedPocketAtPoint, findMultiPolygonAutofillPath, findSnapTargetToPolygons, getSmoothSegmentControlPoints, insertNodeAtEdge, mergePolygonsIntoSingle, pointInMask, polygonRings, resolvePolygonCut, type BrushMode, type SnapTarget } from '@/lib/polygon-geometry';
 import { PolygonDraft } from '@/lib/polygon-draft';
 import { packedTransfer, packGeometry, unpackPolygons } from '@/lib/polygon-pack';
 import { polygonBounds, preserveVectorIdentity, type PolygonBounds } from '@/lib/vector-identity';
 import type { MaskWorkerRequest, MaskWorkerResponse } from '@/lib/brush-worker';
 
-export type EditorTool = 'polygon' | 'select' | 'brush' | 'point' | 'pan';
+export type EditorTool = 'polygon' | 'rectangle' | 'circle' | 'anchor' | 'select' | 'cut' | 'brush' | 'point' | 'pan';
 
 export interface EditorCanvasSnapshot {
   humanAction: HumanAction;
@@ -51,6 +51,8 @@ export interface EditorCanvasHandle {
   redo(): void;
   deleteSelectedPoint(): void;
   deleteSelection(): void;
+  selectAllPolygons(): void;
+  clearAllPolygons(): void;
   confirmNoBreakpoint(): void;
   completePolygon(): boolean;
   cancelCurrentPath(): void;
@@ -109,14 +111,19 @@ type Marquee = { start: ImagePoint; end: ImagePoint; additive: boolean };
 type PointerActivity =
   | { id: number; mode: 'pan'; lastClient: ImagePoint }
   | { id: number; mode: 'brush'; last: ImagePoint; brushMode: BrushMode; radius: number }
-  | { id: number; mode: 'nodes'; start: ImagePoint; original: AnnotationPolygon[]; nodeIds: Set<string>; polygonIds: Set<string>; moved: boolean }
+  | { id: number; mode: 'nodes'; start: ImagePoint; original: AnnotationPolygon[]; historyBefore?: AnnotationPolygon[]; nodeIds: Set<string>; polygonIds: Set<string>; moved: boolean }
   | { id: number; mode: 'marquee'; start: ImagePoint; additive: boolean; clickPolygonId?: string }
-  | { id: number; mode: 'point'; pointBefore: BreakpointPoint[]; draggedPointId: string; moved: boolean };
+  | { id: number; mode: 'point'; pointBefore: BreakpointPoint[]; draggedPointId: string; moved: boolean }
+  | { id: number; mode: 'polygons'; start: ImagePoint; original: AnnotationPolygon[]; polygonIds: Set<string>; moved: boolean }
+  | { id: number; mode: 'cut'; last: ImagePoint }
+  | { id: number; mode: 'rectangle'; start: ImagePoint; current: ImagePoint }
+  | { id: number; mode: 'circle'; start: ImagePoint; current: ImagePoint; shiftKey: boolean; altKey: boolean };
 
 const POLYGON_FILL = '#7c5cfa';
 const POLYGON_STROKE = '#7c5cfa';
 // Wart overlay temporarily hidden: const BREAKPOINT_COLOR = '#6d4ef2';
 const ERASE_COLOR = '#f04438';
+const CUT_COLOR = '#f04438';
 
 const polygonPathCache = new WeakMap<AnnotationPolygon, Path2D>();
 function polygonPath(polygon: AnnotationPolygon): Path2D {
@@ -341,6 +348,18 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   const hoveredNodeRef = useRef<PolygonNode | null>(null);
   const lastHistoryRef = useRef('');
   const polygonHoverRef = useRef<ImagePoint | null>(null);
+  const snapTargetRef = useRef<SnapTarget | null>(null);
+  const draftAutofillRef = useRef<{
+    polygon?: AnnotationPolygon;
+    targetPolygons?: AnnotationPolygon[];
+    nodes: Array<{ id: string; x: number; y: number; isAnchor: boolean }>;
+    closingToStart?: boolean;
+  } | null>(null);
+  const anchorHoverRef = useRef<{ polygon: AnnotationPolygon; edgeIndex: number; point: ImagePoint } | null>(null);
+  const enclosedPocketHoverRef = useRef<AnnotationPolygon | null>(null);
+  const enclosedPocketCursorRef = useRef<ImagePoint | null>(null);
+  const cutPathRef = useRef<PolygonNode[]>([]);
+  const suppressContextMenuSelectionRef = useRef(false);
   const brushStrokeRef = useRef<ImagePoint[]>([]);
   const brushCursorRef = useRef<ImagePoint | null>(null);
   const pendingBrushSamplesRef = useRef<Array<{ clientX: number; clientY: number }>>([]);
@@ -573,7 +592,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (!layer || !context) return;
     const draft = draftRef.current.nodes;
     const marquee = marqueeRef.current;
-    if (!draft.length && !marquee) {
+    if (!draft.length && !marquee && !anchorHoverRef.current && !enclosedPocketHoverRef.current && !snapTargetRef.current && !cutPathRef.current.length && !['rectangle', 'circle'].includes(pointerRef.current?.mode ?? '')) {
       // Nothing to show: clear once, then skip until something is drawn again.
       if (draftLayerDrawnRef.current) { context.setTransform(1, 0, 0, 1, 0, 0); context.clearRect(0, 0, layer.width, layer.height); }
       draftLayerDrawnRef.current = false;
@@ -588,25 +607,105 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     const display = displayRef.current;
     if (draft.length) {
       const hover = polygonHoverRef.current;
-      const preview = hover ? [...draft, { id: 'preview', ...hover }] : draft;
+      const autofill = draftAutofillRef.current;
+      const preview = hover
+        ? (autofill
+            ? (autofill.closingToStart ? [...draft, ...autofill.nodes] : [...draft, { id: 'preview', ...hover }, ...autofill.nodes])
+            : [...draft, { id: 'preview', ...hover }])
+        : (autofill ? [...draft, ...autofill.nodes] : draft);
       context.beginPath();
-      preview.forEach((node, index) => index === 0 ? context.moveTo(node.x, node.y) : context.lineTo(node.x, node.y));
       if (preview.length >= 3) {
-        context.closePath();
+        drawSmoothClosedPath(context, preview, 0.08, polygonsRef.current);
         context.globalAlpha = Math.min(0.72, Math.max(0.2, display.maskOpacity * 0.85));
         context.fillStyle = POLYGON_FILL;
         context.fill();
         context.globalAlpha = 1;
+        context.setLineDash([8 / view.scale, 5 / view.scale]);
+        context.lineWidth = 2 / view.scale;
+        context.strokeStyle = autofill ? '#10b981' : '#6d4ef2';
+        context.stroke();
+        context.setLineDash([]);
+      } else {
+        preview.forEach((node, index) => index === 0 ? context.moveTo(node.x, node.y) : context.lineTo(node.x, node.y));
+        context.lineWidth = 2 / view.scale;
+        context.strokeStyle = '#6d4ef2';
+        context.stroke();
       }
-      context.setLineDash([8 / view.scale, 5 / view.scale]);
-      context.lineWidth = 2 / view.scale;
-      context.strokeStyle = '#6d4ef2';
-      context.stroke();
-      context.setLineDash([]);
       for (const node of draft) {
         context.beginPath();
         context.arc(node.x, node.y, 3.5 / view.scale, 0, Math.PI * 2);
         context.fillStyle = '#7c5cfa';
+        context.fill();
+      }
+      if (autofill && autofill.nodes.length) {
+        context.beginPath();
+        autofill.nodes.forEach((node, idx) => {
+          if (idx === 0) context.moveTo(node.x, node.y);
+          else context.lineTo(node.x, node.y);
+        });
+        context.lineWidth = 2.5 / view.scale;
+        context.strokeStyle = '#10b981';
+        context.stroke();
+        for (const node of autofill.nodes) {
+          context.beginPath();
+          context.arc(node.x, node.y, 2.5 / view.scale, 0, Math.PI * 2);
+          context.fillStyle = '#10b981';
+          context.fill();
+        }
+      }
+    }
+
+    const enclosedPocket = enclosedPocketHoverRef.current;
+    if (toolRef.current === 'polygon' && !draft.length && enclosedPocket && !pointerRef.current) {
+      context.save();
+      context.beginPath();
+      drawSmoothClosedPath(context, enclosedPocket.nodes, 0.08, polygonsRef.current);
+      context.globalAlpha = Math.min(0.65, Math.max(0.25, display.maskOpacity * 0.85));
+      context.fillStyle = '#10b981';
+      context.fill();
+      context.globalAlpha = 1;
+      context.setLineDash([6 / view.scale, 4 / view.scale]);
+      context.lineWidth = 2.5 / view.scale;
+      context.strokeStyle = '#10b981';
+      context.stroke();
+      context.setLineDash([]);
+
+      for (const node of enclosedPocket.nodes) {
+        context.beginPath();
+        context.arc(node.x, node.y, 2.5 / view.scale, 0, Math.PI * 2);
+        context.fillStyle = '#10b981';
+        context.fill();
+      }
+
+      if (enclosedPocketCursorRef.current) {
+        const pt = enclosedPocketCursorRef.current;
+        context.font = `600 ${11 / view.scale}px ui-sans-serif, system-ui, sans-serif`;
+        const text = '+ Điền kín vùng (click)';
+        const tw = context.measureText(text).width;
+        const bx = pt.x + 8 / view.scale;
+        const by = pt.y - 10 / view.scale;
+        context.fillStyle = 'rgba(16, 185, 129, 0.95)';
+        context.fillRect(bx, by - 12 / view.scale, tw + 8 / view.scale, 16 / view.scale);
+        context.fillStyle = '#ffffff';
+        context.textBaseline = 'middle';
+        context.fillText(text, bx + 4 / view.scale, by - 4 / view.scale);
+      }
+      context.restore();
+    }
+
+    const cutPath = cutPathRef.current;
+    if (cutPath.length) {
+      context.beginPath();
+      cutPath.forEach((node, index) => index === 0 ? context.moveTo(node.x, node.y) : context.lineTo(node.x, node.y));
+      context.setLineDash([10 / view.scale, 6 / view.scale]);
+      context.lineWidth = 3 / view.scale;
+      context.strokeStyle = CUT_COLOR;
+      context.stroke();
+      context.setLineDash([]);
+      for (const node of cutPath) {
+        context.beginPath();
+        context.arc(node.x, node.y, 4 / view.scale, 0, Math.PI * 2);
+        context.fillStyle = CUT_COLOR;
         context.fill();
       }
     }
@@ -617,6 +716,208 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       context.lineWidth = 1 / view.scale;
       context.fillRect(marquee.start.x, marquee.start.y, marquee.end.x - marquee.start.x, marquee.end.y - marquee.start.y);
       context.strokeRect(marquee.start.x, marquee.start.y, marquee.end.x - marquee.start.x, marquee.end.y - marquee.start.y);
+    }
+
+    const activePointer = pointerRef.current;
+    if (activePointer?.mode === 'rectangle') {
+      const minX = Math.min(activePointer.start.x, activePointer.current.x);
+      const maxX = Math.max(activePointer.start.x, activePointer.current.x);
+      const minY = Math.min(activePointer.start.y, activePointer.current.y);
+      const maxY = Math.max(activePointer.start.y, activePointer.current.y);
+      const rectW = maxX - minX;
+      const rectH = maxY - minY;
+      if (rectW > 0 && rectH > 0) {
+        context.save();
+        context.beginPath();
+        context.rect(minX, minY, rectW, rectH);
+        context.globalAlpha = Math.min(0.72, Math.max(0.2, display.maskOpacity * 0.85));
+        context.fillStyle = POLYGON_FILL;
+        context.fill();
+        context.globalAlpha = 1;
+        context.setLineDash([8 / view.scale, 5 / view.scale]);
+        context.lineWidth = 2 / view.scale;
+        context.strokeStyle = '#6d4ef2';
+        context.stroke();
+        context.setLineDash([]);
+        const corners = [
+          { x: minX, y: minY },
+          { x: maxX, y: minY },
+          { x: maxX, y: maxY },
+          { x: minX, y: maxY },
+        ];
+        for (const corner of corners) {
+          context.beginPath();
+          context.arc(corner.x, corner.y, 3.5 / view.scale, 0, Math.PI * 2);
+          context.fillStyle = '#ffffff';
+          context.fill();
+          context.lineWidth = 1.5 / view.scale;
+          context.strokeStyle = '#6d4ef2';
+          context.stroke();
+        }
+        const text = `${Math.round(rectW)} × ${Math.round(rectH)} px`;
+        context.font = `700 ${11 / view.scale}px ui-sans-serif, system-ui, sans-serif`;
+        const textWidth = context.measureText(text).width + 10 / view.scale;
+        const tagHeight = 18 / view.scale;
+        context.fillStyle = 'rgba(16, 24, 40, 0.88)';
+        context.fillRect(minX, Math.max(0, minY - tagHeight - 5 / view.scale), textWidth, tagHeight);
+        context.fillStyle = '#ffffff';
+        context.textBaseline = 'middle';
+        context.fillText(text, minX + 5 / view.scale, Math.max(tagHeight / 2, minY - tagHeight / 2 - 5 / view.scale));
+        context.restore();
+      }
+    }
+
+    if (activePointer?.mode === 'circle') {
+      let cx: number;
+      let cy: number;
+      let rx: number;
+      let ry: number;
+      if (activePointer.altKey) {
+        cx = activePointer.start.x;
+        cy = activePointer.start.y;
+        if (activePointer.shiftKey) {
+          const r = Math.hypot(activePointer.current.x - activePointer.start.x, activePointer.current.y - activePointer.start.y);
+          rx = r;
+          ry = r;
+        } else {
+          rx = Math.abs(activePointer.current.x - activePointer.start.x);
+          ry = Math.abs(activePointer.current.y - activePointer.start.y);
+        }
+      } else {
+        const minX = Math.min(activePointer.start.x, activePointer.current.x);
+        const maxX = Math.max(activePointer.start.x, activePointer.current.x);
+        const minY = Math.min(activePointer.start.y, activePointer.current.y);
+        const maxY = Math.max(activePointer.start.y, activePointer.current.y);
+        rx = (maxX - minX) / 2;
+        ry = (maxY - minY) / 2;
+        if (activePointer.shiftKey) {
+          const r = Math.max(rx, ry);
+          rx = r;
+          ry = r;
+          cx = activePointer.start.x < activePointer.current.x ? activePointer.start.x + r : activePointer.start.x - r;
+          cy = activePointer.start.y < activePointer.current.y ? activePointer.start.y + r : activePointer.start.y - r;
+        } else {
+          cx = minX + rx;
+          cy = minY + ry;
+        }
+      }
+      if (rx > 0 && ry > 0) {
+        context.save();
+        context.beginPath();
+        context.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+        context.globalAlpha = Math.min(0.72, Math.max(0.2, display.maskOpacity * 0.85));
+        context.fillStyle = POLYGON_FILL;
+        context.fill();
+        context.globalAlpha = 1;
+        context.setLineDash([8 / view.scale, 5 / view.scale]);
+        context.lineWidth = 2 / view.scale;
+        context.strokeStyle = '#6d4ef2';
+        context.stroke();
+        context.setLineDash([]);
+        context.beginPath();
+        context.arc(cx, cy, 2.5 / view.scale, 0, Math.PI * 2);
+        context.fillStyle = '#6d4ef2';
+        context.fill();
+        const tagText = Math.abs(rx - ry) < 1
+          ? `R: ${Math.round(rx)} px`
+          : `${Math.round(rx * 2)} × ${Math.round(ry * 2)} px`;
+        context.font = `700 ${11 / view.scale}px ui-sans-serif, system-ui, sans-serif`;
+        const textWidth = context.measureText(tagText).width + 10 / view.scale;
+        const tagHeight = 18 / view.scale;
+        context.fillStyle = 'rgba(16, 24, 40, 0.88)';
+        context.fillRect(cx - textWidth / 2, Math.max(0, cy - ry - tagHeight - 5 / view.scale), textWidth, tagHeight);
+        context.fillStyle = '#ffffff';
+        context.textBaseline = 'middle';
+        context.textAlign = 'center';
+        context.fillText(tagText, cx, Math.max(tagHeight / 2, cy - ry - tagHeight / 2 - 5 / view.scale));
+        context.restore();
+      }
+    }
+
+    const anchorHover = anchorHoverRef.current;
+    if (toolRef.current === 'anchor' && anchorHover && !pointerRef.current) {
+      context.save();
+      const nodes = anchorHover.polygon.nodes;
+      const n = nodes.length;
+      const i = anchorHover.edgeIndex;
+      const edgeStart = nodes[i];
+      const edgeEnd = nodes[(i + 1) % n];
+      if (edgeStart && edgeEnd) {
+        context.beginPath();
+        context.moveTo(edgeStart.x, edgeStart.y);
+        if (n >= 3) {
+          const prev = nodes[(i - 1 + n) % n];
+          const next2 = nodes[(i + 2) % n];
+          const { cp1, cp2 } = getSmoothSegmentControlPoints(prev, edgeStart, edgeEnd, next2, 0.16);
+          context.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, edgeEnd.x, edgeEnd.y);
+        } else {
+          context.lineTo(edgeEnd.x, edgeEnd.y);
+        }
+        context.lineWidth = 2 / view.scale;
+        context.strokeStyle = '#6d4ef2';
+        context.stroke();
+      }
+
+      const r = 3.2 / view.scale;
+      context.beginPath();
+      context.arc(anchorHover.point.x, anchorHover.point.y, r, 0, Math.PI * 2);
+      context.fillStyle = '#ffffff';
+      context.fill();
+      context.lineWidth = 1.4 / view.scale;
+      context.strokeStyle = '#6d4ef2';
+      context.stroke();
+
+      const plusR = 1.6 / view.scale;
+      context.beginPath();
+      context.moveTo(anchorHover.point.x - plusR, anchorHover.point.y);
+      context.lineTo(anchorHover.point.x + plusR, anchorHover.point.y);
+      context.moveTo(anchorHover.point.x, anchorHover.point.y - plusR);
+      context.lineTo(anchorHover.point.x, anchorHover.point.y + plusR);
+      context.lineWidth = 1.1 / view.scale;
+      context.strokeStyle = '#6d4ef2';
+      context.stroke();
+
+      const badge = 'Thêm & kéo anchor';
+      context.font = `600 ${9 / view.scale}px ui-sans-serif, system-ui, sans-serif`;
+      const badgeW = context.measureText(badge).width + 8 / view.scale;
+      const badgeH = 16 / view.scale;
+      const badgeX = anchorHover.point.x + 8 / view.scale;
+      const badgeY = Math.max(0, anchorHover.point.y - badgeH - 3 / view.scale);
+      context.fillStyle = 'rgba(16, 24, 40, 0.88)';
+      context.fillRect(badgeX, badgeY, badgeW, badgeH);
+      context.fillStyle = '#ffffff';
+      context.textBaseline = 'middle';
+      context.textAlign = 'left';
+      context.fillText(badge, badgeX + 4 / view.scale, badgeY + badgeH / 2);
+      context.restore();
+    }
+
+    const snapTarget = snapTargetRef.current;
+    if (snapTarget && (toolRef.current === 'polygon' || toolRef.current === 'anchor')) {
+      context.save();
+      context.beginPath();
+      context.arc(snapTarget.point.x, snapTarget.point.y, 6.5 / view.scale, 0, Math.PI * 2);
+      context.strokeStyle = '#10b981';
+      context.lineWidth = 2 / view.scale;
+      context.stroke();
+      context.beginPath();
+      context.arc(snapTarget.point.x, snapTarget.point.y, 2.5 / view.scale, 0, Math.PI * 2);
+      context.fillStyle = '#10b981';
+      context.fill();
+
+      if (toolRef.current === 'polygon' && !snapTarget.isVertex) {
+        context.font = `600 ${11 / view.scale}px ui-sans-serif, system-ui, sans-serif`;
+        const text = '+ Tạo anchor trên biên';
+        const tw = context.measureText(text).width;
+        const bx = snapTarget.point.x + 8 / view.scale;
+        const by = snapTarget.point.y - 10 / view.scale;
+        context.fillStyle = 'rgba(16, 185, 129, 0.9)';
+        context.fillRect(bx, by - 12 / view.scale, tw + 8 / view.scale, 16 / view.scale);
+        context.fillStyle = '#ffffff';
+        context.textBaseline = 'middle';
+        context.fillText(text, bx + 4 / view.scale, by - 4 / view.scale);
+      }
+      context.restore();
     }
 
     /* Wart overlay temporarily hidden (re-enable here, on the draft layer).
@@ -851,7 +1152,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         }
         context.fillText(text, anchorX + paddingX + iconWidth, tagY + tagHeight / 2);
       }
-      if (toolRef.current === 'select' || toolRef.current === 'polygon') {
+      if (toolRef.current === 'select' || toolRef.current === 'polygon' || toolRef.current === 'anchor') {
         // Screen-space grid: retain exact vertices for editing, avoid overdraw of overlapping handles.
         // All handles of one style go into a single path, so thousands of nodes cost two draw calls.
         const occupied = new Set<number>();
@@ -861,6 +1162,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         const activeRadius = 4.25 / view.scale;
         for (const ring of polygonRings(polygon)) {
           for (const node of ring) {
+            if (toolRef.current === 'anchor' && !node.isAnchor) continue;
             if (node.x < viewportBounds.left || node.x > viewportBounds.right
                 || node.y < viewportBounds.top || node.y > viewportBounds.bottom) continue;
             const nodeSelected = selectedNodeIdsRef.current.has(node.id);
@@ -1615,25 +1917,93 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   }, [captureDocument, notifyChange, notifySelection, onMessage, pushHistory, rebuildPolygonTint, render]);
 
   const commitDraft = useCallback((draft: PolygonNode[]) => {
+    let autofill = draftAutofillRef.current;
+
+    if (!autofill && draft.length >= 2) {
+      const snapTolerance = 14 / viewRef.current.scale;
+      const first = draft[0];
+      const last = draft[draft.length - 1];
+      const autoRes = findMultiPolygonAutofillPath(polygonsRef.current, first, last, draft, snapTolerance);
+      if (autoRes) {
+        autofill = {
+          nodes: autoRes.nodes,
+          targetPolygons: autoRes.targetPolygons,
+          closingToStart: true,
+        };
+      }
+    }
+
+    let finalNodes: PolygonNode[] = [];
+
+    if (autofill && autofill.nodes.length >= 0) {
+      finalNodes = [
+        ...draft.map((node) => ({ ...node, isAnchor: true })),
+        ...autofill.nodes.map((node) => ({ ...node, isAnchor: true })),
+      ];
+    } else {
+      finalNodes = draft.map((node) => ({ ...node, isAnchor: true }));
+    }
+
+    if (finalNodes.length < 3) {
+      onMessage('Đa giác cần ít nhất 3 node.');
+      return false;
+    }
+
+    let nextPolygons = [...polygonsRef.current];
+
+    if (autofill) {
+      const targetPolys = autofill.targetPolygons || (autofill.polygon ? [autofill.polygon] : []);
+      for (const targetPoly of targetPolys) {
+        const polyInNext = nextPolygons.find((p) => p.id === targetPoly.id);
+        if (polyInNext && !polyInNext.meta?.locked) {
+          let updated = polyInNext;
+          if (draft[0]) {
+            const res = ensurePolygonHasNodeAt(updated, draft[0]);
+            updated = res.polygon;
+          }
+          const lastDraftNode = draft[draft.length - 1];
+          if (lastDraftNode) {
+            const res = ensurePolygonHasNodeAt(updated, lastDraftNode);
+            updated = res.polygon;
+          }
+          nextPolygons = nextPolygons.map((p) => (p.id === updated.id ? updated : p));
+        }
+      }
+    }
+
+    for (const existing of nextPolygons) {
+      const clipped = clipPolygonDifference(finalNodes, existing.nodes);
+      if (clipped && clipped.length >= 3) {
+        finalNodes = clipped;
+      }
+    }
+
     const created: AnnotationPolygon = {
       id: crypto.randomUUID(),
-      label: nextLabel(polygonsRef.current, 'ridge'),
-      nodes: draft.map((node) => ({ ...node })),
-      meta: { semantic: 'main_flesh_band', source: 'human' },
+      label: nextLabel(polygonsRef.current, 'wart'),
+      meta: { semantic: 'wart_flesh', source: 'human' },
+      nodes: finalNodes,
     };
     draftRef.current.clear();
+    draftAutofillRef.current = null;
+    snapTargetRef.current = null;
     hoveredNodeRef.current = null;
     polygonHoverRef.current = null;
+    enclosedPocketHoverRef.current = null;
+    enclosedPocketCursorRef.current = null;
     selectedNodeIdsRef.current.clear();
     selectedPolygonIdsRef.current = new Set([created.id]);
-    commitPolygons([...polygonsRef.current, created]);
+    commitPolygons([...nextPolygons, created]);
+    if (autofill) {
+      onMessage('Đã tự động nối biên chung với mask kế bên.');
+    }
     onPolygonComplete?.();
     return true;
-  }, [commitPolygons, onPolygonComplete]);
+  }, [commitPolygons, onMessage, onPolygonComplete]);
 
   const completePolygon = useCallback(() => {
     const draft = draftRef.current.nodes;
-    if (draft.length < 3) {
+    if (draft.length < 3 && !(draft.length >= 2 && draftAutofillRef.current)) {
       onMessage('Đa giác cần ít nhất 3 node.');
       return false;
     }
@@ -1650,6 +2020,12 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
 
   const cancelCurrentPath = useCallback(() => {
     draftRef.current.clear();
+    draftAutofillRef.current = null;
+    snapTargetRef.current = null;
+    anchorHoverRef.current = null;
+    enclosedPocketHoverRef.current = null;
+    enclosedPocketCursorRef.current = null;
+    cutPathRef.current = [];
     hoveredNodeRef.current = null;
     polygonHoverRef.current = null;
     brushStrokeRef.current = [];
@@ -1714,6 +2090,27 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     }
   }, [captureDocument, drawBrushCursor, ensureMaskRaster, height, invalidateMask, notifySelection, paintBrushPreview, pushHistory, scheduleBackgroundVectorize, scheduleNotify, width]);
 
+  const applyCut = useCallback(() => {
+    const selectedPolygonId = [...selectedPolygonIdsRef.current][0];
+    const target = polygonsRef.current.find((polygon) => polygon.id === selectedPolygonId);
+    if (!target) {
+      onMessage('Hãy chọn một đa giác trước khi cắt.');
+      return false;
+    }
+    const result = resolvePolygonCut(polygonsRef.current, cutPathRef.current, target.id);
+    if (!result.polygons) {
+      onMessage(result.error || 'Không thể cắt đa giác.');
+      return false;
+    }
+    const next = polygonsRef.current.flatMap((polygon) => polygon.id === target.id ? result.polygons! : [polygon]);
+    cutPathRef.current = [];
+    selectedNodeIdsRef.current.clear();
+    selectedPolygonIdsRef.current = new Set(result.polygons.map((polygon) => polygon.id));
+    commitPolygons(next);
+    onMessage('Đã tách đa giác thành 2 vùng con. Có thể lặp lại Cut để chia tiếp.');
+    return true;
+  }, [commitPolygons, onMessage]);
+
   const deleteSelection = useCallback(() => {
     const selectedNodes = selectedNodeIdsRef.current;
     const selectedPolygons = selectedPolygonIdsRef.current;
@@ -1729,6 +2126,27 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     commitPolygons(next);
   }, [commitPolygons]);
 
+  const selectAllPolygons = useCallback(() => {
+    if (props.readOnly) return;
+    if (!polygonsRef.current.length) {
+      onMessage('Không có polygon nào để chọn.');
+      return;
+    }
+    const polygonIds = new Set(polygonsRef.current.map((p) => p.id));
+    selectedPolygonIdsRef.current = polygonIds;
+    selectedNodeIdsRef.current.clear();
+    notifySelection();
+    render();
+    onMessage(`Đã chọn tất cả (${polygonIds.size} polygon). Nhấn Delete để xóa.`);
+  }, [notifySelection, onMessage, props.readOnly, render]);
+
+  const clearAllPolygons = useCallback(() => {
+    if (props.readOnly) return;
+    selectedNodeIdsRef.current.clear();
+    selectedPolygonIdsRef.current.clear();
+    commitPolygons([]);
+  }, [commitPolygons, props.readOnly]);
+
   const deleteSelectedPoint = useCallback(() => {
     const selectedPointId = selectedPointIdRef.current;
     if (!selectedPointId) return;
@@ -1743,7 +2161,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     notifyChange();
   }, [notifyChange, render]);
 
-  const hitNode = useCallback((point: ImagePoint) => {
+  const hitNode = useCallback((point: ImagePoint, onlyAnchors = false) => {
     const radius = 12 / viewRef.current.scale;
     for (let polygonIndex = polygonsRef.current.length - 1; polygonIndex >= 0; polygonIndex -= 1) {
       const polygon = polygonsRef.current[polygonIndex];
@@ -1754,6 +2172,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       for (const ring of polygonRings(polygon)) {
         for (let nodeIndex = ring.length - 1; nodeIndex >= 0; nodeIndex -= 1) {
           const node = ring[nodeIndex];
+          if (onlyAnchors && !node.isAnchor) continue;
           if (Math.hypot(node.x - point.x, node.y - point.y) <= radius) return { polygon, node, ring };
         }
       }
@@ -1768,12 +2187,63 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     return null;
   }, []);
 
+  const findClosestPolygonEdge = useCallback((point: ImagePoint, tolerance: number) => {
+    let closest: { polygon: AnnotationPolygon; edgeIndex: number; point: ImagePoint; distance: number } | null = null;
+    const selectedId = [...selectedPolygonIdsRef.current][0];
+    const selectedPoly = selectedId ? polygonsRef.current.find((p) => p.id === selectedId) : null;
+    if (selectedPoly && !selectedPoly.meta?.locked) {
+      const edge = closestPolygonEdge({ ...selectedPoly, holes: undefined }, point);
+      if (edge && edge.distance <= tolerance) {
+        closest = { polygon: selectedPoly, ...edge };
+      }
+    }
+    if (!closest) {
+      for (let index = polygonsRef.current.length - 1; index >= 0; index -= 1) {
+        const polygon = polygonsRef.current[index];
+        if (polygon.meta?.locked) continue;
+        const bounds = polygonBounds(polygon);
+        if (point.x < bounds.left - tolerance || point.x > bounds.right + tolerance
+            || point.y < bounds.top - tolerance || point.y > bounds.bottom + tolerance) continue;
+        const edge = closestPolygonEdge({ ...polygon, holes: undefined }, point);
+        if (edge && edge.distance <= tolerance && (!closest || edge.distance < closest.distance)) {
+          closest = { polygon, ...edge };
+        }
+      }
+    }
+    return closest;
+  }, []);
+
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!readyRef.current || (props.readOnly && tool !== 'pan')) return;
     const point = imagePoint(event);
     hoveredNodeRef.current = null;
     if (event.button === 2) {
       event.preventDefault();
+      if (tool === 'polygon' || (tool === 'anchor' && hitNode(point, true))) return;
+      if (tool !== 'select' && tool !== 'anchor') return;
+      const polygon = hitPolygon(point);
+      if (!polygon || polygon.meta?.locked) return;
+      const additive = event.shiftKey || event.ctrlKey || event.metaKey;
+      const polygonIds = additive ? new Set(selectedPolygonIdsRef.current) : new Set<string>();
+      polygonIds.add(polygon.id);
+      const nodeIds = new Set<string>();
+      for (const item of polygonsRef.current) {
+        if (polygonIds.has(item.id)) for (const node of item.nodes) nodeIds.add(node.id);
+      }
+      selectedPolygonIdsRef.current = polygonIds;
+      selectedNodeIdsRef.current = nodeIds;
+      suppressContextMenuSelectionRef.current = false;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      pointerRef.current = {
+        id: event.pointerId,
+        mode: 'polygons',
+        start: point,
+        original: clonePolygons(polygonsRef.current),
+        polygonIds,
+        moved: false,
+      };
+      notifySelection();
+      render();
       return;
     }
     if (event.button !== 0) return;
@@ -1803,13 +2273,64 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       return;
     }
     if (tool === 'polygon') {
-      const draft = draftRef.current.nodes;
-      const first = draft[0];
-      // Clicking the first point closes the polygon; any other click places one undoable point.
-      if (first && draft.length >= 3 && Math.hypot(first.x - point.x, first.y - point.y) <= 14 / viewRef.current.scale) {
+      const snapTolerance = 14 / viewRef.current.scale;
+      const snap = findSnapTargetToPolygons(polygonsRef.current, point, snapTolerance);
+      let effectivePoint = snap ? snap.point : point;
+
+      if (snap && !snap.isVertex) {
+        const targetPoly = polygonsRef.current.find((p) => p.id === snap.polygonId);
+        if (targetPoly && !targetPoly.meta?.locked) {
+          const { polygon: updatedTarget, node: newAnchor } = insertNodeAtEdge(
+            targetPoly,
+            snap.edgeIndex,
+            snap.point,
+          );
+          effectivePoint = { x: newAnchor.x, y: newAnchor.y };
+          commitPolygons(polygonsRef.current.map((p) => (p.id === updatedTarget.id ? updatedTarget : p)));
+          onMessage('Đã tạo anchor mới trên biên của mask cũ.');
+        }
+      }
+
+      if (!draftRef.current.nodes.length && !snap) {
+        const pocket = enclosedPocketHoverRef.current || findEnclosedPocketAtPoint(polygonsRef.current, point, 250 / viewRef.current.scale);
+        if (pocket) {
+          let finalNodes = pocket.nodes;
+          for (const existing of polygonsRef.current) {
+            const clipped = clipPolygonDifference(finalNodes, existing.nodes);
+            if (clipped && clipped.length >= 3) {
+              finalNodes = clipped;
+            }
+          }
+          const created: AnnotationPolygon = {
+            id: crypto.randomUUID(),
+            label: nextLabel(polygonsRef.current, 'wart'),
+            meta: { semantic: 'wart_flesh', source: 'human' },
+            nodes: finalNodes,
+          };
+          const next = [...polygonsRef.current, created];
+          commitPolygons(next);
+          enclosedPocketHoverRef.current = null;
+          enclosedPocketCursorRef.current = null;
+          selectedNodeIdsRef.current.clear();
+          selectedPolygonIdsRef.current = new Set([created.id]);
+          onMessage('Đã tự động điền kín vùng giữa các mask.');
+          onPolygonComplete?.();
+          render();
+          return;
+        }
+      }
+
+      const first = draftRef.current.nodes[0];
+      const isClosingClick = first && draftRef.current.nodes.length >= 2 &&
+        Math.hypot(first.x - effectivePoint.x, first.y - effectivePoint.y) <= snapTolerance;
+
+      if (isClosingClick) {
+        completePolygon();
+      } else if (first && draftRef.current.nodes.length >= 2 && snap && draftAutofillRef.current && !draftAutofillRef.current.closingToStart) {
+        draftRef.current.add({ id: crypto.randomUUID(), ...effectivePoint, isAnchor: true });
         completePolygon();
       } else {
-        draftRef.current.add({ id: crypto.randomUUID(), ...point });
+        draftRef.current.add({ id: crypto.randomUUID(), ...effectivePoint, isAnchor: true });
         render();
       }
       return;
@@ -1834,6 +2355,133 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       }
       drawTransientSegments([point], brushRef.current.mode, Math.max(0.5, brushRef.current.size / 2));
       drawBrushCursor();
+      return;
+    }
+
+    if (tool === 'cut') {
+      if (!selectedPolygonIdsRef.current.size) {
+        const polygon = hitPolygon(point);
+        if (polygon) {
+          selectedPolygonIdsRef.current = new Set([polygon.id]);
+          notifySelection();
+        }
+      }
+      event.currentTarget.setPointerCapture(event.pointerId);
+      cutPathRef.current = [{ id: crypto.randomUUID(), ...point }];
+      pointerRef.current = { id: event.pointerId, mode: 'cut', last: point };
+      render();
+      return;
+    }
+    if (tool === 'rectangle') {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      pointerRef.current = { id: event.pointerId, mode: 'rectangle', start: point, current: point };
+      render();
+      return;
+    }
+    if (tool === 'circle') {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      pointerRef.current = {
+        id: event.pointerId,
+        mode: 'circle',
+        start: point,
+        current: point,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+      };
+      render();
+      return;
+    }
+    if (tool === 'anchor') {
+      const nodeHit = hitNode(point, true);
+      if (nodeHit && !nodeHit.polygon.meta?.locked) {
+        selectedNodeIdsRef.current = new Set([nodeHit.node.id]);
+        selectedPolygonIdsRef.current = new Set([nodeHit.polygon.id]);
+        event.currentTarget.setPointerCapture(event.pointerId);
+        pointerRef.current = {
+          id: event.pointerId,
+          mode: 'nodes',
+          start: point,
+          original: clonePolygons(polygonsRef.current),
+          polygonIds: new Set([nodeHit.polygon.id]),
+          nodeIds: new Set([nodeHit.node.id]),
+          moved: false,
+        };
+        notifySelection();
+        render();
+        return;
+      }
+
+      const hitTolerance = 14 / viewRef.current.scale;
+      const closest = findClosestPolygonEdge(point, hitTolerance);
+      if (closest) {
+        const before = clonePolygons(polygonsRef.current);
+        const edgeStart = closest.polygon.nodes[closest.edgeIndex];
+        const edgeEnd = closest.polygon.nodes[(closest.edgeIndex + 1) % closest.polygon.nodes.length];
+        const endpointTolerance = 6 / viewRef.current.scale;
+        const existingVertex = Math.hypot(closest.point.x - edgeStart.x, closest.point.y - edgeStart.y) <= endpointTolerance
+          ? edgeStart
+          : Math.hypot(closest.point.x - edgeEnd.x, closest.point.y - edgeEnd.y) <= endpointTolerance ? edgeEnd : null;
+
+        let targetNode: PolygonNode;
+        let nextPolygons: AnnotationPolygon[];
+
+        if (existingVertex) {
+          targetNode = { ...existingVertex, isAnchor: true };
+          nextPolygons = polygonsRef.current.map((p) => p.id === closest.polygon.id
+            ? {
+                ...p,
+                nodes: p.nodes.map((n) => n.id === existingVertex.id ? targetNode : n),
+              }
+            : p);
+        } else {
+          const { polygon: updated, node: insertedNode } = insertNodeAtEdge(
+            closest.polygon,
+            closest.edgeIndex,
+            closest.point,
+          );
+          targetNode = insertedNode;
+          nextPolygons = polygonsRef.current.map((p) => p.id === closest.polygon.id ? updated : p);
+        }
+
+        polygonsRef.current = nextPolygons;
+        polygonModeRef.current = true;
+        operationsRef.current = polygonOperation(nextPolygons);
+        humanActionRef.current = 'MODIFIED';
+        selectedPolygonIdsRef.current = new Set([closest.polygon.id]);
+        selectedNodeIdsRef.current = new Set([targetNode.id]);
+        anchorHoverRef.current = null;
+
+        event.currentTarget.setPointerCapture(event.pointerId);
+        pointerRef.current = {
+          id: event.pointerId,
+          mode: 'nodes',
+          start: point,
+          original: clonePolygons(nextPolygons),
+          historyBefore: before,
+          polygonIds: new Set([closest.polygon.id]),
+          nodeIds: new Set([targetNode.id]),
+          moved: true,
+        };
+        notifySelection();
+        notifyChange('MODIFIED', nextPolygons);
+        onMessage('Đã tạo anchor point trên viền. Hãy kéo để chỉnh hình dạng mask.');
+        render();
+        return;
+      }
+
+      const hitPoly = hitPolygon(point);
+      if (hitPoly) {
+        selectedPolygonIdsRef.current = new Set([hitPoly.id]);
+        selectedNodeIdsRef.current.clear();
+        notifySelection();
+        render();
+        return;
+      }
+
+      selectedPolygonIdsRef.current.clear();
+      selectedNodeIdsRef.current.clear();
+      notifySelection();
+      render();
       return;
     }
 
@@ -1886,7 +2534,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       // Hai lần pointer-down của double click đã thêm cùng một đỉnh hai lần.
       // Giữ lần nhấp đầu làm đỉnh cuối và bỏ bản sao trước khi hoàn tất.
       draftRef.current.dropDoubleClickDuplicate();
-      if (draftRef.current.nodes.length >= 3) completePolygon();
+      if (draftRef.current.nodes.length >= 3 || (draftRef.current.nodes.length >= 2 && draftAutofillRef.current)) completePolygon();
       else render();
       return;
     }
@@ -1999,17 +2647,96 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         return;
       }
       const point = imagePoint(event);
-      const hovered = tool === 'polygon'
-        ? draftRef.current.nodes.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale) ?? null
-        : tool === 'select' ? hitNode(point)?.node ?? null : null;
+      if (tool === 'anchor') {
+        const hitTolerance = 14 / viewRef.current.scale;
+        const closest = findClosestPolygonEdge(point, hitTolerance);
+        const nodeHit = hitNode(point, true);
+        const nextHovered = nodeHit?.node ?? null;
+        const nextAnchorHover = closest && !nodeHit
+          ? { polygon: closest.polygon, edgeIndex: closest.edgeIndex, point: closest.point }
+          : null;
+        let needsRender = false;
+        if (hoveredNodeRef.current?.id !== nextHovered?.id) {
+          hoveredNodeRef.current = nextHovered;
+          needsRender = true;
+        }
+        if (
+          anchorHoverRef.current?.polygon.id !== nextAnchorHover?.polygon.id
+          || anchorHoverRef.current?.edgeIndex !== nextAnchorHover?.edgeIndex
+          || Math.hypot(
+            (anchorHoverRef.current?.point.x ?? 0) - (nextAnchorHover?.point.x ?? 0),
+            (anchorHoverRef.current?.point.y ?? 0) - (nextAnchorHover?.point.y ?? 0),
+          ) > 1
+        ) {
+          anchorHoverRef.current = nextAnchorHover;
+          needsRender = true;
+        }
+        if (needsRender) renderDraft();
+        return;
+      }
+      if (tool === 'polygon') {
+        const snapTolerance = 14 / viewRef.current.scale;
+        const snap = findSnapTargetToPolygons(polygonsRef.current, point, snapTolerance);
+        snapTargetRef.current = snap;
+        const effectivePoint = snap ? snap.point : point;
+
+        if (draftRef.current.nodes.length) {
+          enclosedPocketHoverRef.current = null;
+          enclosedPocketCursorRef.current = null;
+          polygonHoverRef.current = effectivePoint;
+          const draft = draftRef.current.nodes;
+          const isNearStart = draft.length >= 2 && Math.hypot(draft[0].x - effectivePoint.x, draft[0].y - effectivePoint.y) <= snapTolerance;
+
+          if (isNearStart) {
+            const autofill = findMultiPolygonAutofillPath(
+              polygonsRef.current,
+              draft[0],
+              draft[draft.length - 1],
+              draft,
+              snapTolerance,
+            );
+            draftAutofillRef.current = autofill
+              ? { targetPolygons: autofill.targetPolygons, nodes: autofill.nodes, closingToStart: true }
+              : null;
+          } else if (snap) {
+            const autofill = findMultiPolygonAutofillPath(
+              polygonsRef.current,
+              draft[0],
+              effectivePoint,
+              [...draft, effectivePoint],
+              snapTolerance,
+            );
+            draftAutofillRef.current = autofill
+              ? { targetPolygons: autofill.targetPolygons, nodes: autofill.nodes, closingToStart: false }
+              : null;
+          } else {
+            draftAutofillRef.current = null;
+          }
+        } else {
+          polygonHoverRef.current = null;
+          draftAutofillRef.current = null;
+          if (!snap) {
+            const pocket = findEnclosedPocketAtPoint(polygonsRef.current, point, 250 / viewRef.current.scale);
+            enclosedPocketHoverRef.current = pocket;
+            enclosedPocketCursorRef.current = pocket ? point : null;
+          } else {
+            enclosedPocketHoverRef.current = null;
+            enclosedPocketCursorRef.current = null;
+          }
+        }
+
+        const hovered = draftRef.current.nodes.find((node) => Math.hypot(node.x - effectivePoint.x, node.y - effectivePoint.y) <= 12 / viewRef.current.scale) ?? null;
+        if (hoveredNodeRef.current?.id !== hovered?.id) {
+          hoveredNodeRef.current = hovered;
+        }
+        renderDraft();
+        return;
+      }
+      const hovered = tool === 'select' ? hitNode(point)?.node ?? null : null;
       // Hover and the draft preview live on the stage: no outline redraw needed.
       if (hoveredNodeRef.current?.id !== hovered?.id) {
         hoveredNodeRef.current = hovered;
         scheduleFrame();
-      }
-      if (tool === 'polygon' && draftRef.current.nodes.length) {
-        polygonHoverRef.current = imagePoint(event);
-        renderDraft();
       }
       return;
     }
@@ -2035,7 +2762,27 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       return;
     }
     const point = imagePoint(event);
-    if (active.mode === 'nodes') {
+    if (active.mode === 'rectangle') {
+      active.current = point;
+      render();
+      return;
+    }
+    if (active.mode === 'circle') {
+      active.current = point;
+      active.shiftKey = event.shiftKey;
+      active.altKey = event.altKey;
+      render();
+      return;
+    }
+    if (active.mode === 'cut') {
+      if (Math.hypot(point.x - active.last.x, point.y - active.last.y) >= 2 / viewRef.current.scale) {
+        cutPathRef.current = [...cutPathRef.current, { id: crypto.randomUUID(), ...point }];
+        active.last = point;
+        render();
+      }
+      return;
+    }
+    if (active.mode === 'nodes' || active.mode === 'polygons') {
       const deltaX = point.x - active.start.x;
       const deltaY = point.y - active.start.y;
       active.moved = active.moved || Math.hypot(deltaX, deltaY) > 0.5;
@@ -2044,9 +2791,13 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       polygonsRef.current = active.original.map((polygon) => {
         if (polygon.meta?.locked) return polygon;
         if (!active.polygonIds.has(polygon.id)) return polygon;
+        if (active.mode === 'polygons') {
+          const translate = (node: PolygonNode) => ({ ...node, x: Math.max(0, Math.min(width, node.x + deltaX)), y: Math.max(0, Math.min(height, node.y + deltaY)) });
+          return { ...polygon, nodes: polygon.nodes.map(translate), holes: polygon.holes?.map((ring) => ring.map(translate)) };
+        }
         return {
           ...polygon,
-          nodes: polygon.nodes.map((node) => active.nodeIds.has(node.id)
+          nodes: tool === 'anchor' ? computeSmoothNodeDisplacements(polygon.nodes, active.nodeIds, deltaX, deltaY, width, height) : polygon.nodes.map((node) => active.nodeIds.has(node.id)
             ? { ...node, x: Math.max(0, Math.min(width, node.x + deltaX)), y: Math.max(0, Math.min(height, node.y + deltaY)) }
             : node),
           holes: polygon.holes?.map((ring) => ring.map((node) => active.nodeIds.has(node.id)
@@ -2086,6 +2837,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
 
   const onPointerLeave = () => {
     hoveredNodeRef.current = null;
+    anchorHoverRef.current = null;
+    enclosedPocketHoverRef.current = null;
+    enclosedPocketCursorRef.current = null;
+    renderDraft();
     if (pointerRef.current) return;
     if (brushCursorRef.current) {
       brushCursorRef.current = null;
@@ -2121,13 +2876,83 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       drawBrushCursor();
       return;
     }
-    if (active.mode === 'nodes') {
+    if (active.mode === 'nodes' || active.mode === 'polygons') {
       if (active.moved) {
         const moved = polygonsRef.current;
-        polygonsRef.current = active.original;
-        const before = { operations: [...operationsRef.current], polygons: active.original, vectorsCurrent: vectorsCurrent() };
+        const original = active.mode === 'nodes' ? active.historyBefore ?? active.original : active.original;
+        polygonsRef.current = original;
+        const before = { operations: polygonOperation(original), polygons: original, vectorsCurrent: vectorsCurrent() };
         if (!commitPolygons(moved, before)) render();
       }
+      return;
+    }
+    if (active.mode === 'cut') {
+      render();
+      return;
+    }
+    if (active.mode === 'rectangle') {
+      const minX = Math.min(active.start.x, active.current.x);
+      const maxX = Math.max(active.start.x, active.current.x);
+      const minY = Math.min(active.start.y, active.current.y);
+      const maxY = Math.max(active.start.y, active.current.y);
+      if (maxX - minX >= 4 && maxY - minY >= 4) {
+        const created = createRectanglePolygon(active.start, active.current);
+        created.label = nextLabel(polygonsRef.current, 'wart');
+        created.meta = { semantic: 'wart_flesh', source: 'human' };
+        selectedNodeIdsRef.current.clear();
+        selectedPolygonIdsRef.current = new Set([created.id]);
+        commitPolygons([...polygonsRef.current, created]);
+        onMessage('Đã tạo mask hình chữ nhật.');
+        onPolygonComplete?.();
+      }
+      render();
+      return;
+    }
+    if (active.mode === 'circle') {
+      let cx: number;
+      let cy: number;
+      let rx: number;
+      let ry: number;
+      if (active.altKey) {
+        cx = active.start.x;
+        cy = active.start.y;
+        if (active.shiftKey) {
+          const r = Math.hypot(active.current.x - active.start.x, active.current.y - active.start.y);
+          rx = r;
+          ry = r;
+        } else {
+          rx = Math.abs(active.current.x - active.start.x);
+          ry = Math.abs(active.current.y - active.start.y);
+        }
+      } else {
+        const minX = Math.min(active.start.x, active.current.x);
+        const maxX = Math.max(active.start.x, active.current.x);
+        const minY = Math.min(active.start.y, active.current.y);
+        const maxY = Math.max(active.start.y, active.current.y);
+        rx = (maxX - minX) / 2;
+        ry = (maxY - minY) / 2;
+        if (active.shiftKey) {
+          const r = Math.max(rx, ry);
+          rx = r;
+          ry = r;
+          cx = active.start.x < active.current.x ? active.start.x + r : active.start.x - r;
+          cy = active.start.y < active.current.y ? active.start.y + r : active.start.y - r;
+        } else {
+          cx = minX + rx;
+          cy = minY + ry;
+        }
+      }
+      if (rx >= 3 && ry >= 3) {
+        const created = createCirclePolygon({ x: cx, y: cy }, rx, ry, 32);
+        created.label = nextLabel(polygonsRef.current, 'wart');
+        created.meta = { semantic: 'wart_flesh', source: 'human' };
+        selectedNodeIdsRef.current.clear();
+        selectedPolygonIdsRef.current = new Set([created.id]);
+        commitPolygons([...polygonsRef.current, created]);
+        onMessage('Đã tạo mask hình tròn.');
+        onPolygonComplete?.();
+      }
+      render();
       return;
     }
     if (active.mode === 'marquee') {
@@ -2409,10 +3234,16 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       if (target instanceof HTMLElement
           && target.matches('input, select, textarea, [contenteditable="true"]')) return;
       const labelKind = event.key === '1' ? 'wart' : event.key === '2' ? 'ridge' : null;
-      if (labelKind && !event.ctrlKey && !event.metaKey && !event.altKey && !event.repeat && tool === 'select') {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        selectAllPolygons();
+      } else if (event.key === 'Enter' && tool === 'cut') {
+        event.preventDefault();
+        applyCut();
+      } else if (labelKind && !event.ctrlKey && !event.metaKey && !event.altKey && !event.repeat && tool === 'select') {
         event.preventDefault();
         updateSelectedPolygonLabel(nextLabel(polygonsRef.current, labelKind), labelKind);
-      } else if ((event.key === 'Delete' || event.key === 'Backspace') && tool === 'select') {
+      } else if ((event.key === 'Delete' || event.key === 'Backspace') && (tool === 'select' || tool === 'anchor')) {
         event.preventDefault();
         deleteSelection();
       } else if ((event.key === 'Delete' || event.key === 'Backspace') && tool === 'point') {
@@ -2433,7 +3264,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, props.readOnly, redo, tool, undo, updateSelectedPolygonLabel]);
+  }, [applyCut, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, props.readOnly, redo, selectAllPolygons, tool, undo, updateSelectedPolygonLabel]);
 
   const zoomAt = useCallback((factor: number, anchor: ImagePoint) => {
     viewRef.current = zoomViewAt(viewRef.current, factor, anchor);
@@ -2559,6 +3390,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     redo: () => { if (!props.readOnly) redo(); },
     deleteSelectedPoint: () => { if (!props.readOnly) deleteSelectedPoint(); },
     deleteSelection: () => { if (!props.readOnly) deleteSelection(); },
+    selectAllPolygons,
+    clearAllPolygons,
     completePolygon: () => !props.readOnly && completePolygon(),
     cancelCurrentPath,
     beginPolygonEdit: () => props.readOnly ? 0 : beginPolygonEdit(),
@@ -2581,7 +3414,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       const stage = stageRef.current;
       if (stage) zoomAt(factor, { x: stage.clientWidth / 2, y: stage.clientHeight / 2 });
     },
-  }), [beginPolygonEdit, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, ensureMaskRaster, ensurePrediction, fit, flushNotify, groupSelectedPolygons, height, invalidateMask, notifyChange, notifySelection, onMessage, props.readOnly, rebuildTint, redo, render, requestLatestVector, selectPolygon, smoothSelectedPolygons, toggleSelectedPolygonLock, undo, updateSelectedPolygonLabel, width, zoomAt]);
+  }), [clearAllPolygons, selectAllPolygons, beginPolygonEdit, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, ensureMaskRaster, ensurePrediction, fit, flushNotify, groupSelectedPolygons, height, invalidateMask, notifyChange, notifySelection, onMessage, props.readOnly, rebuildTint, redo, render, requestLatestVector, selectPolygon, smoothSelectedPolygons, toggleSelectedPolygonLock, undo, updateSelectedPolygonLabel, width, zoomAt]);
 
   return (
     <div className={`canvas-viewport tool-${tool}`} ref={viewportRef}>

@@ -3,8 +3,9 @@ import { requireAuth } from '@/lib/auth';
 import { getDb } from '@/lib/db';
 import { mapAnnotationRow } from '@/lib/annotation-service';
 import { hashToken } from '@/lib/db';
-import { loadPrelabelOperations } from '@/lib/prelabel-service';
+import { loadPrelabelOperations, PrelabelValidationError } from '@/lib/prelabel-service';
 import { FILE_ACCESS_DENIED_MESSAGE, FILE_ACCESS_SQL } from '@/lib/access-service';
+import type { MaskOperation } from '@/types';
 import { createHash } from 'node:crypto';
 
 /**
@@ -58,9 +59,15 @@ export async function GET(
     updated_at: file.annotation_updated_at,
     status: file.annotation_status,
   } : null);
-  const prelabelOperations = !annotation && file.prelabel_storage_ref
-    ? await loadPrelabelOperations(String(file.prelabel_storage_ref), Number(file.width), Number(file.height))
-    : undefined;
+  let prelabelOperations: MaskOperation[] | undefined;
+  if (!annotation && file.prelabel_storage_ref) {
+    try {
+      prelabelOperations = await loadPrelabelOperations(String(file.prelabel_storage_ref), Number(file.width), Number(file.height));
+    } catch (error) {
+      if (!(error instanceof PrelabelValidationError)) throw error;
+      return NextResponse.json({ code: 'INVALID_ANNOTATION', message: error.message }, { status: 422 });
+    }
+  }
   const assetVersion = createHash('sha256').update(JSON.stringify([
     file.image_drive_file_id, file.prediction_drive_file_id, file.width, file.height,
   ])).digest('hex').slice(0, 16);

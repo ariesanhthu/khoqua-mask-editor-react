@@ -31,6 +31,7 @@ export interface PolygonNode {
   id: string;
   x: number;
   y: number;
+  isAnchor?: boolean;
 }
 
 export interface AnnotationPolygonMeta {
