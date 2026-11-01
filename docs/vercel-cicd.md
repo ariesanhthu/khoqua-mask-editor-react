@@ -131,6 +131,8 @@ Workflow cu deploy them bang CLI sau khi Vercel Git da deploy, nhung repository 
 
 Sau khi push, doi Vercel bao `READY`, doi chieu Git SHA cua deployment voi `git rev-parse HEAD`, kiem `/api/health`, UI phan quyen va checksum du lieu. Thong tin backup/doi chieu lan khoi phuc v2: `annotation-tool/docs/MERGE_RECOVERY_20261101.md`.
 
+Cloudflare la luong Containers rieng, Worker `khoqua`, root `/cloudflare`, build `npm ci`, deploy `npx wrangler deploy`. Account Free hien chua chay duoc Containers; chua publish Cloudflare. Khong doi root Vercel (`annotation-tool`) theo root Cloudflare. Xem `annotation-tool/docs/CLOUDFLARE_DEPLOY.md` cho runtime secrets va diem chan; khong seed/import hay thay database/Blob khi sua deploy.
+
 ## Luu y ve Git
 
 Truoc khi deploy, nen xem trang thai thay doi:

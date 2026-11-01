@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   // Must equal the Worker already connected to GitHub in the dashboard (Workers Builds).
-  "name": "khoqua-mask-editor-react",
+  "name": "khoqua",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-24",
   "workers_dev": true,

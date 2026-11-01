@@ -10,6 +10,8 @@
 
 PostgreSQL, private Vercel Blob và JWT đã được kết nối. Để bật luồng đồng bộ/xuất Google Drive, cần đặt `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` bằng toàn bộ JSON key của service account (email riêng lẻ không đủ) rồi redeploy.
 
+Cloudflare là phương án Containers riêng, dùng Worker `khoqua`, root `/cloudflare`, build `npm ci`, deploy `npx wrangler deploy`. Root `/annotation-tool` khiến Wrangler tự tạo OpenNext và lỗi self-reference 10143. Account hiện còn Free, chưa đủ điều kiện chạy Containers; xem [cấu hình và điểm chặn Cloudflare](annotation-tool/docs/CLOUDFLARE_DEPLOY.md). Production v2 hiện chạy trên Vercel.
+
 Mã ứng dụng nằm trong [`annotation-tool/`](annotation-tool/README.md). Có thể chạy ngay từ thư mục gốc:
 
 ```bash

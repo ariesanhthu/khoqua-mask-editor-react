@@ -6,6 +6,8 @@ Cập nhật: 2026-09-09; bổ sung 2026-10-25 (nhóm ảnh, phân công theo nh
 
 ## Trạng thái bàn giao
 
+Bổ sung Cloudflare 2026-11-01: Worker đích `khoqua` đang build nhầm root `/annotation-tool`, gây OpenNext tự cấu hình service `annotation-tool` và lỗi 10143. Đã sửa tên trong cấu hình Containers; root dự kiến `/cloudflare`. Account hiện Free, chưa có runtime secrets, chưa build image Docker hoặc deploy Containers. Chi tiết và điều kiện còn thiếu: [CLOUDFLARE_DEPLOY.md](CLOUDFLARE_DEPLOY.md). Production chính là Vercel v2 đã khôi phục; sửa cấu hình này không thay DB/Blob/annotation.
+
 Người dùng yêu cầu dừng triển khai tiếp và ghi lại kiến trúc, kết quả, các việc chưa làm xong. Working tree đã deploy Vercel 2026-10-25 (deployment `bitter-melon-annotation-q3f7ls3bn`, từ working tree, chưa commit). Vẫn **chưa commit**; UI chỉ được kiểm tra một phần (Chrome headless, đăng nhập production) — xem từng tài liệu chuyên đề.
 
 Đã chạy thành công:

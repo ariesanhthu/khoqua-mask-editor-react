@@ -8,6 +8,8 @@ Agent tiếp tục công việc: đọc [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 
 Ứng dụng gán nhãn nhiều người dùng cho mặt nạ phân đoạn vân khổ qua và point mật độ u vấu; dữ liệu điểm đứt gãy cũ được giữ riêng. UI và backend đều dùng Next.js App Router; không có backend Python, Vite hay Docker.
 
+Cloudflare có phương án Containers riêng trong `../cloudflare`, Worker đích `khoqua`; cần root `/cloudflare`, build `npm ci`, deploy `npx wrangler deploy`, Workers Paid và runtime secrets của đúng database/Blob production. Chưa deploy Cloudflare; xem [CLOUDFLARE_DEPLOY.md](docs/CLOUDFLARE_DEPLOY.md). Vercel vẫn dùng ứng dụng tại thư mục này, không dùng Docker.
+
 ## Chạy cục bộ
 
 Yêu cầu Node.js 20+.

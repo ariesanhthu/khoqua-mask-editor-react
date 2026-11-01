@@ -21,6 +21,15 @@ Mẫu một mục:
 
 ---
 
+## 2026-11-01 — Xác định sai root Cloudflare và khớp tên Worker Containers
+
+- **Người dùng xác nhận:** root Cloudflare hiện là `/annotation-tool`; yêu cầu sửa deploy, giữ dữ liệu label03.
+- **Nguyên nhân:** Wrangler tự migrate OpenNext tại thư mục ứng dụng, sinh self-reference `annotation-tool` trong khi Worker đích là `khoqua`; log build xác nhận lỗi 10143.
+- **Sửa:** `cloudflare/wrangler.jsonc` dùng tên `khoqua`; tài liệu ghi root Containers `/cloudflare`, build `npm ci`, deploy `npx wrangler deploy`. Không thêm OpenNext, nâng Next, đổi schema, dữ liệu hoặc secrets.
+- **Đã kiểm chứng:** app typecheck/lint/build qua, 248 test / 28 file qua; Cloudflare typecheck và `wrangler deploy --dry-run --containers-rollout=none` qua, nhận container `khoqua-appcontainer` và không có self-reference OpenNext.
+- **Chưa kiểm chứng/điểm chặn:** dashboard hiện Workers Free, chưa có runtime secrets; chưa build Docker image hoặc publish Cloudflare. Giữ nguyên tab có secret người dùng nhập chưa lưu; cần người dùng tự nâng gói nếu muốn chạy Containers.
+- **Tài liệu:** README gốc/app, `docs/vercel-cicd.md`, `ARCHITECTURE.md`, `CLOUDFLARE_DEPLOY.md`; bổ sung chú thích runtime secrets trong `.env.example` cục bộ (file này đang bị gitignore).
+
 ## 2026-11-01 — Sửa CI deploy trùng và ghi nhận kiểm tra production
 
 - **Lỗi đã xác định:** Vercel Git đã deploy thành công, nhưng GitHub job CLI gọi `vercel pull --token=` vì repository không có Vercel secrets, khiến workflow báo đỏ.

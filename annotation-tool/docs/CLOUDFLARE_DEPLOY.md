@@ -2,22 +2,24 @@
 
 ## Lỗi 10143 khi deploy Worker `khoqua` (2026-11-01)
 
-Log `WORKER_SELF_REFERENCE` trỏ đến `annotation-tool` là cấu hình của adapter OpenNext, khác cấu hình Containers trong repo này (repo không có binding đó). Tên Worker thực tế trong log là `khoqua`, nên self-reference phải dùng chính `khoqua`:
+Đã đối chiếu dashboard và log build `1f157f7e-825a-4d63-ab8a-657e54326853`: Worker đích `khoqua`, branch `master`, root `/annotation-tool`, build `npm run build`, deploy `npx wrangler deploy`. Người dùng xác nhận root `/annotation-tool` ngày 2026-11-01.
 
-```jsonc
-{
-  "name": "khoqua",
-  "services": [
-    { "binding": "WORKER_SELF_REFERENCE", "service": "khoqua" }
-  ]
-}
-```
+Root này không có cấu hình Wrangler; Wrangler tự migrate sang OpenNext, lấy tên package `annotation-tool` làm service `WORKER_SELF_REFERENCE`, trong khi Workers Builds upload vào `khoqua`. Đây là nguyên nhân 10143. Với OpenNext, self-reference phải trùng tên Worker ([quy tắc OpenNext](https://opennext.js.org/cloudflare/caching)), nhưng sửa riêng binding chưa làm app này tương thích Workers: app cần native `sharp`, còn Next 16.3.0 nằm ngoài peer range của adapter 1.20.15. Không thêm adapter hoặc ép nâng Next để vượt qua lỗi upload.
 
-Đây chỉ là phần cần khớp trong cấu hình OpenNext đang được dùng, không thay toàn bộ file Wrangler bằng đoạn trên; giữ các binding, assets, cache và secret khác. Lệnh deploy và cấu hình theo environment cũng phải dùng cùng tên. Xem [quy tắc self-reference của OpenNext](https://opennext.js.org/cloudflare/caching).
+Cấu hình đúng theo phương án Containers đã chuẩn bị nằm ở `cloudflare/wrangler.jsonc`. Đã sửa `name` thành `khoqua` để khớp Worker hiện được build. Khi đủ điều kiện, đặt:
 
-Cấu hình đã commit của repo là `cloudflare/wrangler.jsonc`, tên `khoqua-mask-editor-react`, chạy Containers và không dùng `WORKER_SELF_REFERENCE`. Cần xác định Root directory, Build command và Deploy command của Worker `khoqua` trước khi sửa cấu hình thực sự; không tự chuyển kiến trúc hoặc tạo Worker `annotation-tool` để lấp lỗi sai tên. Kiểm tra Cloudflare API bằng thông tin cục bộ ngày 2026-11-01 trả 401; chưa thay cấu hình hoặc deploy Cloudflare trong lần sửa này. Lỗi upload Worker không phải thao tác xóa database/annotation.
+| Mục | Giá trị |
+| --- | --- |
+| Root directory | `/cloudflare` |
+| Build command | `npm ci` |
+| Deploy command | `npx wrangler deploy` |
+| Production branch | `master` |
 
-Cập nhật: 2026-10-25. **Trạng thái: đã chuẩn bị code/cấu hình, CHƯA deploy.** Production hiện vẫn chạy trên Vercel (`docs/vercel-cicd.md` ở gốc repo). Tài liệu này mô tả phương án thứ hai chạy song song, không thay thế Vercel.
+**Điểm chặn đã xác minh 2026-11-01:** account vẫn ở Workers **Free**; Containers yêu cầu Paid (dashboard hiển thị 5 USD/tháng + usage). Worker `khoqua` chưa có runtime variables/secrets. Cần người dùng tự nâng gói nếu muốn triển khai Containers và đặt runtime `SECRET_KEY`, `DATABASE_URL`, `BLOB_READ_WRITE_TOKEN` lấy từ đúng production Vercel. Build variables không thay cho runtime secrets. Không tự thanh toán, tạo database mới, seed, import hoặc đổi Blob store. Tab Settings gốc đang có secret người dùng nhập chưa lưu; giữ nguyên, không tự submit/discard.
+
+**Đã kiểm chứng:** `cloudflare/npm run typecheck`; `npx wrangler deploy --dry-run --containers-rollout=none` bundle 54.54 KiB, nhận `APP` và container `khoqua-appcontainer`, không dùng `WORKER_SELF_REFERENCE`. Dry-run chưa build Docker image hay publish Worker. API token cục bộ trả 401; cấu hình dashboard được kiểm tra qua phiên trình duyệt đã đăng nhập.
+
+Cập nhật: 2026-11-01. **Trạng thái: đã sửa cấu hình trong repo, CHƯA deploy Cloudflare.** Production v2 đã khôi phục trên Vercel (`docs/vercel-cicd.md` ở gốc repo), dữ liệu đã backup/đối chiếu. Lỗi upload Worker không phải thao tác xóa database/annotation. Các mục bên dưới mô tả phương án Containers và ghi nhận lịch sử 2026-10-25; Worker đích hiện nay là `khoqua`.
 
 ## Quyết định (người dùng xác nhận 2026-10-25)
 
@@ -81,7 +83,7 @@ npx wrangler secret put BLOB_READ_WRITE_TOKEN
 
 **Cảnh báo dữ liệu:** dùng cùng `DATABASE_URL` và Blob store như Vercel nghĩa là bản Cloudflare đọc/ghi **cùng dữ liệu thật** (khóa file, lưu, “đặt làm bản chính”). Dùng `SECRET_KEY` giống nhau thì cookie đăng nhập hợp lệ ở cả hai nơi; khác nhau thì phải đăng nhập lại từng nơi. Muốn thử an toàn, tạo database/Blob riêng (ví dụ nhánh Neon) và đặt secret cho chúng trước.
 
-Địa chỉ Worker (subdomain workers.dev của account, kiểm tra 2026-10-25): `https://khoqua-mask-editor-react.aries-anhthu.workers.dev`. Token Cloudflare cho các lệnh `wrangler`/API đặt trong `.env` gốc repo (gitignore) với tên biến chuẩn `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (cùng `R2_*` chưa dùng); nạp vào shell trước khi chạy wrangler.
+Địa chỉ Worker đích (kiểm tra dashboard 2026-11-01): `https://khoqua.aries-anhthu.workers.dev`. Token Cloudflare cho các lệnh `wrangler`/API đặt trong `.env` gốc repo (gitignore) với tên biến chuẩn `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (cùng `R2_*` chưa dùng); token cục bộ hiện trả 401, cần thông tin hợp lệ trước khi dùng CLI publish.
 
 `GOOGLE_OAUTH_REDIRECT_URI` phải trỏ về `https://<tên-miền-worker>/api/google/callback` và URI đó phải được thêm vào Google Cloud Console. Nếu không, kết nối Drive từ bản Cloudflare sẽ lỗi.
 
@@ -106,14 +108,14 @@ Không có Docker: `npx wrangler deploy --containers-rollout=none` chỉ cập n
 
 | Mục | Giá trị |
 | --- | --- |
-| Root directory | `cloudflare` |
+| Root directory | `/cloudflare` |
 | Build command | `npm ci` |
 | Deploy command | `npx wrangler deploy` |
 | Production branch | `master` |
 
 Lưu ý:
 
-- Push vào `master` sẽ đồng thời kích hoạt GitHub Actions → Vercel **và** Workers Builds → Cloudflare. Hai bản production cùng dùng một database.
+- Push vào `master` kích hoạt GitHub Actions kiểm tra chất lượng, Vercel Git integration deploy Vercel và Workers Builds chạy Cloudflare nếu đang bật. Cloudflare chỉ dùng cùng dữ liệu khi runtime secrets trỏ đúng database/Blob production; hiện chưa cấu hình nên chưa phục vụ app.
 - Nhánh/PR chạy `wrangler versions upload`, không cập nhật image container (theo tài liệu Cloudflare).
 - Chưa xác minh Workers Builds có Docker để build image; nếu build lỗi, deploy từ máy có Docker.
 
