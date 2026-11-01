@@ -11,7 +11,9 @@ export type SessionCloseReason = 'DONE' | 'SWITCH_FILE' | 'EXPLICIT_RELEASE' | '
 export type ErrorCode =
   | 'FILE_LOCKED' | 'LOCK_LOST' | 'REVISION_CONFLICT'
   | 'INVALID_ANNOTATION' | 'ASSET_NOT_FOUND' | 'DRIVE_SYNC_ERROR'
-  | 'FILE_NOT_FOUND' | 'UNAUTHORIZED' | 'FORBIDDEN';
+  | 'FILE_NOT_FOUND' | 'UNAUTHORIZED' | 'FORBIDDEN' | 'INVALID_DATASET'
+  // Client-side: a non-JSON response (e.g. the platform's plain-text 413).
+  | 'UNKNOWN';
 
 export type LockState =
   | { state: 'AVAILABLE' }
@@ -83,8 +85,44 @@ export interface FileListItem {
   assetState: 'READY' | 'ERROR';
   lock: LockState;
   assignment?: { userId: string; displayName: string };
+  group?: { id: string; name: string };
   latestRevision: number;
   latestVersionNumber: number;
+}
+
+export interface FileGroupSummary {
+  id: string;
+  name: string;
+  total: number;
+  unstarted: number;
+  draft: number;
+  done: number;
+  /** Ảnh đang có phiên giữ khóa chỉnh sửa. */
+  locked: number;
+  /** Chỉ trả cho ADMIN. */
+  assignees: Array<{ userId: string; displayName: string }>;
+}
+
+export interface FileGroupList {
+  groups: FileGroupSummary[];
+  /** Số ảnh chưa thuộc nhóm nào; luôn 0 với người không phải ADMIN. */
+  ungrouped: number;
+}
+
+export interface UserSummary {
+  id: string;
+  displayName: string;
+  email: string | null;
+  role: UserRole;
+  createdAt: string;
+}
+
+export interface DatasetImportResult {
+  fileId: string;
+  externalKey: string;
+  groupId: string;
+  groupName: string;
+  created: boolean;
 }
 
 export interface PaginatedResponse<T> {
@@ -164,9 +202,29 @@ export interface ProjectSummary {
 
 // ─── Mask Operations (Client) ───────────────────────────
 
+export interface BrushOperation {
+  id: string;
+  revision: number;
+  type: 'BRUSH_ADD' | 'BRUSH_ERASE';
+  radius: number;
+  points: Array<{ x: number; y: number }>;
+  bounds: { left: number; top: number; right: number; bottom: number };
+}
+
+export interface RasterMaskState {
+  revision: number;
+  operations: BrushOperation[];
+  dirty: boolean;
+}
+
+export interface VectorCache {
+  revision: number;
+  status: 'EMPTY' | 'DIRTY' | 'VECTORING' | 'READY';
+  polygons: AnnotationPolygon[];
+}
+
 export type MaskOperation =
-  | { type: 'BRUSH_ADD'; brushSize: number; points: Array<{ x: number; y: number }> }
-  | { type: 'BRUSH_ERASE'; brushSize: number; points: Array<{ x: number; y: number }> }
+  | BrushOperation
   | { type: 'POLYGON_SET'; polygons: AnnotationPolygon[] }
   | { type: 'RESET_TO_PREDICTION' };
 
@@ -178,6 +236,7 @@ export interface LocalDraft {
   fileId: string;
   userId: string;
   baseServerRevision: number;
+  coordinateSpace?: { width: number; height: number; imageUrl: string };
   humanAction: HumanAction;
   wartPoints?: BreakpointAnnotation;
   maskSnapshotBlob?: Blob;

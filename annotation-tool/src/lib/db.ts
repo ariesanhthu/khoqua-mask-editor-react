@@ -212,6 +212,37 @@ async function initializeSchema(db: AppDatabase): Promise<void> {
     `ALTER TABLE projects ADD COLUMN IF NOT EXISTS export_drive_folder_id TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE dataset_files ADD COLUMN IF NOT EXISTS prelabel_storage_ref TEXT`,
     `ALTER TABLE dataset_files ADD COLUMN IF NOT EXISTS prelabel_filename TEXT`,
+    `ALTER TABLE annotation_versions ADD COLUMN IF NOT EXISTS asset_snapshot_json TEXT`,
+    `ALTER TABLE annotation_versions ADD COLUMN IF NOT EXISTS version_label TEXT`,
+    // Large gzipped save bodies arrive in parts to stay under the ~4.5 MB platform request limit.
+    `CREATE TABLE IF NOT EXISTS upload_chunks (
+      upload_id TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      dataset_file_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      data TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (upload_id, chunk_index)
+    )`,
+    // Nhóm ảnh (mỗi giống một nhóm) và phân công theo nhóm. Ảnh có sẵn giữ group_id NULL = chưa phân nhóm.
+    `CREATE TABLE IF NOT EXISTS file_groups (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+      UNIQUE(project_id, name)
+    )`,
+    `CREATE TABLE IF NOT EXISTS group_assignments (
+      group_id TEXT NOT NULL REFERENCES file_groups(id),
+      user_id TEXT NOT NULL REFERENCES users(id),
+      assigned_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+      PRIMARY KEY (group_id, user_id)
+    )`,
+    `ALTER TABLE dataset_files ADD COLUMN IF NOT EXISTS group_id TEXT REFERENCES file_groups(id)`,
+    'CREATE INDEX IF NOT EXISTS idx_files_group ON dataset_files(group_id)',
+    'CREATE INDEX IF NOT EXISTS idx_group_assignments_user ON group_assignments(user_id)',
   ];
 
   // 17 lệnh DDL tuần tự tốn ~6.3s mỗi lần khởi động vì mỗi lệnh là một vòng tới

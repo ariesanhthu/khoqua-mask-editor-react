@@ -4,6 +4,8 @@ import { getDb } from '@/lib/db';
 import { mapAnnotationRow } from '@/lib/annotation-service';
 import { hashToken } from '@/lib/db';
 import { loadPrelabelOperations } from '@/lib/prelabel-service';
+import { FILE_ACCESS_DENIED_MESSAGE, FILE_ACCESS_SQL } from '@/lib/access-service';
+import { createHash } from 'node:crypto';
 
 /**
  * GET /api/files/[fileId]/editor — Editor bootstrap data (spec 02 §15)
@@ -26,15 +28,19 @@ export async function GET(
       an.segmentation_json AS annotation_segmentation_json,
       an.breakpoints_json AS annotation_breakpoints_json,
       an.last_edited_by AS annotation_last_edited_by,
-      an.updated_at AS annotation_updated_at, an.status AS annotation_status
+      an.updated_at AS annotation_updated_at, an.status AS annotation_status,
+      ${FILE_ACCESS_SQL} AS can_access
     FROM dataset_files df
     JOIN datasets d ON d.id = df.dataset_id
     LEFT JOIN file_locks fl ON fl.dataset_file_id = df.id
     LEFT JOIN users lu ON lu.id = fl.user_id
     LEFT JOIN annotations an ON an.dataset_file_id = df.id
-    WHERE df.id = ?`).get(fileId);
+    WHERE df.id = ?`).get(user.userId, user.userId, fileId);
   if (!file) {
     return NextResponse.json({ code: 'FILE_NOT_FOUND', message: 'File not found' }, { status: 404 });
+  }
+  if (!file.can_access) {
+    return NextResponse.json({ code: 'FORBIDDEN', message: FILE_ACCESS_DENIED_MESSAGE }, { status: 403 });
   }
 
   // Check lock ownership
@@ -53,12 +59,11 @@ export async function GET(
     status: file.annotation_status,
   } : null);
   const prelabelOperations = !annotation && file.prelabel_storage_ref
-    ? await loadPrelabelOperations(
-        file.prelabel_storage_ref as string,
-        Number(file.width || 1024),
-        Number(file.height || 768),
-      )
+    ? await loadPrelabelOperations(String(file.prelabel_storage_ref), Number(file.width), Number(file.height))
     : undefined;
+  const assetVersion = createHash('sha256').update(JSON.stringify([
+    file.image_drive_file_id, file.prediction_drive_file_id, file.width, file.height,
+  ])).digest('hex').slice(0, 16);
 
   return NextResponse.json({
     file: {
@@ -69,8 +74,8 @@ export async function GET(
       height: file.height || 768,
     },
     assets: {
-      imageUrl: `/api/files/${fileId}/assets/image`,
-      predictionMaskUrl: `/api/files/${fileId}/assets/prediction`,
+      imageUrl: `/api/files/${fileId}/assets/image?v=${assetVersion}`,
+      predictionMaskUrl: `/api/files/${fileId}/assets/prediction?v=${assetVersion}`,
       ...(annotation && (annotation.segmentation as { maskStorageKey?: string }).maskStorageKey
         ? { currentMaskUrl: `/api/files/${fileId}/assets/current-mask` }
         : {}),

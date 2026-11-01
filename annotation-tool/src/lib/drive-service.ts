@@ -4,8 +4,8 @@ import { access, readFile } from 'fs/promises';
 import crypto from 'crypto';
 import path from 'path';
 import { importPKCS8, SignJWT } from 'jose';
-import { get as getBlob } from '@vercel/blob';
 import { getDb, generateId, nowISO } from './db';
+import { getDatasetObject } from './object-store';
 import { getGoogleOAuthAccessToken } from './google-oauth';
 
 interface ManifestItem {
@@ -168,9 +168,9 @@ export async function fetchDatasetAsset(reference: string): Promise<Uint8Array> 
   if (reference.startsWith('blob:')) {
     const pathname = reference.slice('blob:'.length).replace(/^\/+/, '');
     if (!pathname || pathname.includes('..')) throw new Error('Blob reference không hợp lệ.');
-    const result = await getBlob(pathname, { access: 'private', useCache: false });
-    if (!result || result.statusCode !== 200 || !result.stream) throw new Error('Không tải được private Blob asset.');
-    return new Uint8Array(await new Response(result.stream).arrayBuffer());
+    const bytes = await getDatasetObject(pathname);
+    if (!bytes) throw new Error('Không tải được private Blob asset.');
+    return new Uint8Array(bytes);
   }
   if (/^https:\/\//i.test(reference)) {
     const response = await fetch(reference, { cache: 'no-store' });

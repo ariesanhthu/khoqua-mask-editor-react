@@ -12,11 +12,13 @@
     "dataset:upload": "node --env-file-if-exists=.env.local scripts/upload-blob-dataset.mjs",
     "dataset:setup": "node --env-file-if-exists=.env.local scripts/setup-blob-dataset.mjs",
     "labels:migrate": "node --experimental-strip-types --env-file-if-exists=.env.local scripts/migrate-instance-labels.mjs",
+    "labels:fetch": "node --experimental-strip-types --loader ./scripts/resolve-typescript.mjs --env-file-if-exists=.env.local scripts/fetch-ground-truth.mjs",
     "test": "vitest run"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
     "@vercel/blob": "^2.7.0",
+    "aws4fetch": "1.0.20",
     "dexie": "^4.4.4",
     "jose": "^6.2.8",
     "jszip": "^3.10.1",

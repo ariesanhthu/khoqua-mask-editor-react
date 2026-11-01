@@ -7,6 +7,7 @@ import type {
   FileListItem, PaginatedResponse, LockAcquireResponse,
   HeartbeatResponse, EditorBootstrap, SaveDraftRequest,
   SaveDraftResponse, DoneRequest, DoneResponse, ApiError, CurrentUser, ProjectSummary,
+  DatasetImportResult, FileGroupList, FileGroupSummary, UserSummary,
 } from '@/types';
 
 /**
@@ -43,6 +44,61 @@ function forgetLockToken(fileId: string) {
   try { sessionStorage.removeItem(LOCK_TOKEN_KEY + fileId); } catch { /* chế độ riêng tư */ }
 }
 
+/** Platform errors (e.g. Vercel's 413) come back as plain text, not our JSON error shape. */
+function httpError(status: number): ApiError {
+  return {
+    code: 'UNKNOWN',
+    message: status === 413
+      ? 'Dữ liệu gửi lên vượt giới hạn kích thước của máy chủ (HTTP 413). Bản vẽ vẫn được giữ trên thiết bị.'
+      : `HTTP ${status}`,
+  };
+}
+
+// Vercel rejects request bodies over ~4.5 MB; keep a margin for headers.
+const MAX_REQUEST_BYTES = 4_400_000;
+const COMPRESS_FROM_BYTES = 256_000;
+// Must match MAX_CHUNK_BYTES / MAX_CHUNKS in request-body.ts.
+const CHUNK_BYTES = 4_000_000;
+const MAX_CHUNKS = 16;
+
+/**
+ * Annotation JSON (polygons with thousands of nodes and repeated ids) compresses roughly tenfold,
+ * so large save bodies are gzipped in the browser and inflated on the server. If the gzipped body
+ * is still over the platform limit it is uploaded in parts first and the save request only names
+ * the upload (readAnnotationBody assembles it).
+ */
+async function jsonBody(fileId: string, data: unknown): Promise<{ body: BodyInit; headers: Record<string, string> }> {
+  const json = JSON.stringify(data);
+  if (json.length < COMPRESS_FROM_BYTES || typeof CompressionStream === 'undefined') {
+    return { body: json, headers: {} };
+  }
+  const compressed = await new Response(
+    new Blob([json]).stream().pipeThrough(new CompressionStream('gzip')),
+  ).arrayBuffer();
+  if (compressed.byteLength <= MAX_REQUEST_BYTES) {
+    return { body: compressed, headers: { 'Content-Type': 'application/octet-stream', 'X-Body-Encoding': 'gzip' } };
+  }
+  const chunks = Math.ceil(compressed.byteLength / CHUNK_BYTES);
+  if (chunks > MAX_CHUNKS) {
+    throw {
+      code: 'INVALID_ANNOTATION',
+      message: `Dữ liệu polygon quá lớn để lưu (${(compressed.byteLength / 1_048_576).toFixed(1)} MB sau khi nén). Hãy gộp hoặc xóa bớt vùng nhỏ rồi lưu lại; bản vẽ vẫn được giữ trên thiết bị.`,
+    } satisfies ApiError;
+  }
+  const uploadId = crypto.randomUUID();
+  const lockToken = getLockToken(fileId);
+  for (let index = 0; index < chunks; index += 1) {
+    const response = await fetch(`/api/files/${fileId}/upload-chunks?uploadId=${uploadId}&index=${index}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/octet-stream', ...(lockToken ? { 'X-Annotation-Lock-Token': lockToken } : {}) },
+      body: compressed.slice(index * CHUNK_BYTES, (index + 1) * CHUNK_BYTES),
+    });
+    if (!response.ok) throw await response.json().catch(() => httpError(response.status));
+  }
+  return { body: '', headers: { 'X-Body-Encoding': 'gzip', 'X-Body-Upload': uploadId, 'X-Body-Chunks': String(chunks) } };
+}
+
 async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -55,10 +111,7 @@ async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(url, { ...options, headers, credentials: 'same-origin' });
 
   if (!res.ok) {
-    const error: ApiError = await res.json().catch(() => ({
-      code: 'UNKNOWN' as const,
-      message: `HTTP ${res.status}`,
-    }));
+    const error: ApiError = await res.json().catch(() => httpError(res.status));
     throw error;
   }
 
@@ -91,6 +144,45 @@ export async function createProject(name: string, driveFolderId: string, exportD
   return apiFetch<ProjectSummary>('/api/projects', {
     method: 'POST', body: JSON.stringify({ name, driveFolderId, exportDriveFolderId }),
   });
+}
+
+/** Dự án nhận dữ liệu bằng cách tải thư mục lên, không có nguồn manifest để đồng bộ. */
+export async function createUploadProject(name: string) {
+  return apiFetch<ProjectSummary>('/api/projects', {
+    method: 'POST', body: JSON.stringify({ name, source: 'upload' }),
+  });
+}
+
+/** Một ảnh mỗi request (multipart) để nằm dưới giới hạn body ~4.5 MB của Vercel. */
+export async function importDatasetItem(projectId: string, form: FormData) {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/import`, {
+    method: 'POST', body: form, credentials: 'same-origin',
+  });
+  if (!response.ok) throw await response.json().catch(() => httpError(response.status));
+  return response.json() as Promise<DatasetImportResult>;
+}
+
+// ─── Groups ─────────────────────────────────────────────
+
+export async function getGroups(projectId: string) {
+  return apiFetch<FileGroupList>(`/api/projects/${encodeURIComponent(projectId)}/groups`);
+}
+
+export async function setGroupAssignees(projectId: string, groupId: string, userIds: string[]) {
+  return apiFetch<{ assignees: FileGroupSummary['assignees'] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/groups/${encodeURIComponent(groupId)}/assignees`,
+    { method: 'PUT', body: JSON.stringify({ userIds }) },
+  );
+}
+
+export async function autoGroupProject(projectId: string) {
+  return apiFetch<{ groupsCreated: number; filesGrouped: number; skipped: number }>(
+    `/api/projects/${encodeURIComponent(projectId)}/groups/auto`, { method: 'POST' },
+  );
+}
+
+export async function getUsers() {
+  return apiFetch<UserSummary[]>('/api/users');
 }
 
 export async function syncProject(projectId: string) {
@@ -176,23 +268,27 @@ export async function uploadMask(fileId: string, mask: Blob) {
   const response = await fetch(`/api/files/${fileId}/mask`, {
     method: 'POST', body: mask, headers, credentials: 'same-origin',
   });
-  if (!response.ok) throw await response.json();
+  if (!response.ok) throw await response.json().catch(() => httpError(response.status));
   return response.json() as Promise<{ maskUploadRef: string }>;
 }
 
 // ─── Annotation ─────────────────────────────────────────
 
 export async function saveDraft(fileId: string, data: SaveDraftRequest) {
+  const { body, headers } = await jsonBody(fileId, data);
   return apiFetch<SaveDraftResponse>(`/api/files/${fileId}/annotation`, {
     method: 'PATCH',
-    body: JSON.stringify(data),
+    body,
+    headers,
   });
 }
 
 export async function submitDone(fileId: string, data: DoneRequest) {
+  const { body, headers } = await jsonBody(fileId, data);
   const result = await apiFetch<DoneResponse>(`/api/files/${fileId}/done`, {
     method: 'POST',
-    body: JSON.stringify(data),
+    body,
+    headers,
   });
   forgetLockToken(fileId);
   return result;

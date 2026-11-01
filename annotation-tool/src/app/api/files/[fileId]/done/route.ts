@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { submitDone } from '@/lib/annotation-service';
 import { getDb } from '@/lib/db';
+import { readAnnotationBody } from '@/lib/request-body';
 import { validWartPoints } from '@/lib/wart-points';
 
 function hasPersistableOperations(value: unknown): boolean {
@@ -27,7 +28,12 @@ export async function POST(
   const { fileId } = await params;
   const token = request.headers.get('X-Annotation-Lock-Token') || '';
 
-  const body = await request.json();
+  let body;
+  try {
+    body = await readAnnotationBody(request, fileId, user.userId);
+  } catch {
+    return NextResponse.json({ code: 'INVALID_ANNOTATION', message: 'Annotation payload is not valid JSON' }, { status: 400 });
+  }
   const { baseRevision, annotation } = body;
 
   const segmentation = annotation?.segmentation;
@@ -46,7 +52,17 @@ export async function POST(
       { status: 400 }
     );
   }
-  if (segmentation.humanAction === 'MODIFIED' && !segmentation.maskUploadRef) {
+  // No mask PNG is uploaded any more: the server can rebuild a mask from polygons, not from brush strokes.
+  const lastOperation = Array.isArray(segmentation.maskOperations) ? segmentation.maskOperations.at(-1) : undefined;
+  if (segmentation.humanAction === 'MODIFIED' && !segmentation.maskUploadRef
+      && (lastOperation?.type === 'BRUSH_ADD' || lastOperation?.type === 'BRUSH_ERASE')) {
+    return NextResponse.json(
+      { code: 'INVALID_ANNOTATION', message: 'Brush edits must be converted to polygons before finishing.' },
+      { status: 400 },
+    );
+  }
+  if (segmentation.humanAction === 'MODIFIED' && !segmentation.maskUploadRef
+      && !hasPersistableOperations(segmentation.maskOperations)) {
     const db = await getDb();
     const existing = await db.prepare<{ segmentation_json: string }>('SELECT segmentation_json FROM annotations WHERE dataset_file_id = ?')
       .get(fileId);

@@ -1,10 +1,10 @@
 # Kiến trúc hệ thống và bàn giao agent
 
-Cập nhật: 2026-09-09. Đọc tài liệu này cùng [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) và `../AGENTS.md` trước khi sửa.
+Cập nhật: 2026-09-09; bổ sung 2026-10-25 (nhóm ảnh, phân công theo nhóm, nhập thư mục mặc định/COCO 1.0, Home theo nhóm — chi tiết ở [GROUPS_AND_IMPORT.md](GROUPS_AND_IMPORT.md); tối ưu render editor, nhập COCO 1.0 trong editor — [EDITOR_RENDERING.md](EDITOR_RENDERING.md)). Đọc tài liệu này cùng [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) và `../AGENTS.md` trước khi sửa.
 
 ## Trạng thái bàn giao
 
-Người dùng yêu cầu dừng triển khai tiếp và ghi lại kiến trúc, kết quả, các việc chưa làm xong. Code trong working tree đã được cập nhật nhưng **chưa commit, chưa deploy, chưa kiểm tra UI bằng trình duyệt, chưa chạy E2E HTTP đầy đủ**. Không coi bản local này là thay đổi đã có trên production.
+Người dùng yêu cầu dừng triển khai tiếp và ghi lại kiến trúc, kết quả, các việc chưa làm xong. Working tree đã deploy Vercel 2026-10-25 (deployment `bitter-melon-annotation-q3f7ls3bn`, từ working tree, chưa commit). Vẫn **chưa commit**; UI chỉ được kiểm tra một phần (Chrome headless, đăng nhập production) — xem từng tài liệu chuyên đề.
 
 Đã chạy thành công:
 
@@ -26,6 +26,10 @@ Các lệnh trên không thay thế kiểm thử tương tác, race condition tr
 6. Khi đổi tab/file, bấm Lưu, xác nhận thao tác cần lưu hoặc Hoàn tất: gửi lên server. Không báo thành công nếu server từ chối.
 7. Drive chỉ ghi khi người dùng bấm **Cập nhật Drive ở Home**. Lưu server và lưu Drive là hai hành động riêng.
 8. Một file chỉ có một phiên giữ khóa chỉnh sửa hợp lệ. Backend phải từ chối writer khác và revision cũ; UI phải chặn cả chuột, nút và phím tắt khi chỉ xem/mất khóa.
+9. *(Người dùng xác nhận 2026-10-25)* Admin giao việc **theo nhóm ảnh**; người dùng chỉ thấy nhóm/ảnh được giao. Khi admin tải cả thư mục khổ qua lên, mỗi thư mục con (mỗi giống) tự thành một nhóm. Người gán nhãn xem theo nhóm, bấm nhóm thì thấy danh sách ảnh cần làm.
+10. *(Người dùng xác nhận 2026-10-25)* Tải lên hỗ trợ **COCO 1.0**; định dạng manifest đang có **giữ nguyên, là mặc định**, không được xóa.
+11. *(Người dùng xác nhận 2026-10-25)* Lần này chỉ trình bày lại UX **trang chính (Home)**, giữ design; **không sửa trang editor gán nhãn**. (Áp dụng cho đợt Home đó; yêu cầu 12 sau đó mở lại phạm vi editor.)
+12. *(Người dùng xác nhận 2026-10-25)* Tối ưu editor cho thiết bị: vẽ/tẩy (paint), chỉnh segment, zoom in/out, tải ảnh, chuyển brush ↔ polygon không bị lag; tìm hiểu thuật toán tối ưu render; refactor, cập nhật đầy đủ comment, docs, rule; bổ sung định dạng COCO 1.0. **Không được phá vỡ tính năng hiện có**, đặc biệt **undo từng điểm khi đang vẽ polygon** (chấm nhiều điểm, Ctrl+Z xóa điểm vừa chấm). Xem [EDITOR_RENDERING.md](EDITOR_RENDERING.md), hợp đồng vẽ polygon trong [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md).
 
 ## Stack và phạm vi
 
@@ -38,6 +42,8 @@ Project root: `SAM/khoqua-mask-editor-react/khoqua-mask-editor-react/annotation-
 - Vercel Blob private lưu mask trên hosting; filesystem dùng khi chạy local không cấu hình Blob.
 - OAuth Google ở server dùng để ghi Drive; service account/asset loader dùng đọc dữ liệu nguồn khi phù hợp.
 - `sharp` render/chuẩn hóa mask; JSZip tạo gói xuất.
+
+Hosting: Vercel là production hiện tại. Phương án chạy song song trên Cloudflare Containers (Worker chuyển tiếp vào container Next.js standalone) đã được chuẩn bị nhưng chưa deploy; xem [CLOUDFLARE_DEPLOY.md](CLOUDFLARE_DEPLOY.md).
 
 `AGENTS.md` yêu cầu đọc guide của phiên bản Next.js đang cài trong `node_modules/next/dist/docs/`, không dựa hoàn toàn vào kiến thức phiên bản cũ. Đã đọc guide Route Handlers và `useRouter` trong lần sửa này.
 
@@ -65,15 +71,28 @@ Timer heartbeat 30 giây và polling danh sách 8 giây chỉ giữ khóa/đọc
 
 | File | Trách nhiệm |
 | --- | --- |
-| `src/components/dashboard.tsx` | Chọn project, lọc/mở file, xem file bị khóa, nút Drive/ZIP |
+| `src/components/dashboard.tsx` | Home: chọn project, tổng quan nhóm được giao/tiến độ, danh sách ảnh theo nhóm (lọc, tìm, Làm ảnh tiếp theo), mở file/xem file bị khóa, nút Drive/ZIP; ADMIN có tab Nhập dữ liệu/Quản trị và nút Phân công |
+| `src/components/group-assign-dialog.tsx` | ADMIN chọn người được giao một nhóm |
+| `src/components/dataset-import.tsx` | ADMIN tải thư mục lên: chọn dự án, định dạng (mặc định/COCO 1.0), cách chia nhóm, xem trước, nhập từng ảnh |
+| `src/lib/file-groups.ts` | Quy tắc nhóm dùng chung client/server: nhóm theo thư mục con, theo tiền tố tên, kiểm tên |
+| `src/lib/import-plan.ts`, `src/lib/coco-import.ts` | Lập kế hoạch nhập thư mục ở trình duyệt; đổi COCO (polygon/RLE) thành prelabel `POLYGON_SET` |
+| `src/lib/access-service.ts` | Biểu thức SQL quyền theo nhóm (vai trò đọc từ DB), `requireAdminAccount` |
+| `src/lib/group-service.ts` | Danh sách nhóm + tiến độ, phân công, tự chia nhóm ảnh chưa phân nhóm |
+| `src/lib/dataset-import-service.ts` | Nhập một ảnh: kiểm ảnh/mask/prelabel, ghi object store, upsert ảnh + nhóm trong transaction |
 | `src/components/editor-workspace.tsx` | Bootstrap, recovery local, quản lý tab/file, save gate, heartbeat, conflict UI, sidebar |
-| `src/components/editor-canvas.tsx` | Polygon/node, point, selection, undo/redo, zoom/pan, render/export canvas; có prop `readOnly` |
+| `src/components/editor-canvas.tsx` | Polygon/node, point, selection, undo/redo, zoom/pan, render/export canvas; có prop `readOnly`. Sáu lớp canvas có cờ bẩn riêng, image pyramid, dirty rectangle ([EDITOR_RENDERING.md](EDITOR_RENDERING.md)) |
+| `src/lib/polygon-draft.ts` | Lịch sử điểm của polygon đang vẽ: undo/redo từng điểm, xóa điểm, bỏ đỉnh trùng double-click |
+| `src/lib/brush-worker.ts`, `src/lib/polygon-pack.ts` | Worker vector hóa mask (`INIT_POLYGONS`/`INIT_MASK`/`PUT_PATCH`/`VECTORIZE`); đóng gói polygon thành typed array để chuyển giữa thread |
+| `src/lib/vector-identity.ts` | Bounds polygon (cache) và gán lại id/label sau vector hóa theo IoU, chỉ mục lưới |
+| `src/lib/canvas-view.ts`, `src/lib/mask-pixels.ts` | Zoom quanh con trỏ, tỉ lệ pixel theo thiết bị, image pyramid; raster tâm pixel (`rasterizePolygons`, `forEachPolygonSpan`), vector hóa, làm mịn, LOD, polygon ít điểm cho script nhập (`compactPolygon`) |
+| `src/lib/web-import.ts` | Nhập JSON vào ảnh đang mở: prelabel 1.1 hoặc COCO 1.0 |
 | `src/lib/api-client.ts` | Client HTTP, token khóa theo file, gộp request xin khóa đang chạy |
 | `src/lib/local-drafts.ts` | Dexie database và khóa nháp theo project/file/user |
 | `src/lib/lock-service.ts` | Khóa có TTL, acquire, heartbeat, release |
 | `src/lib/annotation-service.ts` | Transaction lưu draft/Done, kiểm tra token và revision, lịch sử version |
 | `src/lib/wart-points.ts` | Kiểm tra cấu trúc, trạng thái, tọa độ và ID của point u vấu |
-| `src/lib/storage.ts` | PNG validation/normalization, lưu/đọc mask |
+| `src/lib/storage.ts` | PNG validation/normalization, lưu/đọc mask (qua `object-store.ts`) |
+| `src/lib/object-store.ts` | Lưu đối tượng: Cloudflare R2 (`STORAGE_BACKEND=r2`), Vercel Blob (mặc định), đĩa cục bộ; xem [CLOUDFLARE_R2_STORAGE.md](CLOUDFLARE_R2_STORAGE.md) |
 | `src/lib/export-service.ts` | Xuất cả DRAFT/DONE, render polygon cũ, JSONL/ZIP, hash và upsert Drive |
 | `src/lib/drive-service.ts` | Đọc nguồn, manifest, asset đa loại và thao tác Drive |
 | `src/lib/google-oauth.ts` | OAuth config, refresh token mã hóa, access token ở server |
@@ -84,11 +103,17 @@ Timer heartbeat 30 giây và polling danh sách 8 giây chỉ giữ khóa/đọc
 
 | Endpoint | Hành vi |
 | --- | --- |
-| `GET /api/projects/:projectId/files` | File list phân trang, annotation state, lock owner, assignment |
-| `POST /api/files/:fileId/lock` | Xin khóa; token đang sở hữu có thể dùng lại; phiên khác nhận `FILE_LOCKED` (423) |
+| `GET /api/projects` | ADMIN: mọi project; người khác: project có nhóm được giao |
+| `POST /api/projects` | ADMIN (vai trò từ DB). `source: 'upload'` cho phép tạo project không có nguồn manifest |
+| `GET /api/projects/:projectId/files` | File list phân trang, annotation state, lock owner, assignment, `group`. Người không phải ADMIN chỉ nhận ảnh thuộc nhóm được giao; `groupId` (hoặc `ungrouped`), `annotationState` nhận danh sách cách dấu phẩy |
+| `GET /api/projects/:projectId/groups` | Nhóm + tiến độ; ADMIN nhận thêm người được giao và số ảnh chưa phân nhóm |
+| `PUT /api/projects/:projectId/groups/:groupId/assignees` | ADMIN thay danh sách người được giao (`{ userIds }`) |
+| `POST /api/projects/:projectId/groups/auto` | ADMIN xếp ảnh chưa phân nhóm theo tiền tố tên ảnh |
+| `POST /api/projects/:projectId/import` | ADMIN nhập một ảnh (multipart: `meta`, `image`, `prediction?`, `prelabel?`); nhập lại giữ annotation |
+| `POST /api/files/:fileId/lock` | Xin khóa; token đang sở hữu có thể dùng lại; phiên khác nhận `FILE_LOCKED` (423); ảnh ngoài nhóm được giao nhận `FORBIDDEN` (403) |
 | `POST /api/files/:fileId/lock/heartbeat` | Gia hạn TTL nếu user + token hợp lệ |
 | `DELETE /api/files/:fileId/lock` | Nhả đúng khóa đang giữ |
-| `GET /api/files/:fileId/editor` | Bootstrap cho cả editor và viewer; `readOnly`, `lockedBy`, `lock: null` nếu không sở hữu token |
+| `GET /api/files/:fileId/editor` | Bootstrap cho cả editor và viewer; `readOnly`, `lockedBy`, `lock: null` nếu không sở hữu token; 403 nếu ảnh ngoài nhóm được giao |
 | `POST /api/files/:fileId/mask` | Upload PNG với khóa hợp lệ |
 | `PATCH /api/files/:fileId/annotation` | Lưu draft, tăng revision, kiểm tra lock/revision trong transaction |
 | `POST /api/files/:fileId/done` | Validate nhiệm vụ, tạo version, tăng revision, nhả khóa |
@@ -98,6 +123,10 @@ Timer heartbeat 30 giây và polling danh sách 8 giây chỉ giữ khóa/đọc
 | `GET /api/google/diagnostics` | Chẩn đoán quyền thư mục; hiện chọn project đầu tiên, chưa nhận project đang chọn |
 
 Authentication dùng JWT/cookie httpOnly; header khóa là `X-Annotation-Lock-Token`. Không đưa OAuth credential hay refresh token vào client, log hoặc docs.
+
+## Nhóm ảnh và phân công (2026-10-25)
+
+Schema chỉ thêm: `file_groups`, `group_assignments`, cột `dataset_files.group_id` (NULL = chưa phân nhóm, gồm toàn bộ dữ liệu có sẵn). Quyền xem tính bằng biểu thức SQL trong `access-service.ts` nhúng vào truy vấn có sẵn (vai trò đọc từ bảng `users`): người không phải ADMIN chỉ thấy project/nhóm/ảnh được giao và bị từ chối bootstrap/xin khóa ảnh khác; heartbeat/lưu/Hoàn tất không kiểm lại phân công để không mất bản đang sửa. Ảnh mới vào hệ thống qua *Đồng bộ nguồn* (như cũ) hoặc qua tải thư mục (định dạng mặc định hoặc COCO 1.0, mỗi thư mục con thành một nhóm). Chi tiết, quy tắc chia nhóm, chuyển đổi COCO và cách xử lý dữ liệu production có sẵn: [GROUPS_AND_IMPORT.md](GROUPS_AND_IMPORT.md).
 
 ## Hợp đồng annotation u vấu
 
@@ -219,6 +248,20 @@ Các điểm sau được ghi nhận để agent tiếp tục; **chưa sửa/xá
 - Review diff với thay đổi đã có trước phiên; chạy lại typecheck/test/lint/build sau mọi sửa code tiếp theo.
 - Không commit/deploy/sync chỉ vì tài liệu này đề cập; làm theo yêu cầu mới của người dùng.
 - Sau deploy, kiểm tra production UI và luồng Drive thủ công rồi mới đánh dấu các mục tương ứng hoàn tất.
+
+### 5. Tối ưu render editor và nhập COCO 1.0 trong editor (2026-10-25)
+
+- Đã kiểm tra tự động trên Chrome headless với trang dữ liệu giả (`scripts/canvas-browser-check.mjs`: 21 kiểm tra chức năng gồm undo từng điểm polygon, brush, zoom, dirty rectangle trùng pixel với vẽ toàn bộ). **Chưa** thử trên thiết bị thật, ảnh thật ~12 MP/1600 polygon, Safari/Firefox, production build, mất GPU context thật.
+- Nhập COCO 1.0 trong editor dùng ánh xạ danh mục tự động (không có hộp thoại ánh xạ như màn nhập thư mục); chưa thử với file COCO thật từ CVAT trên trình duyệt.
+- Hành vi có sẵn ghi nhận lại (không đổi): lần dùng brush đầu tiên trên file polygon dò lại **mọi** polygon từ raster (đã làm mịn), kể cả polygon nét vẽ không chạm; polygon chạm/chồng nhau gộp thành một. Muốn giữ đỉnh gốc cho polygon không bị chạm cần người dùng quyết định.
+- Chi tiết, số đo và việc còn lại: [EDITOR_RENDERING.md](EDITOR_RENDERING.md) §5, §8.
+
+### 6. Nhóm ảnh, phân công và nhập thư mục (2026-10-25)
+
+- Trước khi deploy phải báo người dùng: ảnh production có sẵn chưa có nhóm, người gán nhãn sẽ không thấy ảnh nào cho tới khi ADMIN bấm **Tự động chia nhóm** và **Phân công** (không có migration tự động).
+- Chưa kiểm thử trên trình duyệt: chọn thư mục, xem trước, ánh xạ danh mục COCO, hộp thoại phân công, bộ lọc nhóm, quay về đúng nhóm từ editor, giao diện hẹp.
+- Chưa thử ghi lên Vercel Blob/R2 thật và giới hạn 4.5 MB/request trên Vercel với ảnh gốc lớn.
+- Chưa có: đổi tên/gộp/xóa nhóm, chuyển ảnh giữa nhóm bằng tay, kiểm phân công ở route asset, lọc Drive/ZIP theo nhóm. Xem [GROUPS_AND_IMPORT.md](GROUPS_AND_IMPORT.md) §8.
 
 ## Môi trường kiểm thử và lưu ý cho agent sau
 

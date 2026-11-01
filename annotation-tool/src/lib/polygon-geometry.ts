@@ -511,9 +511,21 @@ function boundsOverlap(a: GeometryBounds, b: GeometryBounds): boolean {
 }
 
 /** Validate every brush boundary without replacing the shape with a convex hull. */
+const geometryCache = new WeakMap<AnnotationPolygon, GeometryPolygon | null>();
+const geometryBoundsCache = new WeakMap<AnnotationPolygon, GeometryBounds>();
+function cachedPolygonBounds(polygon: AnnotationPolygon): GeometryBounds {
+  const cached = geometryBoundsCache.get(polygon);
+  if (cached) return cached;
+  const bounds = ringBounds(polygon.nodes.map((node) => [node.x, node.y]));
+  geometryBoundsCache.set(polygon, bounds);
+  return bounds;
+}
 function polygonGeometry(polygon: AnnotationPolygon): GeometryPolygon | null {
+  if (geometryCache.has(polygon)) return geometryCache.get(polygon)!;
   const rings = polygonRings(polygon).map((nodes) => normalizeRing(nodes));
-  return rings.some((ring) => !ring) ? null : rings as GeometryPolygon;
+  const geometry = rings.some((ring) => !ring) ? null : rings as GeometryPolygon;
+  geometryCache.set(polygon, geometry);
+  return geometry;
 }
 
 export function polygonRings(polygon: AnnotationPolygon): PolygonNode[][] {
@@ -576,6 +588,7 @@ function brushStrokeGeometry(
   if (usableRadius > 1 && kept.length > BRUSH_MAX_SAMPLES) kept = decimateStroke(samples, (spacing * kept.length) / BRUSH_MAX_SAMPLES);
 
   const step = (Math.PI * 2) / attempt.segments;
+  const capRadius = usableRadius / Math.cos(Math.PI / attempt.segments);
   const snap = (value: number) => attempt.grid ? Math.round(value / attempt.grid) * attempt.grid : value;
   const direction = (index: number) => {
     const previous = kept[Math.max(0, index - 1)];
@@ -588,7 +601,7 @@ function brushStrokeGeometry(
     const ring: GeometryRing = [];
     for (let corner = 0; corner < attempt.segments; corner += 1) {
       const angle = base + corner * step;
-      ring.push([snap(point.x + Math.cos(angle) * usableRadius), snap(point.y + Math.sin(angle) * usableRadius)]);
+      ring.push([snap(point.x + Math.cos(angle) * capRadius), snap(point.y + Math.sin(angle) * capRadius)]);
     }
     return [[ring]];
   });
@@ -632,23 +645,44 @@ function resolveBrushStroke(
   mode: BrushMode,
   newRegion: { label: string; meta?: AnnotationPolygonMeta },
 ): BrushStrokeResult {
-  const touched = geometries.map((geometry) => !!geometry
+  const directlyTouched = geometries.map((geometry) => !!geometry
     && intersectionGeometries(geometry, stroke).length > 0);
   if (mode === 'erase') {
     const resultIds: string[] = [];
     const next = polygons.flatMap((polygon, index) => {
-      if (!touched[index]) return [polygon];
+      if (!directlyTouched[index]) return [polygon];
       return brushComponents(differenceGeometries(geometries[index]!, stroke)).map((shape) => {
         const created = { ...shape, id: createId(), label: polygon.label, meta: { ...polygon.meta, source: 'human' as const } };
         resultIds.push(created.id);
         return created;
       });
     });
-    if (!touched.some(Boolean)) return { error: 'Nét tẩy chưa chạm vùng mask nào.' };
+    if (!directlyTouched.some(Boolean)) return { error: 'Nét tẩy chưa chạm vùng mask nào.' };
     return { polygons: next, resultIds };
   }
 
-  const affectedIndexes = touched.flatMap((value, index) => value ? [index] : []);
+  // A stroke can touch only the top polygon while another mask overlaps below
+  // it. Include the whole overlap-connected component in the local union.
+  const affected = new Set(directlyTouched.flatMap((value, index) => value ? [index] : []));
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (let index = 0; index < geometries.length; index += 1) {
+      if (affected.has(index) || polygons[index].meta?.locked) continue;
+      if (![...affected].some((affectedIndex) => boundsOverlap(cachedPolygonBounds(polygons[index]), cachedPolygonBounds(polygons[affectedIndex])))) continue;
+      const geometry = geometries[index] ?? polygonGeometry(polygons[index]);
+      if (!geometry) continue;
+      geometries[index] = geometry;
+      for (const affectedIndex of affected) {
+        if (intersectionGeometries(geometry, geometries[affectedIndex]!).length > 0) {
+          affected.add(index);
+          expanded = true;
+          break;
+        }
+      }
+    }
+  }
+  const affectedIndexes = [...affected];
   const template = affectedIndexes.length
     ? affectedIndexes.map((index) => polygons[index]).reduce((largest, candidate) =>
       Math.abs(polygonArea(candidate.nodes)) > Math.abs(polygonArea(largest.nodes)) ? candidate : largest)
@@ -659,7 +693,6 @@ function resolveBrushStroke(
     ...shape, id: createId(), label: template.label, meta: { ...template.meta, source: 'human' },
   }));
   if (!created.length) return { error: 'Nét vẽ quá nhỏ để tạo vùng mới.' };
-  const affected = new Set(affectedIndexes);
   const next = affectedIndexes.length ? polygons.flatMap((polygon, index) =>
     index === affectedIndexes[0] ? created : affected.has(index) ? [] : [polygon])
     : [...polygons, ...created];
@@ -698,7 +731,7 @@ export function applyBrushStroke(
   let invalidCandidate = false;
   const rings = polygons.map((polygon) => {
     if (polygon.meta?.locked) return null;
-    const bounds = ringBounds(polygon.nodes.map((node) => [node.x, node.y]));
+    const bounds = cachedPolygonBounds(polygon);
     if (!boundsOverlap(bounds, strokeBounds)) return null;
     const geometry = polygonGeometry(polygon);
     if (!geometry) invalidCandidate = true;

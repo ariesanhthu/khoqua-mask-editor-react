@@ -7,11 +7,20 @@ import type { MaskOperation } from '@/types';
 import { ensureDriveFolder, fetchDatasetAsset, normalizeDriveFolderId, readDriveTextFile, upsertDriveFile } from './drive-service';
 import { getDb } from './db';
 import { readStoredMask } from './storage';
+import { rasterizePolygons } from './mask-pixels';
+import { annotationSvg } from './annotation-svg';
+import { addPixelAudit, addPolygonFiles } from './polygon-export';
+import { cocoCategories, cocoInstance } from './coco-export';
 
 interface ExportRow extends Record<string, unknown> {
   file_id: string;
   external_key: string;
   prediction_ref: string;
+  image_ref: string;
+  image_filename: string;
+  prelabel_ref?: string;
+  last_edited_by?: string;
+  updated_at?: string;
   segmentation_json: string;
   breakpoints_json: string;
   revision: number;
@@ -31,6 +40,9 @@ interface ManifestEntry {
   breakpoints_sha256?: string;
   wart_points_sha256?: string;
   annotation_status?: string;
+  annotation?: string;
+  image?: string;
+  mask_encoding?: string;
 }
 
 interface BreakpointEntry {
@@ -46,11 +58,14 @@ async function loadProjectExport(projectId: string) {
   ).get(projectId);
   if (!project) return null;
   const rows = await db.prepare<ExportRow>(`
-    SELECT df.id AS file_id, df.external_key, df.prediction_drive_file_id AS prediction_ref,
-      a.segmentation_json, a.breakpoints_json, a.revision, df.latest_version_number, a.status AS annotation_status, df.width, df.height
+    SELECT df.id AS file_id, df.external_key, df.prediction_drive_file_id AS prediction_ref, df.image_drive_file_id AS image_ref, df.image_filename, df.prelabel_storage_ref AS prelabel_ref, a.last_edited_by, a.updated_at,
+      COALESCE(a.segmentation_json, '{"humanAction":"UNTOUCHED"}') AS segmentation_json,
+      COALESCE(a.breakpoints_json, '{"state":"NOT_ANNOTATED","points":[]}') AS breakpoints_json,
+      COALESCE(a.revision, 0) AS revision, df.latest_version_number,
+      COALESCE(a.status, 'UNSTARTED') AS annotation_status, df.width, df.height
     FROM dataset_files df
     JOIN datasets d ON d.id = df.dataset_id
-    JOIN annotations a ON a.dataset_file_id = df.id
+    LEFT JOIN annotations a ON a.dataset_file_id = df.id
     WHERE d.project_id = ?
     ORDER BY df.external_key
   `).all(projectId);
@@ -68,6 +83,7 @@ function parseRow(row: ExportRow) {
     revision: Number(row.revision),
     version: Number(row.latest_version_number),
     annotation_status: row.annotation_status,
+    mask_encoding: 'binary-pixel-center-v1',
   };
   return {
     segmentation,
@@ -83,14 +99,8 @@ async function loadMask(row: ExportRow, segmentation: ReturnType<typeof parseRow
   // Older drafts contain polygon operations but no rendered mask (or an older mask key).
   if (segmentation.humanAction === 'MODIFIED' && operation?.type === 'POLYGON_SET') {
     if (!(row.width > 0 && row.height > 0)) throw new Error('Missing source image dimensions.');
-    const polygons = operation.polygons.map((polygon) => {
-      const rings = [polygon.nodes, ...(polygon.holes ?? [])];
-      if (!rings.every((ring) => ring.every((node) => Number.isFinite(node.x) && Number.isFinite(node.y)))) throw new Error('Invalid polygon coordinates.');
-      const path = rings.map((ring) => ring.map((node, index) => (index ? 'L' : 'M') + node.x + ',' + node.y).join(' ') + ' Z').join(' ');
-      return '<path d="' + path + '" fill="white" fill-rule="evenodd"/>';
-    }).join('');
-    return sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${Number(row.width)}" height="${Number(row.height)}"><rect width="100%" height="100%" fill="black"/>${polygons}</svg>`))
-      .greyscale().threshold(127).removeAlpha().png().toBuffer();
+    const pixels = rasterizePolygons(operation.polygons, Number(row.width), Number(row.height));
+    return sharp(pixels, { raw: { width: Number(row.width), height: Number(row.height), channels: 1 } }).png().toBuffer();
   }
   if (segmentation.humanAction === 'ACCEPTED' || operation?.type === 'RESET_TO_PREDICTION') return fetchDatasetAsset(row.prediction_ref);
   if (segmentation.maskStorageKey) return readStoredMask(segmentation.maskStorageKey);
@@ -138,6 +148,7 @@ export async function syncProjectAnnotationsToDrive(projectId: string) {
   let skipped = 0;
 
   for (const row of data.rows) {
+    if (row.annotation_status === 'UNSTARTED') continue;
     try {
       const parsed = parseRow(row);
       manifestEntries.push(parsed.manifest);
@@ -151,6 +162,7 @@ export async function syncProjectAnnotationsToDrive(projectId: string) {
         || previous.mask !== parsed.manifest.mask
         || previous.human_action !== parsed.manifest.human_action
         || previous.annotation_status !== parsed.manifest.annotation_status
+        || previous.mask_encoding !== parsed.manifest.mask_encoding
         || previous.wart_points_sha256 !== parsed.manifest.wart_points_sha256;
       if (!metadataChanged && previous?.mask_sha256 && previous.breakpoints_sha256) {
         parsed.manifest.mask_sha256 = previous.mask_sha256;
@@ -197,20 +209,72 @@ export async function syncProjectAnnotationsToDrive(projectId: string) {
   };
 }
 
-export async function createProjectExportArchive(projectId: string) {
+export async function createProjectExportArchive(projectId: string, includeVersions = false) {
   const data = await loadProjectExport(projectId);
   if (!data) return null;
   const zip = new JSZip();
   const masks = zip.folder('masks');
+  const annotations = zip.folder('annotations');
+  const images = zip.folder('images');
+  const usedNames = new Set<string>();
   const manifestEntries: ManifestEntry[] = [];
   const breakpointEntries: BreakpointEntry[] = [];
   const wartPointEntries: BreakpointEntry[] = [];
   const errors: Array<{ id: string; message: string }> = [];
+  const cocoImages: Array<{ id: number; file_name: string; width: number; height: number; external_key: string; status: string }> = [];
+  const cocoAnnotations: ReturnType<typeof cocoInstance>[] = [];
 
   for (const row of data.rows) {
     try {
       const parsed = parseRow(row);
-      masks?.file(parsed.maskFilename, await loadMask(row, parsed.segmentation));
+      const stem = safeFilename(row.external_key);
+      if (usedNames.has(stem)) throw new Error(`Duplicate export filename: ${stem}`);
+      usedNames.add(stem);
+      const [maskBytes, imageBytes] = await Promise.all([
+        parsed.segmentation.maskStorageKey ? readStoredMask(parsed.segmentation.maskStorageKey) : loadMask(row, parsed.segmentation),
+        fetchDatasetAsset(row.image_ref),
+      ]);
+      const width = Number(row.width); const height = Number(row.height);
+      const [maskMetadata, imageMetadata] = await Promise.all([sharp(maskBytes).metadata(), sharp(imageBytes).metadata()]);
+      if (maskMetadata.width !== width || maskMetadata.height !== height || imageMetadata.width !== width || imageMetadata.height !== height) {
+        throw new Error('Image/mask dimensions differ from saved annotation coordinate space');
+      }
+      // Never invent geometry from the raster during download, including UNTOUCHED/ACCEPTED.
+      let maskOperations = parsed.segmentation.maskOperations;
+      let sourcePrelabel: Record<string, unknown> | undefined;
+      if (row.annotation_status === 'UNSTARTED' && row.prelabel_ref) {
+        sourcePrelabel = JSON.parse(new TextDecoder().decode(await fetchDatasetAsset(row.prelabel_ref)));
+        maskOperations = sourcePrelabel?.maskOperations as MaskOperation[] | undefined;
+      }
+      const extension = imageMetadata.format === 'jpeg' ? 'jpg' : imageMetadata.format || 'png';
+      const imagePath = `images/${stem}.${extension}`;
+      const annotation = {
+        schemaVersion: 'bitter-melon-prelabel-1.1', imageId: row.external_key, datasetFileId: row.file_id, coordinateSpace: 'image_pixels',
+        width, height, maskOperations: maskOperations ?? [], revision: Number(row.revision), version: Number(row.latest_version_number),
+        status: row.annotation_status, segmentation: parsed.segmentation, breakpoints: JSON.parse(row.breakpoints_json),
+        wartPoints: parsed.segmentation.wartPoints, lastEditedBy: row.last_edited_by, updatedAt: row.updated_at,
+        image: `../${imagePath}`, mask: `../masks/${stem}.png`,
+        sourcePrelabel,
+        maskSource: parsed.segmentation.maskStorageKey ? 'saved_raster' : parsed.segmentation.humanAction === 'MODIFIED' ? 'rendered_from_saved_vectors' : 'source_prediction',
+      };
+      masks?.file(parsed.maskFilename, maskBytes);
+      annotations?.file(`${stem}.json`, JSON.stringify(annotation));
+      // Raw JSON strings and image/mask bytes are retained for exact restoration.
+      zip.file(`saved/${stem}/segmentation.json`, row.segmentation_json);
+      zip.file(`saved/${stem}/breakpoints.json`, row.breakpoints_json);
+      images?.file(`${stem}.${extension}`, imageBytes);
+      await addPolygonFiles(zip, `polygons/${stem}`, maskOperations ?? [], width, height, `../../${imagePath}`);
+      const imageId = cocoImages.length + 1;
+      cocoImages.push({ id: imageId, file_name: imagePath, width, height, external_key: row.external_key, status: row.annotation_status });
+      const localCoco = JSON.parse(await zip.file(`polygons/${stem}/coco.json`)!.async('string'));
+      for (const instance of localCoco.annotations) cocoAnnotations.push({ ...instance, id: cocoAnnotations.length + 1, image_id: imageId });
+      await addPixelAudit(zip, `pixel-audit/${stem}`, maskOperations ?? [], width, height, maskBytes);
+      zip.file(`boundaries/${stem}.svg`, annotationSvg(maskOperations ?? [], width, height));
+      zip.file(`overlays/${stem}.svg`, annotationSvg(maskOperations ?? [], width, height,
+        `data:image/${extension === 'jpg' ? 'jpeg' : extension};base64,${Buffer.from(imageBytes).toString('base64')}`));
+      parsed.manifest.annotation = `annotations/${stem}.json`;
+      parsed.manifest.image = imagePath;
+      parsed.manifest.mask_sha256 = sha256(maskBytes);
       manifestEntries.push(parsed.manifest);
       breakpointEntries.push(parsed.breakpoint);
       wartPointEntries.push(parsed.wartPoints);
@@ -219,9 +283,43 @@ export async function createProjectExportArchive(projectId: string) {
     }
   }
   zip.file('manifest.jsonl', jsonLines(manifestEntries));
+  zip.file('coco.json', JSON.stringify({ info: { description: 'Independent current polygon masks, COCO column-major RLE. Original saved raster is retained separately in masks/.' },
+    images: cocoImages, annotations: cocoAnnotations, categories: cocoCategories }));
   zip.file('breakpoints.jsonl', jsonLines(breakpointEntries));
   zip.file('wart-points.jsonl', jsonLines(wartPointEntries));
-  if (errors.length) zip.file('export-errors.json', JSON.stringify(errors, null, 2));
+  zip.file('POLYGON_EXPORT_README.txt', 'polygons/<ảnh>/: mỗi polygon có JSON, PNG và SVG riêng; index.json giữ ID và nhãn. PNG dùng nguyên kích thước ảnh, giữ độc lập cả khi polygon chồng lên nhau.\npixel-audit/<ảnh>/: vector-mask.png dựng bổ sung từ polygon, difference.png so sánh với raster đã lưu, audit.json đếm pixel sai khác. Đỏ: có trong polygon nhưng thiếu ở raster; xanh: chỉ có ở raster. Dữ liệu gốc không bị sửa.\nversions/: toàn bộ lịch sử dành cho ADMIN. Muốn tải từng polygon của một version, dùng nút Tải version trong cửa sổ lịch sử.\n');
+  if (includeVersions) {
+    const db = await getDb();
+    const versions = await db.prepare(`SELECT v.*, df.external_key, df.image_drive_file_id, df.prediction_drive_file_id, df.width, df.height
+      FROM annotation_versions v JOIN dataset_files df ON df.id = v.dataset_file_id
+      JOIN datasets d ON d.id = df.dataset_id WHERE d.project_id = ? ORDER BY df.external_key, v.version_number`).all(projectId);
+    for (const version of versions) {
+      const assets = version.asset_snapshot_json ? JSON.parse(String(version.asset_snapshot_json)) : {
+        image: version.image_drive_file_id, prediction: version.prediction_drive_file_id, width: version.width, height: version.height,
+      };
+      const segmentation = JSON.parse(String(version.segmentation_json));
+      const folder = `versions/${safeFilename(String(version.external_key))}/v${version.version_number}`;
+      // Include each historical crop: its coordinate system may differ from the active image.
+      const imageBytes = await fetchDatasetAsset(assets.image);
+      const format = (await sharp(imageBytes).metadata()).format;
+      const extension = format === 'jpeg' ? 'jpg' : format || 'png';
+      zip.file(`${folder}/image.${extension}`, imageBytes);
+      zip.file(`${folder}/annotation.json`, JSON.stringify({ id: version.id, versionNumber: version.version_number,
+        label: version.version_label, width: assets.width, height: assets.height, coordinateSpace: 'image_pixels',
+        segmentation, maskOperations: segmentation.maskOperations ?? [], breakpoints: JSON.parse(String(version.breakpoints_json)),
+        createdBy: version.created_by, createdAt: version.created_at, assetSnapshot: assets }));
+      zip.file(`${folder}/segmentation.json`, String(version.segmentation_json));
+      zip.file(`${folder}/breakpoints.json`, String(version.breakpoints_json));
+      zip.file(`${folder}/boundary.svg`, annotationSvg(segmentation.maskOperations ?? [], Number(assets.width), Number(assets.height)));
+      await addPolygonFiles(zip, `${folder}/polygons`, segmentation.maskOperations ?? [], Number(assets.width), Number(assets.height), `../image.${extension}`);
+      if (segmentation.maskStorageKey) zip.file(`${folder}/mask.png`, await readStoredMask(segmentation.maskStorageKey));
+      else zip.file(`${folder}/mask.png`, await loadMask({ width: Number(assets.width), height: Number(assets.height), prediction_ref: assets.prediction } as ExportRow, segmentation));
+    }
+  }
+  // A successful download must contain every image, not a partial archive with hidden failures.
+  if (errors.length) throw new Error(`Không thể xuất đủ dữ liệu: ${errors.map((error) => `${error.id}: ${error.message}`).join('; ')}`);
+  zip.file('README.txt', 'annotations/: dữ liệu polygon, boundary (nodes/holes), label và metadata nguyên vẹn.\nsaved/: chuỗi JSON gốc trên server để khôi phục. images/: byte ảnh gốc, không resize/crop/encode lại.\nmasks/: raster đã lưu; chỉ render vector nếu chưa có raster. boundaries/ và overlays/: SVG giữ tọa độ vector, zoom không vỡ hình.\nKhông tự vectorize mask hay đổi nhãn khi tải về. Dữ liệu chưa lưu ở trình duyệt cần bấm Lưu trước khi tải ZIP.\n');
+
   return {
     bytes: await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 6 } }),
     filename: `${safeFilename(data.project.name)}-ground-truth.zip`,

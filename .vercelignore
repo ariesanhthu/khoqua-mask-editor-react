@@ -1,0 +1,13 @@
+# Deploy từ gốc repo: Vercel chỉ build annotation-tool/ (Root Directory). Không tải dữ liệu, bản build hay secret lên.
+.env
+.env.*
+!.env.example
+node_modules
+drive
+annotation-tool/.next
+annotation-tool/data
+annotation-tool/annotation-storage
+annotation-tool/artifacts
+.agents
+.claude
+skills-lock.json

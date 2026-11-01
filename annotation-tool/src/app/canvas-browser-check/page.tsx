@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
-import EditorCanvas, { type EditorCanvasHandle, type EditorCanvasSnapshot } from '@/components/editor-canvas';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import EditorCanvas, { type EditorCanvasHandle, type EditorCanvasSnapshot, type EditorHistoryState, type EditorTool } from '@/components/editor-canvas';
 import { pointInMask } from '@/lib/polygon-geometry';
 import type { AnnotationPolygon, MaskOperation } from '@/types';
 
@@ -12,13 +12,62 @@ const initial: AnnotationPolygon[] = [200, 550].map((x, i) => ({ id: String(i), 
 const operations: MaskOperation[] = [{ type: 'POLYGON_SET', polygons: initial }];
 const breaks = { state: 'NOT_ANNOTATED' as const, points: [] };
 
+/** ?spiky=1: large raster-only prediction with one connected spiky body (no saved polygons). */
+function spikyScene() {
+  const width = 1600; const height = 1000;
+  let seed = 3;
+  const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const points: string[] = [];
+  for (let i = 0; i < 160; i += 1) {
+    const angle = (i / 160) * Math.PI * 2;
+    const radius = i % 2 ? 260 + random() * 40 : 330 + random() * 160;
+    points.push(`${(800 + Math.cos(angle) * radius * 1.6).toFixed(1)},${(500 + Math.sin(angle) * radius).toFixed(1)}`);
+  }
+  const photo = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="${width}" height="${height}" fill="#dfe"/></svg>`);
+  const mask = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><polygon points="${points.join(' ')}" fill="white"/><circle cx="800" cy="500" r="60" fill="black"/></svg>`);
+  return { width, height, photo, mask, operations: [] as MaskOperation[] };
+}
+
+/** ?many=1: large polygon-mode file (600 saved polygons) to profile zoom/tool switches. */
+function manyScene() {
+  const width = 2400; const height = 1600;
+  const polygons: AnnotationPolygon[] = [];
+  for (let row = 0; row < 20; row += 1) {
+    for (let column = 0; column < 30; column += 1) {
+      const id = `m${row}-${column}`;
+      const cx = 60 + column * 78; const cy = 60 + row * 76;
+      const nodes = Array.from({ length: 24 }, (_, i) => {
+        const angle = (i / 24) * Math.PI * 2;
+        const radius = 26 + ((row * 7 + column * 3 + i) % 5) * 2;
+        return { id: `${id}-${i}`, x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
+      });
+      polygons.push({ id, label: `w${polygons.length + 1}`, nodes });
+    }
+  }
+  const photo = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><defs><linearGradient id="g"><stop offset="0" stop-color="#cde"/><stop offset="1" stop-color="#9b7"/></linearGradient></defs><rect width="${width}" height="${height}" fill="url(#g)"/></svg>`);
+  const mask = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"/>`);
+  return { width, height, photo, mask, operations: [{ type: 'POLYGON_SET', polygons }] as MaskOperation[] };
+}
+
 export default function BrowserCheck() {
   const ref = useRef<EditorCanvasHandle>(null);
+  const [scene, setScene] = useState<ReturnType<typeof spikyScene> | null | undefined>(undefined);
   const [polygons, setPolygons] = useState(initial);
   const [mode, setMode] = useState<'add' | 'erase'>('add');
+  const [tool, setTool] = useState<EditorTool>('brush');
   const [message, setMessage] = useState('');
   const [zoom, setZoom] = useState(1);
   const [exported, setExported] = useState('');
+  // Hiển thị cho script kiểm tra trình duyệt: undo/redo cục bộ khi đang chấm điểm polygon.
+  const [history, setHistory] = useState<EditorHistoryState>({ local: false, canUndo: false, canRedo: false });
+  const [selected, setSelected] = useState<string[]>([]);
+  useEffect(() => {
+    const query = new URLSearchParams(window.location.search);
+    const next = query.has('spiky') ? spikyScene() : query.has('many') ? manyScene() : null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- read the URL once after hydration
+    setScene(next);
+    if (next) { setPolygons(next.operations.flatMap((operation) => operation.type === 'POLYGON_SET' ? operation.polygons : [])); setTool('select'); }
+  }, []);
   const change = useCallback((snapshot: EditorCanvasSnapshot) => setPolygons(snapshot.polygons), []);
   const inspectExport = async () => {
     const blob = await ref.current!.exportMask();
@@ -27,6 +76,11 @@ export default function BrowserCheck() {
     const ctx = canvas.getContext('2d')!; ctx.drawImage(bitmap, 0, 0); bitmap.close();
     setExported('PNG center alpha=' + ctx.getImageData(400, 250, 1, 1).data[3] + '; mask alpha=' + ctx.getImageData(220, 250, 1, 1).data[3]);
   };
+  const chooseTool = (next: EditorTool) => {
+    if (next === 'select' || next === 'polygon') ref.current?.beginPolygonEdit();
+    setTool(next);
+  };
+  if (scene === undefined) return null;
   return <main style={{ padding: 12 }}>
     <h1>Canvas browser check — synthetic data only</h1>
     <div style={{ display: 'flex', gap: 20, padding: 12 }}>
@@ -36,15 +90,25 @@ export default function BrowserCheck() {
       <button onClick={() => ref.current?.redo()}>Redo</button>
       <button onClick={() => ref.current?.fit()}>Fit</button>
       <button onClick={inspectExport}>Check PNG</button>
+      <button data-tool="select" onClick={() => chooseTool('select')}>Select</button>
+      <button data-tool="brush" onClick={() => chooseTool('brush')}>Brush</button>
+      <button data-tool="polygon" onClick={() => chooseTool('polygon')}>Polygon</button>
+      <button data-action="flush" onClick={async () => { await ref.current?.flushPendingEdits(); await ref.current?.exportMask(); setMessage('flushed'); }}>Flush</button>
     </div>
-    <p>Mode={mode}; masks={polygons.length}; holes={polygons.reduce((n, p) => n + (p.holes?.length ?? 0), 0)}; center filled={String(polygons.some((p) => pointInMask({ x: 400, y: 250 }, p)))}; zoom={zoom.toFixed(4)}</p>
+    <p>Mode={mode}; tool={tool}; masks={polygons.length}; holes={polygons.reduce((n, p) => n + (p.holes?.length ?? 0), 0)}; center filled={String(polygons.some((p) => pointInMask({ x: 400, y: 250 }, p)))}; zoom={zoom.toFixed(4)}</p>
+    <p data-testid="history">history local={String(history.local)}; canUndo={String(history.canUndo)}; canRedo={String(history.canRedo)}; last={polygons.at(-1)?.label ?? '-'}:{polygons.at(-1)?.nodes.length ?? 0}; selected={selected.length}; maxNodes={polygons.reduce((max, polygon) => Math.max(max, polygon.nodes.length + (polygon.holes ?? []).reduce((sum, hole) => sum + hole.length, 0)), 0)}</p>
     <p>{message} {exported}</p>
     <div className="editor-shell" style={{ width: 900, height: 580 }}>
       <div className="editor-main" style={{ position: 'relative', width: '100%', height: '100%' }}>
-        <EditorCanvas ref={ref} width={800} height={500} imageUrl={image} predictionUrl={blank}
-          initialHumanAction="MODIFIED" initialBreakpoints={breaks} initialOperations={operations}
-          tool="brush" brushMode={mode} brushSize={mode === 'add' ? 12 : 1} maskOpacity={0.5} showMask
-          onChange={change} onSelectionChange={noop} onReady={noop} onMessage={setMessage} onZoomChange={setZoom} />
+        {scene
+          ? <EditorCanvas ref={ref} width={scene.width} height={scene.height} imageUrl={scene.photo} predictionUrl={scene.mask}
+            initialHumanAction={scene.operations.length ? 'MODIFIED' : 'UNTOUCHED'} initialBreakpoints={breaks} initialOperations={scene.operations}
+            tool={tool} brushMode={mode} brushSize={mode === 'add' ? 40 : 20} maskOpacity={0.5} showMask
+            onChange={change} onSelectionChange={setSelected} onHistoryChange={setHistory} onReady={noop} onMessage={setMessage} onZoomChange={setZoom} />
+          : <EditorCanvas ref={ref} width={800} height={500} imageUrl={image} predictionUrl={blank}
+            initialHumanAction="MODIFIED" initialBreakpoints={breaks} initialOperations={operations}
+            tool={tool} brushMode={mode} brushSize={mode === 'add' ? 12 : 1} maskOpacity={0.5} showMask
+            onChange={change} onSelectionChange={setSelected} onHistoryChange={setHistory} onReady={noop} onMessage={setMessage} onZoomChange={setZoom} />}
       </div>
     </div>
   </main>;

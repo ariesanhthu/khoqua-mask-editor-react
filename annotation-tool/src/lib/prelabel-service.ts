@@ -20,8 +20,18 @@ export async function loadPrelabelOperations(
   if (bytes.byteLength === 0 || bytes.byteLength > 50 * 1024 * 1024) {
     throw new Error('Prelabel JSON phải có kích thước từ 1 byte đến 50 MB.');
   }
-  const payload = JSON.parse(new TextDecoder().decode(bytes)) as ProductionPrelabel;
-  if (!['bitter-melon-prelabel-1.0', 'bitter-melon-prelabel-1.1'].includes(payload.schemaVersion) || payload.coordinateSpace !== 'image_pixels') {
+  return parsePrelabelOperations(JSON.parse(new TextDecoder().decode(bytes)), expectedWidth, expectedHeight);
+}
+
+/** Kiểm tra prelabel đã đọc; dùng chung cho editor và luồng nhập dữ liệu để hai bên cùng một quy tắc. */
+export function parsePrelabelOperations(
+  value: unknown,
+  expectedWidth: number,
+  expectedHeight: number,
+): MaskOperation[] {
+  const payload = value as ProductionPrelabel;
+  if (!payload || typeof payload !== 'object' ||
+      !['bitter-melon-prelabel-1.0', 'bitter-melon-prelabel-1.1'].includes(payload.schemaVersion) || payload.coordinateSpace !== 'image_pixels') {
     throw new Error('Prelabel không đúng schema bitter-melon-prelabel-1.0/1.1.');
   }
   if (payload.width !== expectedWidth || payload.height !== expectedHeight) {
@@ -51,7 +61,12 @@ export async function loadPrelabelOperations(
       throw new Error(`Polygon prelabel không hợp lệ tại vị trí ${polygonIndex}.`);
     }
     polygonIds.add(polygon.id);
-    for (const node of polygon.nodes) {
+    // Rãnh khép kín nằm trong `holes`; mỗi ring được kiểm tra như biên ngoài.
+    if (polygon.holes !== undefined && (!Array.isArray(polygon.holes) ||
+        polygon.holes.some((ring) => !Array.isArray(ring) || ring.length < 3))) {
+      throw new Error(`Holes prelabel không hợp lệ trong polygon ${polygon.id}.`);
+    }
+    for (const node of [polygon.nodes, ...(polygon.holes ?? [])].flat()) {
       if (!node?.id || nodeIds.has(node.id) || !Number.isFinite(node.x) || !Number.isFinite(node.y) ||
           node.x < 0 || node.x > expectedWidth || node.y < 0 || node.y > expectedHeight) {
         throw new Error(`Node prelabel không hợp lệ trong polygon ${polygon.id}.`);

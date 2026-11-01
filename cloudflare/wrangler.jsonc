@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // Must equal the Worker already connected to GitHub in the dashboard (Workers Builds).
+  "name": "khoqua-mask-editor-react",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-24",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "containers": [
+    {
+      "class_name": "AppContainer",
+      "image": "../annotation-tool/Dockerfile",
+      "image_build_context": "../annotation-tool",
+      // standard-2 = 1 vCPU / 6 GiB. ZIP/Drive export holds many sharp-decoded images
+      // in memory; tune down only after measuring. Billed per awake second.
+      "instance_type": "standard-2",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "APP", "class_name": "AppContainer" }]
+  },
+  "exports": {
+    "AppContainer": { "type": "durable-object", "storage": "sqlite" }
+  },
+  // Non-secret settings. Secrets (SECRET_KEY, DATABASE_URL, BLOB_READ_WRITE_TOKEN,
+  // GOOGLE_*, BOOTSTRAP_ADMIN_PASSWORD) are set with `wrangler secret put <NAME>`.
+  "vars": {
+    "LOCK_TTL_SECONDS": "300",
+    "LOCK_HEARTBEAT_SECONDS": "25",
+    "GOOGLE_DRIVE_EXPORT_FOLDER_ID": "147cVK2C7EZiupfMJQntP5Nc6tkkhqchN"
+  }
+}

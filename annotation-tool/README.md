@@ -1,6 +1,8 @@
 # Bitter Melon Annotation Tool — Next.js
 
-Tài liệu ngắn về pipeline editor, thao tác chuột và invariant chống regression: [docs/EDITOR_PIPELINE.md](docs/EDITOR_PIPELINE.md).
+Mục lục tài liệu kỹ thuật: [docs/README.md](docs/README.md). Quy định thay đổi/test/tài liệu: [docs/ENGINEERING_POLICY.md](docs/ENGINEERING_POLICY.md); hướng dẫn cho Claude/agent: [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
+
+Tài liệu ngắn về pipeline editor, thao tác chuột và invariant chống regression: [docs/EDITOR_PIPELINE.md](docs/EDITOR_PIPELINE.md). Thuật toán render và kiểm tra canvas tự động (`node scripts/canvas-browser-check.mjs`): [docs/EDITOR_RENDERING.md](docs/EDITOR_RENDERING.md).
 
 Agent tiếp tục công việc: đọc [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) để nắm kiến trúc, yêu cầu đã chốt, kết quả kiểm tra Drive và các task chưa làm xong. Thay đổi ngày 2026-09-09 chưa deploy; cần hoàn tất kiểm tra UI/E2E theo tài liệu bàn giao.
 
@@ -21,7 +23,7 @@ Nếu không có `DATABASE_URL`, development dùng PostgreSQL nhúng PGlite tạ
 ## Kiến trúc lưu trữ
 
 - PostgreSQL serverless: người dùng, project, chỉ mục file, lock, session, revision và annotation.
-- Vercel Blob riêng tư: các mask PNG do người gán nhãn chỉnh sửa.
+- Vercel Blob riêng tư: các mask PNG do người gán nhãn chỉnh sửa. Có thể chuyển sang Cloudflare R2 bằng `STORAGE_BACKEND=r2` (xem [docs/CLOUDFLARE_R2_STORAGE.md](docs/CLOUDFLARE_R2_STORAGE.md)); mặc định vẫn là Blob.
 - Google Drive: ảnh nguồn, prediction mask và thư mục xuất ground truth.
 - IndexedDB: bản nháp/offline recovery trong trình duyệt.
 - Cookie `httpOnly`: JWT đăng nhập.
@@ -54,6 +56,10 @@ source-folder/
   ]
 }
 ```
+
+## Nhóm ảnh, phân công và tải thư mục lên
+
+ADMIN giao việc theo nhóm ảnh; người dùng khác chỉ thấy nhóm được giao, bấm nhóm để xem danh sách ảnh cần làm. Tab **Nhập dữ liệu** ở Home tải cả thư mục lên (mỗi thư mục con, ví dụ mỗi giống khổ qua, thành một nhóm) theo định dạng mặc định ở trên (`manifest.json` + `images/` + `predictions/`, tùy chọn `prelabels/`) hoặc **COCO 1.0** (`annotations/instances_*.json` + `images/`). Ảnh có sẵn chưa thuộc nhóm nào: ADMIN bấm **Tự động chia nhóm** rồi **Phân công**. Chi tiết: [docs/GROUPS_AND_IMPORT.md](docs/GROUPS_AND_IMPORT.md).
 
 Service account trong `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` dùng đọc nguồn Drive khi cần. Ghi Drive đích dùng tài khoản Google đã kết nối qua OAuth ở server, cần quyền ghi vào thư mục đích. Drive đích mặc định của dự án này là `DATABASE-GT` (`147cVK2C7EZiupfMJQntP5Nc6tkkhqchN`).
 

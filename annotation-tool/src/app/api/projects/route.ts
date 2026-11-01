@@ -1,12 +1,18 @@
 import { NextResponse } from 'next/server';
 import { generateId, getDb, nowISO } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
+import { ADMIN_ACCESS_SQL, requireAdminAccount } from '@/lib/access-service';
 import { normalizeDriveFolderId } from '@/lib/drive-service';
 
 export async function GET(request: Request) {
-  await requireAuth(request);
+  const user = await requireAuth(request);
   const db = await getDb();
-  const projects = await db.prepare('SELECT * FROM projects ORDER BY created_at DESC').all();
+  // Người không phải ADMIN chỉ thấy dự án có ít nhất một nhóm được giao cho mình.
+  const projects = await db.prepare(`SELECT p.* FROM projects p
+    WHERE ${ADMIN_ACCESS_SQL} OR EXISTS (SELECT 1 FROM file_groups g
+      JOIN group_assignments ga ON ga.group_id = g.id
+      WHERE g.project_id = p.id AND ga.user_id = ?)
+    ORDER BY p.created_at DESC`).all(user.userId, user.userId);
   return NextResponse.json(
     projects.map((p: Record<string, unknown>) => ({
       id: p.id,
@@ -20,17 +26,21 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const user = await requireAuth(request);
-  if (user.role !== 'ADMIN') {
-    return NextResponse.json({ code: 'FORBIDDEN', message: 'Admin access required' }, { status: 403 });
+  try {
+    await requireAdminAccount(request);
+  } catch (error) {
+    if (error instanceof Response) return error;
+    throw error;
   }
-  const body = await request.json() as { name?: string; driveFolderId?: string; exportDriveFolderId?: string };
-  if (!body.name?.trim() || !body.driveFolderId?.trim()) {
+  const body = await request.json() as { name?: string; driveFolderId?: string; exportDriveFolderId?: string; source?: string };
+  // Dự án nhận dữ liệu bằng cách tải thư mục lên thì không có nguồn manifest để đồng bộ.
+  const uploadOnly = body.source === 'upload';
+  if (!body.name?.trim() || (!uploadOnly && !body.driveFolderId?.trim())) {
     return NextResponse.json({ code: 'INVALID_ANNOTATION', message: 'Tên và thư mục dữ liệu là bắt buộc.' }, { status: 400 });
   }
   const id = generateId();
   const now = nowISO();
-  const sourceFolderId = normalizeDriveFolderId(body.driveFolderId);
+  const sourceFolderId = normalizeDriveFolderId(body.driveFolderId || '');
   const exportFolderId = normalizeDriveFolderId(
     body.exportDriveFolderId || process.env.GOOGLE_DRIVE_EXPORT_FOLDER_ID || '147cVK2C7EZiupfMJQntP5Nc6tkkhqchN',
   );

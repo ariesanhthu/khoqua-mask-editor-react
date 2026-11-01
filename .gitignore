@@ -8,3 +8,9 @@ annotation-tool/.env*
 !annotation-tool/.env.example
 .vercel/
 *.tsbuildinfo
+
+.env*
+
+# cloudflare wrangler
+.wrangler/
+.dev.vars*

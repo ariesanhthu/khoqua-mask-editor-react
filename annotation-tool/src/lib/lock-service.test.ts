@@ -11,12 +11,28 @@ beforeAll(async () => {
   for (const id of ['a', 'b']) await db.prepare('INSERT INTO users (id, display_name, hashed_password) VALUES (?, ?, ?)').run(id, id, 'test');
   await db.prepare("INSERT INTO projects (id, name) VALUES ('project', 'Test')").run();
   await db.prepare("INSERT INTO datasets (id, project_id, name) VALUES ('dataset', 'project', 'Test')").run();
-  for (const id of ['race', 'revisions', 'expiry', 'parallel']) await db.prepare(`INSERT INTO dataset_files
+  for (const id of ['race', 'revisions', 'expiry', 'parallel', 'preservation']) await db.prepare(`INSERT INTO dataset_files
     (id, dataset_id, external_key, image_drive_file_id, prediction_drive_file_id, image_filename, prediction_filename)
     VALUES (?, 'dataset', ?, 'image', 'mask', 'image.png', 'mask.png')`).run(id, id);
 }, 30_000);
 
 describe('exclusive edit locks and revisions', () => {
+  it('keeps exact vector coordinates, labels, holes and custom metadata through save and Done', async () => {
+    const lock = await acquireLock('preservation', 'a');
+    if (!lock || lock.denied) throw Error('Expected lock');
+    const nodes = [{ id: 'n1', x: 0.125, y: 0.75 }, { id: 'n2', x: 9.875, y: 0.5 }, { id: 'n3', x: 3.5, y: 9.25 }];
+    const segmentation = { humanAction: 'MODIFIED', boundarySetting: 0.125, maskOperations: [{ type: 'POLYGON_SET', polygons: [
+      { id: 'original', label: 'my-label', nodes, holes: [nodes], meta: { locked: true, note: 'preserve' } },
+    ] }] };
+    const breakpoints = { state: 'ANNOTATED', points: [{ id: 'bp', x: 1.25, y: 7.75 }], custom: 'original' };
+    expect(await saveDraft('preservation', 'a', lock.lockToken, 0, segmentation, breakpoints)).toMatchObject({ revision: 1 });
+    expect(await getAnnotation('preservation')).toMatchObject({ segmentation, breakpoints });
+    expect(await submitDone('preservation', 'a', lock.lockToken, 1, segmentation, breakpoints)).toMatchObject({ revision: 2 });
+    const db = await getDb();
+    const version = await db.prepare('SELECT segmentation_json, breakpoints_json FROM annotation_versions WHERE dataset_file_id = ?').get('preservation');
+    expect(JSON.parse(String(version?.segmentation_json))).toMatchObject(segmentation);
+    expect(JSON.parse(String(version?.breakpoints_json))).toEqual(breakpoints);
+  });
   it('allows one simultaneous writer, denies another account and another session of the same account', async () => {
     const results = await Promise.all([acquireLock('race', 'a'), acquireLock('race', 'b')]);
     expect(results.filter((result) => result && !result.denied)).toHaveLength(1);

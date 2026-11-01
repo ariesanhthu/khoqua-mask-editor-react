@@ -56,6 +56,7 @@ Mỗi polygon thực tế phải có ít nhất ba node; phần `nodes` được
 - Dropdown **Vết gợn** chỉ hiển thị label `r*`; dropdown **U vấu** chỉ hiển thị label `w*`.
 - Chọn một label trong dropdown sẽ gán label đó cho toàn bộ polygon đang chọn.
 - **Tạo mới** sinh ID bằng số lớn nhất hiện có trong nhóm cộng `1`, rồi gán ngay cho polygon đang chọn.
+- Trong công cụ **Chọn**, phím `1` tạo và gán label u vấu kế tiếp (`w1`, `w2`, …); phím `2` tạo và gán label vết gợn kế tiếp (`r1`, `r2`, …). Giữ phím không tạo liên tiếp nhiều label và tổ hợp `Ctrl/Cmd/Alt + 1/2` không kích hoạt thao tác này.
 - Khi đổi nhóm, editor cập nhật đồng thời `label`, `meta.semantic` và đặt `meta.source` thành `human`.
 - Nút **Khóa** xuất hiện khi chọn đúng một polygon. Polygon đã khóa không cho kéo, thêm, xóa node, cắt hoặc gộp cho đến khi được mở khóa.
 - Trong chế độ chọn, giữ chuột trái trên node để kéo và cập nhật tọa độ; bấm chuột phải trên node để xóa.

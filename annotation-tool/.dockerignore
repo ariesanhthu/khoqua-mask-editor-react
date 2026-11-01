@@ -1,0 +1,14 @@
+# Never bake secrets or local data into the image.
+.env*
+!.env.example
+node_modules
+.next
+data
+annotation-storage
+artifacts
+.vercel
+.git
+*.tsbuildinfo
+npm-debug.log*
+Dockerfile
+.dockerignore

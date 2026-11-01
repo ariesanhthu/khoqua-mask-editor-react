@@ -192,6 +192,18 @@ describe('applyBrushStroke', () => {
     expect(totalArea(result.polygons!)).toBeGreaterThan(500);
   });
 
+  it('merges an overlapping mask when the stroke directly touches only the top mask', () => {
+    const bottom = rectangle('bottom', 0, 0, 20, 20, 'r1');
+    const top = rectangle('top', 10, 10, 30, 30, 'r2');
+    const result = applyBrushStroke([bottom, top], [{ x: 27, y: 20 }], 2, 'add', newRegion);
+
+    expect(result.error).toBeUndefined();
+    expect(result.polygons).toHaveLength(1);
+    expect(result.polygons![0].label).toBe('r2');
+    expect(pointInMask({ x: 5, y: 5 }, result.polygons![0])).toBe(true);
+    expect(pointInMask({ x: 27, y: 20 }, result.polygons![0])).toBe(true);
+  });
+
   it('creates a new region when the brush touches nothing', () => {
     const source = target();
     const result = applyBrushStroke([source], [{ x: 100, y: 100 }], 5, 'add', newRegion);

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { createProjectExportArchive, syncProjectAnnotationsToDrive } from '@/lib/export-service';
+import { getDb } from '@/lib/db';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -21,10 +22,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
 }
 
 export async function GET(request: Request, { params }: { params: Promise<{ projectId: string }> }) {
-  await requireAuth(request);
+  const user = await requireAuth(request);
   const { projectId } = await params;
   try {
-    const result = await createProjectExportArchive(projectId);
+    const db = await getDb();
+    const account = await db.prepare('SELECT role FROM users WHERE id = ?').get(user.userId);
+    const result = await createProjectExportArchive(projectId, account?.role === 'ADMIN');
     if (!result) return NextResponse.json({ code: 'FILE_NOT_FOUND', message: 'Project not found' }, { status: 404 });
     const buffer = result.bytes.buffer.slice(
       result.bytes.byteOffset,
