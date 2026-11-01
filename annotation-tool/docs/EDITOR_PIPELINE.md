@@ -32,3 +32,7 @@ Kiến trúc, yêu cầu đã chốt, kết quả kiểm tra Drive và backlog b
 - Không xóa draft IndexedDB khi save lỗi, mất lock hoặc revision conflict.
 - Không để client giữ OAuth token Drive; mọi sync/export dùng credential server.
 - Trước khi deploy phải chạy `npm run typecheck`, `npm test`, `npm run lint` và `npm run build`.
+
+## Đọc prelabel — cập nhật 2026-10-30
+
+Ảnh chưa có annotation mở được cả prelabel schema 1.0 và 1.1, nhãn legacy hoặc instance `rN`/`wN`. Bộ đọc không sửa dữ liệu nguồn. Prelabel sai cấu trúc trả lỗi 422 có thông báo, không thay bằng mask rỗng. Annotation đã lưu không bị tái tạo từ prelabel. Chi tiết: [PRELABEL_COMPATIBILITY.md](PRELABEL_COMPATIBILITY.md).

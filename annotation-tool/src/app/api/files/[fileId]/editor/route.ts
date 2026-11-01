@@ -3,7 +3,8 @@ import { requireAuth } from '@/lib/auth';
 import { getDb } from '@/lib/db';
 import { getAnnotation } from '@/lib/annotation-service';
 import { hashToken } from '@/lib/db';
-import { loadPrelabelOperations } from '@/lib/prelabel-service';
+import { loadPrelabelOperations, PrelabelValidationError } from '@/lib/prelabel-service';
+import type { MaskOperation } from '@/types';
 
 /**
  * GET /api/files/[fileId]/editor — Editor bootstrap data (spec 02 §15)
@@ -30,13 +31,19 @@ export async function GET(
   const owner = isLocked ? await db.prepare('SELECT display_name FROM users WHERE id = ?').get(lock!.user_id) : null;
 
   const annotation = await getAnnotation(fileId);
-  const prelabelOperations = !annotation && file.prelabel_storage_ref
-    ? await loadPrelabelOperations(
+  let prelabelOperations: MaskOperation[] | undefined;
+  if (!annotation && file.prelabel_storage_ref) {
+    try {
+      prelabelOperations = await loadPrelabelOperations(
         file.prelabel_storage_ref as string,
         Number(file.width || 1024),
         Number(file.height || 768),
-      )
-    : undefined;
+      );
+    } catch (error) {
+      if (!(error instanceof PrelabelValidationError)) throw error;
+      return NextResponse.json({ code: 'INVALID_ANNOTATION', message: error.message }, { status: 422 });
+    }
+  }
 
   return NextResponse.json({
     file: {
