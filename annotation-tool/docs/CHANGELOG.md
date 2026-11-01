@@ -21,6 +21,14 @@ Mẫu một mục:
 
 ---
 
+## 2026-11-01 — Phát hành lại v2 từ master đã gộp, bảo toàn dữ liệu
+
+- **Người dùng xác nhận:** push master và deploy lại Vercel, giữ dữ liệu label/phân công trước đó.
+- **Thay đổi:** khôi phục nguyên 2.960 file dataset nguồn `drive/SAM3_BitterMelon_V7/` từ remote; thư mục này bị bỏ khỏi Git trong commit local `b6fa83d`. Giữ code admin/phân công và editor đã gộp ở `db2e63c`; không đổi mã ứng dụng trong bước phát hành.
+- **Bảo toàn dữ liệu:** trước khi push, sao lưu toàn bộ database bằng snapshot chỉ đọc nhất quán, giải nén kiểm SHA-256 và ghi danh mục Blob ngoài repo. Sau deploy đối chiếu mọi annotation/version, file/nhóm/phân công và đối tượng Blob; kiểm UI admin và tài khoản label03 bằng thao tác đọc.
+- **Kiểm chứng code:** dùng lại kết quả của đúng mã ứng dụng đã kiểm tra ở mục bên dưới (248 test, typecheck/lint/build, 29 canvas và 12 dashboard). Không chạy seed, import, reset, sync Drive hoặc migration dữ liệu.
+- **Chi tiết/báo cáo phát hành:** [MERGE_RECOVERY_20261101.md](MERGE_RECOVERY_20261101.md); bản sao và báo cáo sau deploy nằm trong thư mục `server-backup-20261101-before-v2-redeploy/` ngoài repository.
+
 ## 2026-11-01 — Khôi phục admin/phân công v2 và gộp master mới
 
 - **Người dùng yêu cầu:** gộp master local với remote; giữ mọi bản label đã lưu và phân công của `label03`.

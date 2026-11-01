@@ -42,7 +42,15 @@ Toàn bộ truy vấn kiểm tra và sao lưu dùng transaction `REPEATABLE READ
 - Giữ hỗ trợ prelabel 1.0/1.1 và lỗi 422 có cấu trúc; đọc prelabel không đổi nhãn legacy, frontend/service chuẩn hóa tại những điểm vốn có.
 - Test route prelabel cập nhật mock theo truy vấn JOIN của v2; giữ nguyên assertion về dữ liệu đã lưu. Kiểm tra trình duyệt đổi kỳ vọng nhãn polygon mới từ `r3…` thành `w1…` theo mặc định trên remote, giữ nguyên kiểm tra số node và undo.
 
-Chưa push/deploy trong lần kiểm tra này. Muốn UI production trở lại v2 cần deploy code đã gộp với nguyên cấu hình database/storage hiện có; không cần nhập lại hoặc reset dữ liệu.
+Ở lượt kiểm tra ban đầu, chưa push/deploy. Người dùng sau đó yêu cầu push master và deploy lại Vercel, giữ toàn bộ dữ liệu đã lưu. Bản phát hành tiếp theo dùng nguyên project/database/storage hiện có; không nhập lại hoặc reset dữ liệu.
+
+## Chuẩn bị phát hành sau khi người dùng xác nhận
+
+- `master` local chứa merge `db2e63c`; mọi commit riêng của local, `origin/master` và nhánh prelabel đều là tổ tiên của bản gộp.
+- Khôi phục nguyên 2.960 file `drive/SAM3_BitterMelon_V7/` từ remote: thư mục này bị xóa khỏi Git trong commit local `b6fa83d`. Như vậy lần push bản gộp không xóa dataset nguồn đang có trên repository. Không tải các file này vào database/Blob; Root Directory Vercel vẫn là `annotation-tool`.
+- Project production đã xác nhận: `bitter-melon-annotation`, project ID `prj_LyuHOCjx00P1rRcQyvoKQ7ixHri8`, team `ariesanhthus-projects`. Deployment trước phát hành là `dpl_BBwhtd9m6riLeTmXow8B4eAwcufi`, chạy commit `5f23864`.
+- Bản sao toàn bộ database và danh mục Blob trước phát hành lưu ngoài repository tại `F:/ANHTHU/1-HCMUS/0-KLTN/server-backup-20261101-before-v2-redeploy/`. Chỉ coi bản sao hợp lệ khi `backup-report.json` có `complete: true` và giải nén/đối chiếu SHA-256 thành công.
+- Sau deploy phải so checksum toàn bộ annotation/phiên bản, các hàng file/nhóm/phân công và danh mục Blob với bản trước deploy, rồi kiểm API nhóm và annotation của `label03`. Không xin khóa hoặc gửi annotation thật trong phép kiểm này.
 
 ## Kiểm chứng bản gộp
 
