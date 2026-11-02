@@ -1669,19 +1669,78 @@ export function findMultiPolygonAutofillPath(
     }
   }
 
-  // 3. Multi-polygon bridging case: start and end lie on different polygons.
-  // Ensure they are connected by a touching chain before merging.
-  if (!arePolygonsConnected(allPolygons, startSnap.polygonId, endSnap.polygonId, tolerance)) {
-    return null;
+  // 3. Multi-polygon bridging case: find adjacent chain of touching polygons from start to end
+  // that are directly adjacent to draftNodes. Exclude distant/unrelated polygons (e.g. bottom masks).
+  const maxIntermediateDist = Math.max(tolerance * 2.5, 50);
+
+  interface SearchNode {
+    path: string[];
+    cost: number;
+  }
+  const polyDistCache = new Map<string, number>();
+  const getPolyDist = (polyId: string) => {
+    let d = polyDistCache.get(polyId);
+    if (d === undefined) {
+      const poly = allPolygons.find((p) => p.id === polyId);
+      d = poly ? polygonDistanceToDraft(poly, draftNodes) : 0;
+      polyDistCache.set(polyId, d);
+    }
+    return d;
+  };
+
+  const queue: SearchNode[] = [{
+    path: [startSnap.polygonId],
+    cost: getPolyDist(startSnap.polygonId),
+  }];
+  const bestCost = new Map<string, number>();
+  bestCost.set(startSnap.polygonId, queue[0].cost);
+
+  let foundChainIds: string[] | null = null;
+
+  while (queue.length > 0) {
+    queue.sort((a, b) => a.cost - b.cost);
+    const { path: currentPath, cost: currentCost } = queue.shift()!;
+    const currentId = currentPath[currentPath.length - 1];
+
+    if (currentId === endSnap.polygonId) {
+      foundChainIds = currentPath;
+      break;
+    }
+
+    if (currentCost > (bestCost.get(currentId) ?? Infinity)) {
+      continue;
+    }
+
+    const currentPoly = allPolygons.find((p) => p.id === currentId);
+    if (!currentPoly) continue;
+
+    for (const other of allPolygons) {
+      if (currentPath.includes(other.id)) continue;
+      if (arePolygonsTouching(currentPoly, other, Math.max(tolerance * 0.5, 4))) {
+        const dist = getPolyDist(other.id);
+        // Intermediate polygons between start and end MUST be close to the draft
+        if (other.id !== endSnap.polygonId && dist > maxIntermediateDist) {
+          continue;
+        }
+
+        const stepCost = 1.0 + dist;
+        const nextCost = currentCost + stepCost;
+        if (nextCost < (bestCost.get(other.id) ?? Infinity)) {
+          bestCost.set(other.id, nextCost);
+          queue.push({
+            path: [...currentPath, other.id],
+            cost: nextCost,
+          });
+        }
+      }
+    }
   }
 
-  // Group all existing touching polygons into a unified collective
-  // (Dissolves internal seams between warts along the multi-polygon chain, leaving only the outer contour)
-  const clusterPolygons = getConnectedPolygonCluster(
-    allPolygons,
-    [startSnap.polygonId, endSnap.polygonId],
-    tolerance,
-  );
+  if (!foundChainIds || foundChainIds.length < 2) return null;
+
+  const clusterPolygons = foundChainIds
+    .map((id) => allPolygons.find((p) => p.id === id))
+    .filter((p): p is AnnotationPolygon => Boolean(p));
 
   let collectivePoly: AnnotationPolygon | null = null;
   if (clusterPolygons.length === 1) {
@@ -1689,7 +1748,7 @@ export function findMultiPolygonAutofillPath(
   } else {
     collectivePoly = getCachedCollectivePolygon(clusterPolygons);
     if (!collectivePoly) {
-      collectivePoly = getCachedCollectivePolygon(allPolygons) ?? clusterPolygons[0];
+      collectivePoly = clusterPolygons[0];
     }
   }
 
@@ -1707,6 +1766,13 @@ export function findMultiPolygonAutofillPath(
     draftNodes,
   );
   if (!autofillNodes) return null;
+
+  const distToDraft = pathDistanceToDraft(autofillNodes, startSnap.point, endSnap.point, draftNodes);
+  const directSpan = Math.hypot(startSnap.point.x - endSnap.point.x, startSnap.point.y - endSnap.point.y);
+  // Shared boundary must stay reasonably close to the draft, not wandering far away
+  if (distToDraft > Math.max(tolerance * 3, 50) && distToDraft > directSpan * 0.75) {
+    return null;
+  }
 
   // 4. Enrich path with all original boundary nodes from clusterPolygons that lie along the segments
   const fullPathPoints: Array<{ id: string; x: number; y: number; isAnchor: boolean }> = [];

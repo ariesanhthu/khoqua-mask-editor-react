@@ -893,6 +893,37 @@ describe('findMultiPolygonAutofillPath', () => {
     // Must choose the seam/closest boundary at y=50, NOT the bottom boundary at y=100
     expect(result!.nodes.every((n) => Math.abs(n.y - 50) <= 2)).toBe(true);
   });
+
+  it('rejects detour through distant bottom polygons when drawing between separated upper polygons', () => {
+    // Upper-left polygon
+    const polyLeft = rectangle('polyLeft', 0, 0, 100, 50);
+    // Upper-right polygon separated horizontally
+    const polyRight = rectangle('polyRight', 150, 0, 250, 50);
+    // Connectors going down to a far-away bottom polygon at y=150..200
+    const connLeft = rectangle('connLeft', 0, 50, 100, 150);
+    const connRight = rectangle('connRight', 150, 50, 250, 150);
+    const polyBottom = rectangle('polyBottom', 0, 150, 250, 200);
+
+    const startPoint = { x: 80, y: 0 };
+    const endPoint = { x: 170, y: 0 };
+    const draftNodes = [
+      startPoint,
+      { x: 125, y: -20 },
+      endPoint,
+    ];
+
+    // Although all polygons are transitively connected through the bottom,
+    // intermediate polygons are far away from the draftNodes at the top.
+    // The algorithm must NOT take a 200px detour through polyBottom.
+    const result = findMultiPolygonAutofillPath(
+      [polyLeft, polyRight, connLeft, connRight, polyBottom],
+      startPoint,
+      endPoint,
+      draftNodes,
+    );
+
+    expect(result).toBeNull();
+  });
 });
 
 describe('raySegmentIntersection', () => {
