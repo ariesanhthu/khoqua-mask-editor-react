@@ -872,6 +872,27 @@ describe('findMultiPolygonAutofillPath', () => {
     expect(result!.nodes.every((n) => Math.abs(n.y - 0) <= 2)).toBe(true);
     expect(result!.targetPolygons.map((p) => p.id)).toEqual(['w1', 'w2', 'w3']);
   });
+
+  it('preserves shared boundary and selects closest edge when drawing along seam of touching polygons', () => {
+    // Top polygon at y: 0..50, bottom polygon at y: 50..100 touching along y=50
+    const topPoly = rectangle('top', 0, 0, 100, 50);
+    const bottomPoly = rectangle('bottom', 0, 50, 100, 100);
+
+    const startPoint = { x: 30, y: 50 };
+    const endPoint = { x: 70, y: 50 };
+    const draftNodes = [
+      startPoint,
+      { x: 50, y: 30 },
+      endPoint,
+    ];
+
+    // User clicks on the seam at y=50 and draws arch above it
+    const result = findMultiPolygonAutofillPath([topPoly, bottomPoly], startPoint, endPoint, draftNodes);
+    expect(result).not.toBeNull();
+
+    // Must choose the seam/closest boundary at y=50, NOT the bottom boundary at y=100
+    expect(result!.nodes.every((n) => Math.abs(n.y - 50) <= 2)).toBe(true);
+  });
 });
 
 describe('raySegmentIntersection', () => {

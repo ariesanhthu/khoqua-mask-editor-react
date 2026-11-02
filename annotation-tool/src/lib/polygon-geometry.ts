@@ -1604,18 +1604,82 @@ export function findMultiPolygonAutofillPath(
   const endSnap = findSnapTargetToPolygons(allPolygons, endPoint, tolerance);
   if (!startSnap || !endSnap) return null;
 
-  // If start and end are on different polygons, ensure they are connected by a touching chain
-  if (startSnap.polygonId !== endSnap.polygonId) {
-    if (!arePolygonsConnected(allPolygons, startSnap.polygonId, endSnap.polygonId, tolerance)) {
-      return null;
+  // 1. Single polygon case: If both endpoints lie on the exact same polygon,
+  // directly extract the shared boundary along this polygon.
+  // This preserves internal boundaries and ensures closest boundary is chosen
+  // without dissolving edges through whole-cluster merging.
+  if (startSnap.polygonId === endSnap.polygonId) {
+    const singlePath = getSharedBoundaryAutofillPath(
+      startSnap.polygon,
+      startSnap.point,
+      endSnap.point,
+      draftNodes,
+    );
+    if (singlePath !== null) {
+      return {
+        nodes: singlePath,
+        targetPolygons: [startSnap.polygon],
+      };
     }
   }
 
-  // 1. Group all existing touching polygons into a unified collective
-  // (Dissolves all internal seams between warts, leaving only the true outer contour)
+  // 2. Shared seam case: Check if one of the touched polygons actually contains BOTH points
+  // within snapping tolerance (e.g. clicking along the shared boundary between 2 adjacent polygons).
+  const candEndOnStartPoly = closestPointOnPolygon(startSnap.polygon, endPoint);
+  const candStartOnEndPoly = closestPointOnPolygon(endSnap.polygon, startPoint);
+  const startPolyHasBoth = candEndOnStartPoly.distance <= tolerance;
+  const endPolyHasBoth = candStartOnEndPoly.distance <= tolerance;
+
+  if (startPolyHasBoth || endPolyHasBoth) {
+    let bestResult: MultiPolygonAutofillResult | null = null;
+    let bestDist = Infinity;
+
+    if (startPolyHasBoth) {
+      const pathA = getSharedBoundaryAutofillPath(
+        startSnap.polygon,
+        startSnap.point,
+        candEndOnStartPoly.point,
+        draftNodes,
+      );
+      if (pathA !== null) {
+        const d = pathDistanceToDraft(pathA, startSnap.point, candEndOnStartPoly.point, draftNodes);
+        bestResult = { nodes: pathA, targetPolygons: [startSnap.polygon] };
+        bestDist = d;
+      }
+    }
+
+    if (endPolyHasBoth) {
+      const pathB = getSharedBoundaryAutofillPath(
+        endSnap.polygon,
+        candStartOnEndPoly.point,
+        endSnap.point,
+        draftNodes,
+      );
+      if (pathB !== null) {
+        const d = pathDistanceToDraft(pathB, candStartOnEndPoly.point, endSnap.point, draftNodes);
+        if (!bestResult || d < bestDist) {
+          bestResult = { nodes: pathB, targetPolygons: [endSnap.polygon] };
+          bestDist = d;
+        }
+      }
+    }
+
+    if (bestResult) {
+      return bestResult;
+    }
+  }
+
+  // 3. Multi-polygon bridging case: start and end lie on different polygons.
+  // Ensure they are connected by a touching chain before merging.
+  if (!arePolygonsConnected(allPolygons, startSnap.polygonId, endSnap.polygonId, tolerance)) {
+    return null;
+  }
+
+  // Group all existing touching polygons into a unified collective
+  // (Dissolves internal seams between warts along the multi-polygon chain, leaving only the outer contour)
   const clusterPolygons = getConnectedPolygonCluster(
     allPolygons,
-    startSnap.polygonId === endSnap.polygonId ? [startSnap.polygonId] : [startSnap.polygonId, endSnap.polygonId],
+    [startSnap.polygonId, endSnap.polygonId],
     tolerance,
   );
 
