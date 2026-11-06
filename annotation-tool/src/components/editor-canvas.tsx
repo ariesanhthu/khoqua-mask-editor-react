@@ -20,8 +20,9 @@ import type {
 } from '@/types';
 import { photoLevelFor, photoPyramidSizes, renderPixelRatio, zoomViewAt } from '@/lib/canvas-view';
 import { forEachPolygonSpan, normalizeMaskRgba, polygonPixelRect, simplifyRing, smoothPolygon } from '@/lib/mask-pixels';
+import { labelColor } from '@/lib/label-colors';
 import { nextLabel, semanticForLabelKind, type PolygonLabelKind } from '@/lib/polygon-labels';
-import { clipPolygonDifference, clonePolygons, computeSmoothNodeDisplacements, createCirclePolygon, createRectanglePolygon, drawSmoothClosedPath, ensurePolygonHasNodeAt, findEnclosedPocketAtPoint, findMultiPolygonAutofillPath, findSnapTargetToPolygons, getSmoothSegmentControlPoints, insertNodeAtEdge, mergePolygonsIntoSingle, pointInMask, polygonRings, resolvePolygonCut, type BrushMode, type SnapTarget } from '@/lib/polygon-geometry';
+import { clipPolygonDifference, clonePolygons, computeSmoothNodeDisplacements, closestPointOnPolygon, createCirclePolygon, createRectanglePolygon, drawSmoothClosedPath, ensurePolygonHasNodeAt, findAutoAnchorPath, findEnclosedPocketAtPoint, findSnapTargetToPolygons, getSmoothSegmentControlPoints, insertNodeAtEdge, mergePolygonsIntoSingle, nearestMagnetVertex, pointInMask, polygonRings, resolvePolygonCut, type AutoAnchorResult, type BrushMode, type SnapTarget } from '@/lib/polygon-geometry';
 import { PolygonDraft } from '@/lib/polygon-draft';
 import { packedTransfer, packGeometry, unpackPolygons } from '@/lib/polygon-pack';
 import { polygonBounds, preserveVectorIdentity, type PolygonBounds } from '@/lib/vector-identity';
@@ -82,6 +83,8 @@ interface Props {
   brushSize: number;
   maskOpacity: number;
   showMask: boolean;
+  /** Select (V): node đang kéo dính vào điểm gần nhất của mask khác (người dùng xác nhận 2026-11-05). */
+  magnet?: boolean;
   onChange(snapshot: EditorCanvasSnapshot): void;
   onSelectionChange(polygonIds: string[]): void;
   onHistoryChange?(state: EditorHistoryState): void;
@@ -111,7 +114,7 @@ type Marquee = { start: ImagePoint; end: ImagePoint; additive: boolean };
 type PointerActivity =
   | { id: number; mode: 'pan'; lastClient: ImagePoint }
   | { id: number; mode: 'brush'; last: ImagePoint; brushMode: BrushMode; radius: number }
-  | { id: number; mode: 'nodes'; start: ImagePoint; original: AnnotationPolygon[]; historyBefore?: AnnotationPolygon[]; nodeIds: Set<string>; polygonIds: Set<string>; moved: boolean }
+  | { id: number; mode: 'nodes'; start: ImagePoint; original: AnnotationPolygon[]; historyBefore?: AnnotationPolygon[]; nodeIds: Set<string>; polygonIds: Set<string>; moved: boolean; grab?: ImagePoint }
   | { id: number; mode: 'marquee'; start: ImagePoint; additive: boolean; clickPolygonId?: string }
   | { id: number; mode: 'point'; pointBefore: BreakpointPoint[]; draggedPointId: string; moved: boolean }
   | { id: number; mode: 'polygons'; start: ImagePoint; original: AnnotationPolygon[]; polygonIds: Set<string>; moved: boolean }
@@ -284,6 +287,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     predictionUrl,
     currentMaskUrl,
     showMask,
+    magnet = false,
     tool,
     width,
   } = props;
@@ -349,12 +353,21 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   const lastHistoryRef = useRef('');
   const polygonHoverRef = useRef<ImagePoint | null>(null);
   const snapTargetRef = useRef<SnapTarget | null>(null);
-  const draftAutofillRef = useRef<{
-    polygon?: AnnotationPolygon;
-    targetPolygons?: AnnotationPolygon[];
-    nodes: Array<{ id: string; x: number; y: number; isAnchor: boolean }>;
-    closingToStart?: boolean;
-  } | null>(null);
+  // Xem trước auto anchor (giữ Shift) và vị trí con trỏ thật (chưa bắt dính) khi vẽ polygon.
+  const draftAutofillRef = useRef<AutoAnchorResult | null>(null);
+  const polygonCursorRef = useRef<ImagePoint | null>(null);
+  // Điểm nháp vừa chấm bằng một lần nhấp: nhấp đúp ngay tại đó (lần nhấp đầu của nhấp đúp đã chấm nó) không hoàn tất.
+  const lastAddedDraftPointRef = useRef<{ id: string; time: number } | null>(null);
+  const magnetRef = useRef(magnet);
+  // Điểm của mask khác mà node đang kéo đã dính vào (magnet), vẽ vòng chỉ báo trên lớp draft.
+  const magnetTargetRef = useRef<ImagePoint | null>(null);
+  const horizontalBarRef = useRef<HTMLDivElement>(null);
+  const verticalBarRef = useRef<HTMLDivElement>(null);
+  const scrollMetricsRef = useRef({
+    h: { total: 1, size: 1, track: 1, thumb: 1, start: 0 },
+    v: { total: 1, size: 1, track: 1, thumb: 1, start: 0 },
+  });
+  const scrollDragRef = useRef<{ axis: 'h' | 'v'; pointerId: number; last: number } | null>(null);
   const anchorHoverRef = useRef<{ polygon: AnnotationPolygon; edgeIndex: number; point: ImagePoint } | null>(null);
   const enclosedPocketHoverRef = useRef<AnnotationPolygon | null>(null);
   const enclosedPocketCursorRef = useRef<ImagePoint | null>(null);
@@ -592,7 +605,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (!layer || !context) return;
     const draft = draftRef.current.nodes;
     const marquee = marqueeRef.current;
-    if (!draft.length && !marquee && !anchorHoverRef.current && !enclosedPocketHoverRef.current && !snapTargetRef.current && !cutPathRef.current.length && !['rectangle', 'circle'].includes(pointerRef.current?.mode ?? '')) {
+    if (!draft.length && !marquee && !magnetTargetRef.current && !anchorHoverRef.current && !enclosedPocketHoverRef.current && !snapTargetRef.current && !cutPathRef.current.length && !['rectangle', 'circle'].includes(pointerRef.current?.mode ?? '')) {
       // Nothing to show: clear once, then skip until something is drawn again.
       if (draftLayerDrawnRef.current) { context.setTransform(1, 0, 0, 1, 0, 0); context.clearRect(0, 0, layer.width, layer.height); }
       draftLayerDrawnRef.current = false;
@@ -608,11 +621,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (draft.length) {
       const hover = polygonHoverRef.current;
       const autofill = draftAutofillRef.current;
-      const preview = hover
-        ? (autofill
-            ? (autofill.closingToStart ? [...draft, ...autofill.nodes] : [...draft, { id: 'preview', ...hover }, ...autofill.nodes])
-            : [...draft, { id: 'preview', ...hover }])
-        : (autofill ? [...draft, ...autofill.nodes] : draft);
+      // Đang xem trước auto anchor: bản nháp kèm các điểm sẽ chèn; không kéo cạnh tới con trỏ (con trỏ nằm trong mask).
+      const preview = autofill ? [...draft, ...autofill.nodes] : hover ? [...draft, { id: 'preview', ...hover }] : draft;
       context.beginPath();
       if (preview.length >= 3) {
         drawSmoothClosedPath(context, preview, 0.08, polygonsRef.current);
@@ -637,10 +647,12 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         context.fillStyle = '#7c5cfa';
         context.fill();
       }
-      if (autofill && autofill.nodes.length) {
+      if (autofill) {
+        // Đường bám biên từ điểm vừa chấm qua các điểm sẽ chèn (tới điểm đầu nếu đường khép polygon).
+        const route = [draft[draft.length - 1], ...autofill.nodes, ...(autofill.closesToStart ? [draft[0]] : [])];
         context.beginPath();
-        autofill.nodes.forEach((node, idx) => {
-          if (idx === 0) context.moveTo(node.x, node.y);
+        route.forEach((node, index) => {
+          if (index === 0) context.moveTo(node.x, node.y);
           else context.lineTo(node.x, node.y);
         });
         context.lineWidth = 2.5 / view.scale;
@@ -920,6 +932,15 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       context.restore();
     }
 
+    const magnetTarget = magnetTargetRef.current;
+    if (magnetTarget) {
+      context.beginPath();
+      context.arc(magnetTarget.x, magnetTarget.y, 7 / view.scale, 0, Math.PI * 2);
+      context.lineWidth = 2 / view.scale;
+      context.strokeStyle = '#10b981';
+      context.stroke();
+    }
+
     /* Wart overlay temporarily hidden (re-enable here, on the draft layer).
     for (const point of breakpointsRef.current.points) {
       context.beginPath();
@@ -985,7 +1006,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         if (polygon.nodes.length < 3) continue;
         const bounds = polygonBounds(polygon);
         if (bounds.right < area.left || bounds.left > area.right || bounds.bottom < area.top || bounds.top > area.bottom) continue;
-        context.fillStyle = polygon.meta?.locked ? '#fff' : POLYGON_FILL;
+        context.fillStyle = polygon.meta?.locked ? '#fff' : labelColor(polygon.label);
         context.fill(polygonPathAt(polygon, view.scale), 'evenodd');
       }
     } else {
@@ -1080,13 +1101,20 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       bottom: (layer.height / ratio - view.y) / view.scale + viewportPadding,
     };
     context.setTransform(ratio * view.scale, 0, 0, ratio * view.scale, ratio * view.x, ratio * view.y);
+    const display = displayRef.current;
+    // Viền đậm nhạt theo thanh độ mờ như phần tô (người dùng xác nhận 2026-11-05); node và nhãn của polygon
+    // đang chọn vẫn rõ để còn chỉnh được khi kéo độ mờ xuống thấp.
+    const outlineAlpha = Math.min(1, Math.max(0, display.maskOpacity));
+    // Lớp phủ luôn tô theo label: cùng label cùng màu (người dùng xác nhận 2026-11-06, chế độ duy nhất).
+    const outlineColor = (polygon: AnnotationPolygon) => labelColor(polygon.label);
     const minimumSize = 1.5 / view.scale;
-    const dots = new Path2D();
-    let hasDots = false;
+    const dotsByColor = new Map<string, Path2D>();
     const lockedPolygons: AnnotationPolygon[] = [];
     const selectedPolygons: AnnotationPolygon[] = [];
+    context.globalAlpha = outlineAlpha;
     context.lineWidth = 1.5 / view.scale;
     context.strokeStyle = POLYGON_STROKE;
+    let currentStroke = POLYGON_STROKE;
     for (const polygon of polygonsRef.current) {
       if (polygon.nodes.length < 2) continue;
       const bounds = polygonBounds(polygon);
@@ -1095,25 +1123,30 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           || reach.bottom < viewportBounds.top || reach.top > viewportBounds.bottom) continue;
       if (selectedPolygonIdsRef.current.has(polygon.id)) { selectedPolygons.push(polygon); continue; }
       if (polygon.meta?.locked) { lockedPolygons.push(polygon); continue; }
+      const color = outlineColor(polygon);
       // Regions smaller than a screen pixel at this zoom: one dot instead of a path.
       if (bounds.right - bounds.left < minimumSize && bounds.bottom - bounds.top < minimumSize) {
+        let dots = dotsByColor.get(color);
+        if (!dots) { dots = new Path2D(); dotsByColor.set(color, dots); }
         dots.rect(bounds.left, bounds.top, minimumSize, minimumSize);
-        hasDots = true;
         continue;
       }
+      if (color !== currentStroke) { context.strokeStyle = color; currentStroke = color; }
       context.stroke(polygonPathAt(polygon, view.scale));
     }
-    if (hasDots) {
-      context.fillStyle = POLYGON_STROKE;
+    for (const [color, dots] of dotsByColor) {
+      context.fillStyle = color;
       context.fill(dots);
     }
     context.strokeStyle = '#667085';
     for (const polygon of lockedPolygons) context.stroke(polygonPathAt(polygon, view.scale));
     for (const polygon of selectedPolygons) {
       const locked = polygon.meta?.locked === true;
+      context.globalAlpha = outlineAlpha;
       context.lineWidth = 3 / view.scale;
       context.strokeStyle = locked ? '#667085' : '#6d4ef2';
       context.stroke(polygonPathAt(polygon, view.scale));
+      context.globalAlpha = 1;
       if (polygon.label) {
         const bounds = polygonBounds(polygon);
         const anchorX = bounds.left;
@@ -1186,10 +1219,47 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         context.stroke(activeHandles);
       }
     }
+    context.globalAlpha = 1;
     copyBack();
   }, [vectorExtent]);
 
   /** Moves not-yet-redrawn layers from the view they were drawn at to the current view (GPU only). */
+  /**
+   * Thanh cuộn tự vẽ (người dùng yêu cầu bật lại 2026-11-05). Canvas dùng view ảo (`viewRef`) với các lớp cỡ
+   * màn hình nên không dùng cuộn gốc của trình duyệt; thanh chỉ hiện khi ảnh (thêm lề 18 px) vượt khung, phần
+   * đã kéo ra ngoài ảnh cũng được tính vào chiều dài cuộn. Gọi mỗi lần vẽ lại lớp ảnh (mọi thay đổi view).
+   */
+  const updateScrollbars = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const view = viewRef.current;
+    const pad = 18;
+    for (const axis of ['h', 'v'] as const) {
+      const bar = axis === 'h' ? horizontalBarRef.current : verticalBarRef.current;
+      const thumb = bar?.firstElementChild as HTMLElement | null | undefined;
+      if (!bar || !thumb) continue;
+      const size = axis === 'h' ? viewport.clientWidth : viewport.clientHeight;
+      const offset = pad - (axis === 'h' ? view.x : view.y);
+      const content = (axis === 'h' ? width : height) * view.scale + 2 * pad;
+      const start = Math.min(0, offset);
+      const total = Math.max(content, offset + size) - start;
+      const visible = total > size + 1;
+      if (bar.hidden === visible) bar.hidden = !visible;
+      if (!visible) continue;
+      const track = axis === 'h' ? bar.clientWidth : bar.clientHeight;
+      const thumbSize = Math.min(track, Math.max(24, (track * size) / total));
+      const position = (track - thumbSize) * ((offset - start) / Math.max(1, total - size));
+      if (axis === 'h') {
+        thumb.style.width = `${thumbSize}px`;
+        thumb.style.transform = `translateX(${position}px)`;
+      } else {
+        thumb.style.height = `${thumbSize}px`;
+        thumb.style.transform = `translateY(${position}px)`;
+      }
+      scrollMetricsRef.current[axis] = { total, size, track, thumb: thumbSize, start };
+    }
+  }, [height, width]);
+
   const applyLayerTransforms = useCallback(() => {
     const view = viewRef.current;
     const layers = layerViewRef.current;
@@ -1211,6 +1281,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       if (dirty.stage) {
         const stage = renderNow();
         if (stage !== 'skipped') dirty.stage = false;
+        updateScrollbars();
         // Resizing a canvas clears it: every layer must be drawn again.
         if (stage === 'resized') { dirty.draft = true; dirty.mask = true; dirty.maskRect = null; dirty.vectors = true; dirty.vectorsRect = null; }
       }
@@ -1250,7 +1321,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         onHistoryChange?.(state);
       }
     });
-  }, [applyLayerTransforms, onHistoryChange, renderDraftLayer, renderMaskLayer, renderNow, renderVectorLayer]);
+  }, [applyLayerTransforms, onHistoryChange, renderDraftLayer, renderMaskLayer, renderNow, renderVectorLayer, updateScrollbars]);
 
   /** Content changed (polygons, selection, draft, tool): redraw outlines and the draft layer, not the photo. */
   const render = useCallback(() => {
@@ -1367,14 +1438,24 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   }, [ensureMaskRaster, flushNotify, notifyChange, onMessage, render, tool]);
 
   useEffect(() => {
+    const previous = displayRef.current;
+    magnetRef.current = magnet;
     displayRef.current = { showMask, maskOpacity };
-    // Visibility and opacity are layer styles: no redraw needed.
+    // Mask visibility and opacity are layer styles: no mask redraw needed.
     const layer = maskLayerRef.current;
     if (layer) {
       layer.style.display = showMask ? 'block' : 'none';
       layer.style.opacity = String(maskOpacity);
     }
-  }, [maskOpacity, showMask]);
+    // Outlines take the opacity per stroke (handles stay opaque): redraw the vector layer, never the photo
+    // (EDITOR_RENDERING §6).
+    const dirty = dirtyRef.current;
+    if (previous.maskOpacity !== maskOpacity) {
+      dirty.vectors = true;
+      dirty.vectorsRect = null;
+      scheduleFrame();
+    }
+  }, [magnet, maskOpacity, scheduleFrame, showMask]);
 
   const rebuildTint = useCallback((source: HTMLCanvasElement, target: HTMLCanvasElement, color: string) => {
     const context = target.getContext('2d');
@@ -1917,59 +1998,16 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   }, [captureDocument, notifyChange, notifySelection, onMessage, pushHistory, rebuildPolygonTint, render]);
 
   const commitDraft = useCallback((draft: PolygonNode[]) => {
-    let autofill = draftAutofillRef.current;
-
-    if (!autofill && draft.length >= 2) {
-      const snapTolerance = 14 / viewRef.current.scale;
-      const first = draft[0];
-      const last = draft[draft.length - 1];
-      const autoRes = findMultiPolygonAutofillPath(polygonsRef.current, first, last, draft, snapTolerance);
-      if (autoRes) {
-        autofill = {
-          nodes: autoRes.nodes,
-          targetPolygons: autoRes.targetPolygons,
-          closingToStart: true,
-        };
-      }
-    }
-
-    let finalNodes: PolygonNode[] = [];
-
-    if (autofill && autofill.nodes.length >= 0) {
-      finalNodes = [
-        ...draft.map((node) => ({ ...node, isAnchor: true })),
-        ...autofill.nodes.map((node) => ({ ...node, isAnchor: true })),
-      ];
-    } else {
-      finalNodes = draft.map((node) => ({ ...node, isAnchor: true }));
-    }
+    // Đường tự nối (Shift + chuột trái) đã được chèn vào bản nháp từ trước (người dùng xác nhận 2026-11-05):
+    // hoàn tất chỉ khép polygon bằng đoạn thẳng như vẽ tay, không tự nối biên ngầm.
+    let finalNodes: PolygonNode[] = draft.map((node) => ({ ...node, isAnchor: true }));
 
     if (finalNodes.length < 3) {
       onMessage('Đa giác cần ít nhất 3 node.');
       return false;
     }
 
-    let nextPolygons = [...polygonsRef.current];
-
-    if (autofill) {
-      const targetPolys = autofill.targetPolygons || (autofill.polygon ? [autofill.polygon] : []);
-      for (const targetPoly of targetPolys) {
-        const polyInNext = nextPolygons.find((p) => p.id === targetPoly.id);
-        if (polyInNext && !polyInNext.meta?.locked) {
-          let updated = polyInNext;
-          if (draft[0]) {
-            const res = ensurePolygonHasNodeAt(updated, draft[0]);
-            updated = res.polygon;
-          }
-          const lastDraftNode = draft[draft.length - 1];
-          if (lastDraftNode) {
-            const res = ensurePolygonHasNodeAt(updated, lastDraftNode);
-            updated = res.polygon;
-          }
-          nextPolygons = nextPolygons.map((p) => (p.id === updated.id ? updated : p));
-        }
-      }
-    }
+    const nextPolygons = [...polygonsRef.current];
 
     for (const existing of nextPolygons) {
       const clipped = clipPolygonDifference(finalNodes, existing.nodes);
@@ -1994,16 +2032,13 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     selectedNodeIdsRef.current.clear();
     selectedPolygonIdsRef.current = new Set([created.id]);
     commitPolygons([...nextPolygons, created]);
-    if (autofill) {
-      onMessage('Đã tự động nối biên chung với mask kế bên.');
-    }
     onPolygonComplete?.();
     return true;
   }, [commitPolygons, onMessage, onPolygonComplete]);
 
   const completePolygon = useCallback(() => {
     const draft = draftRef.current.nodes;
-    if (draft.length < 3 && !(draft.length >= 2 && draftAutofillRef.current)) {
+    if (draft.length < 3) {
       onMessage('Đa giác cần ít nhất 3 node.');
       return false;
     }
@@ -2017,6 +2052,16 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     });
     return false;
   }, [commitDraft, onMessage, requestLatestVector, vectorsCurrent]);
+
+  /**
+   * Xem trước auto anchor khi giữ Shift (người dùng xác nhận 2026-11-06): con trỏ trong (hoặc sát) mask kế bên thì
+   * hiện đường bám biên tự do từ điểm vừa chấm tới điểm biên gần con trỏ nhất của mask đó.
+   */
+  const autoAnchorPreview = useCallback((shift: boolean) => {
+    const cursor = polygonCursorRef.current;
+    if (!shift || !cursor || !draftRef.current.nodes.length) return null;
+    return findAutoAnchorPath(polygonsRef.current, cursor, draftRef.current.nodes, 14 / viewRef.current.scale);
+  }, []);
 
   const cancelCurrentPath = useCallback(() => {
     draftRef.current.clear();
@@ -2274,6 +2319,33 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     }
     if (tool === 'polygon') {
       const snapTolerance = 14 / viewRef.current.scale;
+      const draft = draftRef.current.nodes;
+      // Shift + chuột trái: chèn các điểm auto anchor bám biên tự do từ điểm vừa chấm tới mask đang trỏ. KHÔNG hoàn
+      // tất polygon, vẫn ở chế độ P (người dùng xác nhận 2026-11-06). Mỗi điểm chèn là một bước nháp: Ctrl+Z gỡ từng điểm.
+      if (event.shiftKey && draft.length) {
+        const auto = findAutoAnchorPath(polygonsRef.current, point, draft, snapTolerance);
+        draftAutofillRef.current = null;
+        if (!auto) {
+          onMessage('Không nối được: điểm vừa chấm phải nằm trên biên mask chưa có mask khác nối, và con trỏ phải ở trong hoặc sát mask kế bên.');
+          render();
+          return;
+        }
+        // Điểm đích thành đỉnh của mask chứa nó, để biên mới trùng đỉnh với mask cũ.
+        const owner = polygonsRef.current.find((polygon) => polygon.id === auto.target.polygonId);
+        if (owner && !owner.meta?.locked && !auto.closesToStart && closestPointOnPolygon(owner, auto.target).distance <= 0.5) {
+          const { polygon: updated, inserted } = ensurePolygonHasNodeAt(owner, auto.target, 0.5);
+          if (inserted) commitPolygons(polygonsRef.current.map((polygon) => (polygon.id === updated.id ? updated : polygon)));
+        }
+        for (const node of auto.nodes) draftRef.current.add(node);
+        onMessage(`Đã chèn ${auto.nodes.length} điểm bám theo biên. Vẽ tiếp, Ctrl+Z gỡ từng điểm; nhấp đúp lên một điểm hoặc Enter để hoàn tất.`);
+        render();
+        return;
+      }
+      // Nhấp lên một điểm đã chấm không chấm thêm (nhấp đúp lên điểm để hoàn tất, người dùng xác nhận 2026-11-06).
+      if (draft.some((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale)) {
+        render();
+        return;
+      }
       const snap = findSnapTargetToPolygons(polygonsRef.current, point, snapTolerance);
       let effectivePoint = snap ? snap.point : point;
 
@@ -2320,19 +2392,11 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         }
       }
 
-      const first = draftRef.current.nodes[0];
-      const isClosingClick = first && draftRef.current.nodes.length >= 2 &&
-        Math.hypot(first.x - effectivePoint.x, first.y - effectivePoint.y) <= snapTolerance;
-
-      if (isClosingClick) {
-        completePolygon();
-      } else if (first && draftRef.current.nodes.length >= 2 && snap && draftAutofillRef.current && !draftAutofillRef.current.closingToStart) {
-        draftRef.current.add({ id: crypto.randomUUID(), ...effectivePoint, isAnchor: true });
-        completePolygon();
-      } else {
-        draftRef.current.add({ id: crypto.randomUUID(), ...effectivePoint, isAnchor: true });
-        render();
-      }
+      // Nhấp thường (kể cả lên biên mask khác hay điểm đầu) chỉ chấm một điểm, không hoàn tất polygon.
+      const added = { id: crypto.randomUUID(), ...effectivePoint, isAnchor: true };
+      draftRef.current.add(added);
+      lastAddedDraftPointRef.current = { id: added.id, time: performance.now() };
+      render();
       return;
     }
     if (tool === 'brush') {
@@ -2510,6 +2574,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         polygonIds: new Set(polygonsRef.current.filter((polygon) => polygonRings(polygon).some((ring) => ring.some((node) => selectedNodeIdsRef.current.has(node.id)))).map((polygon) => polygon.id)),
         nodeIds: new Set(selectedNodeIdsRef.current),
         moved: false,
+        grab: { x: nodeHit.node.x, y: nodeHit.node.y },
       };
       notifySelection();
       render();
@@ -2531,10 +2596,13 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (props.readOnly) return;
     if (tool === 'polygon') {
       event.preventDefault();
-      // Hai lần pointer-down của double click đã thêm cùng một đỉnh hai lần.
-      // Giữ lần nhấp đầu làm đỉnh cuối và bỏ bản sao trước khi hoàn tất.
-      draftRef.current.dropDoubleClickDuplicate();
-      if (draftRef.current.nodes.length >= 3 || (draftRef.current.nodes.length >= 2 && draftAutofillRef.current)) completePolygon();
+      // Chỉ nhấp đúp lên một điểm đã chấm từ trước mới hoàn tất (người dùng xác nhận 2026-11-06). Lần nhấp thứ hai
+      // không chấm thêm (trúng điểm), nên nhấp đúp ở chỗ trống chỉ để lại đúng một điểm như nhấp đơn.
+      const point = imagePoint(event);
+      const hit = draftRef.current.nodes.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale);
+      const added = lastAddedDraftPointRef.current;
+      const justPlaced = Boolean(hit && added && added.id === hit.id && performance.now() - added.time < 600);
+      if (hit && !justPlaced) completePolygon();
       else render();
       return;
     }
@@ -2684,34 +2752,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           enclosedPocketHoverRef.current = null;
           enclosedPocketCursorRef.current = null;
           polygonHoverRef.current = effectivePoint;
-          const draft = draftRef.current.nodes;
-          const isNearStart = draft.length >= 2 && Math.hypot(draft[0].x - effectivePoint.x, draft[0].y - effectivePoint.y) <= snapTolerance;
-
-          if (isNearStart) {
-            const autofill = findMultiPolygonAutofillPath(
-              polygonsRef.current,
-              draft[0],
-              draft[draft.length - 1],
-              draft,
-              snapTolerance,
-            );
-            draftAutofillRef.current = autofill
-              ? { targetPolygons: autofill.targetPolygons, nodes: autofill.nodes, closingToStart: true }
-              : null;
-          } else if (snap) {
-            const autofill = findMultiPolygonAutofillPath(
-              polygonsRef.current,
-              draft[0],
-              effectivePoint,
-              [...draft, effectivePoint],
-              snapTolerance,
-            );
-            draftAutofillRef.current = autofill
-              ? { targetPolygons: autofill.targetPolygons, nodes: autofill.nodes, closingToStart: false }
-              : null;
-          } else {
-            draftAutofillRef.current = null;
-          }
+          polygonCursorRef.current = point;
+          // Chỉ xem trước auto anchor khi giữ Shift; không giữ Shift thì vẽ tay bình thường.
+          draftAutofillRef.current = autoAnchorPreview(event.shiftKey);
         } else {
           polygonHoverRef.current = null;
           draftAutofillRef.current = null;
@@ -2783,8 +2826,23 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       return;
     }
     if (active.mode === 'nodes' || active.mode === 'polygons') {
-      const deltaX = point.x - active.start.x;
-      const deltaY = point.y - active.start.y;
+      let deltaX = point.x - active.start.x;
+      let deltaY = point.y - active.start.y;
+      if (active.mode === 'nodes' && active.grab && tool === 'select') {
+        // Magnet: node đang nắm dính vào đỉnh gần nhất (≤ 10 px màn hình) của mask không tham gia kéo; mọi node
+        // đang kéo dịch cùng một đoạn. Không hút vào đỉnh của chính polygon đang kéo (tránh chồng đỉnh kề).
+        const target = magnetRef.current
+          ? nearestMagnetVertex(active.original, active.polygonIds, active.grab.x + deltaX, active.grab.y + deltaY, 10 / viewRef.current.scale)
+          : null;
+        if (target) {
+          deltaX = target.x - active.grab.x;
+          deltaY = target.y - active.grab.y;
+        }
+        if (target?.x !== magnetTargetRef.current?.x || target?.y !== magnetTargetRef.current?.y) {
+          magnetTargetRef.current = target;
+          renderDraft();
+        }
+      }
       active.moved = active.moved || Math.hypot(deltaX, deltaY) > 0.5;
       const previous = polygonsRef.current;
       const wasPolygonMode = polygonModeRef.current;
@@ -2835,6 +2893,41 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     render();
   };
 
+  // Kéo thumb: mỗi px của thumb tương ứng (tổng chiều dài − khung) / (rãnh − thumb) px của view.
+  const onScrollThumbDown = (event: React.PointerEvent<HTMLDivElement>, axis: 'h' | 'v') => {
+    event.stopPropagation();
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.currentTarget.classList.add('dragging');
+    scrollDragRef.current = { axis, pointerId: event.pointerId, last: axis === 'h' ? event.clientX : event.clientY };
+  };
+  const onScrollThumbMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = scrollDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const client = drag.axis === 'h' ? event.clientX : event.clientY;
+    const metrics = scrollMetricsRef.current[drag.axis];
+    const moved = (client - drag.last) * ((metrics.total - metrics.size) / Math.max(1, metrics.track - metrics.thumb));
+    drag.last = client;
+    if (drag.axis === 'h') viewRef.current.x -= moved; else viewRef.current.y -= moved;
+    renderView();
+  };
+  const onScrollThumbUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (scrollDragRef.current?.pointerId !== event.pointerId) return;
+    scrollDragRef.current = null;
+    event.currentTarget.classList.remove('dragging');
+  };
+  // Bấm vào rãnh: đưa thumb về giữa chỗ bấm.
+  const onScrollTrackDown = (event: React.PointerEvent<HTMLDivElement>, axis: 'h' | 'v') => {
+    if (event.target !== event.currentTarget) return;
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const metrics = scrollMetricsRef.current[axis];
+    const at = (axis === 'h' ? event.clientX - rect.left : event.clientY - rect.top) - metrics.thumb / 2;
+    const offset = metrics.start + (Math.max(0, Math.min(metrics.track - metrics.thumb, at)) / Math.max(1, metrics.track - metrics.thumb)) * (metrics.total - metrics.size);
+    if (axis === 'h') viewRef.current.x = 18 - offset; else viewRef.current.y = 18 - offset;
+    renderView();
+  };
+
   const onPointerLeave = () => {
     hoveredNodeRef.current = null;
     anchorHoverRef.current = null;
@@ -2877,6 +2970,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       return;
     }
     if (active.mode === 'nodes' || active.mode === 'polygons') {
+      if (magnetTargetRef.current) { magnetTargetRef.current = null; renderDraft(); }
       if (active.moved) {
         const moved = polygonsRef.current;
         const original = active.mode === 'nodes' ? active.historyBefore ?? active.original : active.original;
@@ -3266,6 +3360,22 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     return () => window.removeEventListener('keydown', onKey);
   }, [applyCut, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, props.readOnly, redo, selectAllPolygons, tool, undo, updateSelectedPolygonLabel]);
 
+  // Nhấn/nhả Shift khi đang vẽ polygon: bật/tắt xem trước đường tự nối ngay, không cần rê chuột.
+  useEffect(() => {
+    if (tool !== 'polygon' || props.readOnly) return;
+    const onShift = (event: KeyboardEvent) => {
+      if (event.key !== 'Shift' || event.repeat || !draftRef.current.nodes.length) return;
+      draftAutofillRef.current = autoAnchorPreview(event.type === 'keydown');
+      renderDraft();
+    };
+    window.addEventListener('keydown', onShift);
+    window.addEventListener('keyup', onShift);
+    return () => {
+      window.removeEventListener('keydown', onShift);
+      window.removeEventListener('keyup', onShift);
+    };
+  }, [autoAnchorPreview, props.readOnly, renderDraft, tool]);
+
   const zoomAt = useCallback((factor: number, anchor: ImagePoint) => {
     viewRef.current = zoomViewAt(viewRef.current, factor, anchor);
     fittedRef.current = true;
@@ -3281,7 +3391,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       const rect = stage.getBoundingClientRect();
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
       if (event.shiftKey) {
-        viewRef.current.x -= (event.deltaY || event.deltaX) * unit;
+        // Shift + con lăn cuộn ngang; Ctrl + Shift + con lăn cuộn dọc (người dùng xác nhận 2026-11-05).
+        // Ctrl không kèm Shift vẫn là zoom (pinch trên touchpad gửi wheel có ctrlKey).
+        const delta = (event.deltaY || event.deltaX) * unit;
+        if (event.ctrlKey || event.metaKey) viewRef.current.y -= delta; else viewRef.current.x -= delta;
         renderView();
         return;
       }
@@ -3437,6 +3550,13 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         <canvas ref={interactionCanvasRef} className="brush-interaction-layer" aria-hidden="true" />
         <canvas ref={cursorCanvasRef} className="brush-cursor-layer" aria-hidden="true" />
       </div>
+      {(['h', 'v'] as const).map((axis) => (
+        <div key={axis} ref={axis === 'h' ? horizontalBarRef : verticalBarRef} className={`canvas-scrollbar ${axis === 'h' ? 'horizontal' : 'vertical'}`}
+          hidden aria-hidden="true" onPointerDown={(event) => onScrollTrackDown(event, axis)}>
+          <div className="canvas-scrollbar-thumb" onPointerDown={(event) => onScrollThumbDown(event, axis)}
+            onPointerMove={onScrollThumbMove} onPointerUp={onScrollThumbUp} onPointerCancel={onScrollThumbUp} />
+        </div>
+      ))}
     </div>
   );
 });

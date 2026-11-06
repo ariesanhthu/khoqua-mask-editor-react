@@ -34,6 +34,9 @@ Các lệnh trên không thay thế kiểm thử tương tác, race condition tr
 10. *(Người dùng xác nhận 2026-10-25)* Tải lên hỗ trợ **COCO 1.0**; định dạng manifest đang có **giữ nguyên, là mặc định**, không được xóa.
 11. *(Người dùng xác nhận 2026-10-25)* Lần này chỉ trình bày lại UX **trang chính (Home)**, giữ design; **không sửa trang editor gán nhãn**. (Áp dụng cho đợt Home đó; yêu cầu 12 sau đó mở lại phạm vi editor.)
 12. *(Người dùng xác nhận 2026-10-25)* Tối ưu editor cho thiết bị: vẽ/tẩy (paint), chỉnh segment, zoom in/out, tải ảnh, chuyển brush ↔ polygon không bị lag; tìm hiểu thuật toán tối ưu render; refactor, cập nhật đầy đủ comment, docs, rule; bổ sung định dạng COCO 1.0. **Không được phá vỡ tính năng hiện có**, đặc biệt **undo từng điểm khi đang vẽ polygon** (chấm nhiều điểm, Ctrl+Z xóa điểm vừa chấm). Xem [EDITOR_RENDERING.md](EDITOR_RENDERING.md), hợp đồng vẽ polygon trong [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md).
+13. *(Người dùng xác nhận 2026-11-05)* Tự nối biên khi vẽ polygon **chỉ nối theo biên, không gộp mask**. Nhấp lên điểm của mask khác khi đang vẽ chỉ là chấm anchor (không hiểu là “điểm kết thúc”), polygon chỉ hoàn tất khi nhấp đúp. **Shift + trỏ vào anchor** hiện xem trước đường nối; đường chỉ đi phần biên chưa có mask khác nối vào; **Shift + chuột trái** để nối đường đó vào polygon đang vẽ mà **không kết thúc**; chỉ nhấp đúp mới hoàn tất (người dùng sửa lại cùng ngày). Chi tiết: [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) mục “Tự nối biên khi vẽ polygon (Shift)”. **Cập nhật 2026-11-06 (người dùng xác nhận qua hỏi–đáp):** giữ Shift + trỏ vào *bên trong* mask kế bên để xem trước; đường chạy **từ điểm vừa chấm** tới điểm biên tự do gần con trỏ nhất; **Shift + chuột trái** chèn các điểm đó, không hoàn tất, không chuyển V; nhấp chuột trái thường chỉ chấm điểm; hoàn tất bằng **nhấp đúp lên một điểm**, Enter hoặc nút (nhấp đơn điểm đầu và nhấp đúp chỗ trống không còn hoàn tất); ngưỡng “dính” giữ ≤ 2.5 px ảnh.
+14. *(Người dùng xác nhận 2026-11-05)* Phần lớp phủ cho phép tô mask **khác màu theo label**: hai mask tách biệt nhưng cùng label (ví dụ cùng `r1`) vẫn cùng màu. Thêm thanh kéo độ mờ ở phần lớp phủ và **độ mờ áp dụng cả lên đường biên** (trước đây chỉ phần tô đậm nhạt, biên giữ nguyên là sai). Chi tiết: [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) mục “Lớp phủ: màu theo label và độ mờ”. **Cập nhật 2026-11-06:** màu theo label là chế độ mặc định và duy nhất (bỏ ô bật/tắt).
+15. *(Người dùng xác nhận 2026-11-05)* Thông báo (toast) của editor chuyển vào sidebar phải thay cho phần gợi ý “Ctrl+Z hoàn tác toàn cục…/Di chuột lên điểm…”. Chế độ chỉnh sửa (V) có **magnet**: node đang kéo dính vào điểm gần đó, nút bật/tắt icon nam châm dưới nút lớp phủ góc trên trái. Thêm **Ctrl + Shift + con lăn** để cuộn và **bật lại thanh cuộn**. Chi tiết: [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) “Hợp đồng thao tác trong Select”.
 
 ## Stack và phạm vi
 
@@ -266,6 +269,13 @@ Các điểm sau được ghi nhận để agent tiếp tục; **chưa sửa/xá
 - Chưa kiểm thử trên trình duyệt: chọn thư mục, xem trước, ánh xạ danh mục COCO, hộp thoại phân công, bộ lọc nhóm, quay về đúng nhóm từ editor, giao diện hẹp.
 - Chưa thử ghi lên Vercel Blob/R2 thật và giới hạn 4.5 MB/request trên Vercel với ảnh gốc lớn.
 - Chưa có: đổi tên/gộp/xóa nhóm, chuyển ảnh giữa nhóm bằng tay, kiểm phân công ở route asset, lọc Drive/ZIP theo nhóm. Xem [GROUPS_AND_IMPORT.md](GROUPS_AND_IMPORT.md) §8.
+
+### 7. Tự nối biên bằng Shift (2026-11-05, nhánh `dev/debug_anchor`)
+
+- Đã kiểm tra bằng unit test và Chrome headless trên cảnh giả `?seams=1`. **Chưa** thử trên ảnh/mask thật, thiết bị thật, mask vector hóa có khe hở > 2.5 px, mask có lỗ, hoặc ảnh có hàng nghìn polygon.
+- Đỉnh của mask khác nằm giữa cạnh (chỗ nối chữ T) được dùng làm đỉnh của polygon mới nhưng không chèn vào mask có cạnh đó; nếu hai mask cũ hở nhau vài px, biên mới có thể lệch tối đa ~2.5 px so với một trong hai.
+- Lớp phủ màu theo label/độ mờ viền (cùng nhánh): canvas đã kiểm bằng Chrome headless (cảnh `?labels=1`); thẻ tùy chọn trong `editor-workspace.tsx` chỉ được kiểm bằng ảnh chụp trang tĩnh dựng từ CSS thật, **chưa** thử trong editor thật (cần đăng nhập + DB), ảnh khổ qua thật, Safari/Firefox. Chưa có chú giải (legend) màu ↔ label trong panel.
+- Các hàm của thuật toán cũ không còn được canvas dùng nhưng vẫn export và có test: `getSharedBoundaryAutofillPath`, `getCachedCollectivePolygon`, `getConnectedPolygonCluster`, `arePolygonsConnected`, `polygonDistanceToDraft`. Xóa chúng cần người dùng đồng ý (xóa kèm test).
 
 ## Môi trường kiểm thử và lưu ý cho agent sau
 

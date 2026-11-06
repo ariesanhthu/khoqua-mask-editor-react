@@ -21,6 +21,59 @@ Mẫu một mục:
 
 ---
 
+## 2026-11-06 — Auto anchor theo rule đã chốt; màu theo label là chế độ duy nhất
+
+- **Người dùng xác nhận (hỏi–đáp 2026-11-06):** nhấp chuột trái thường chỉ chấm điểm; giữ Shift + trỏ vào *bên trong* mask kế bên để xem trước; Shift + chuột trái chèn các điểm auto bám biên, đường chạy **từ điểm vừa chấm** tới điểm biên gần con trỏ, chỉ trên phần biên tự do (ví dụ A→B→C→D→A, C→D dính mask khác thì chỉ đi D→A→B), loang qua nhiều mask; không tự hoàn tất, không chuyển V; hoàn tất bằng nhấp đúp lên một điểm, Enter hoặc nút (bỏ hoàn tất bằng nhấp đơn điểm đầu và nhấp đúp chỗ trống); ngưỡng dính giữ ≤ 2.5 px ảnh. Lớp phủ: màu theo label là mặc định và duy nhất, bỏ ô bật/tắt.
+- **Quyết định của agent (rule không nêu):** khi có hai chiều đi quanh biên tới cùng đích, chọn đường ngắn nhất (khép về điểm đầu thì ưu tiên chiều không bao mask); Shift + chuột trái khi chưa có điểm nào thì chấm điểm đầu như nhấp thường; không có đường hợp lệ thì không chèn gì và báo lý do; mỗi điểm auto là một bước Ctrl+Z.
+- **Thay đổi:** `polygon-geometry.ts` — tách lõi Dijkstra thành `freeBoundaryRoutes` (dùng chung), thêm `findAutoAnchorPath`/`autoAnchorTarget`/`AutoAnchorResult`, đồ thị có thêm `polygonSegmentStart`; `findMultiPolygonAutofillPath` giữ hành vi cũ (test cũ qua nguyên). `editor-canvas.tsx` — Shift + chuột trái chèn đường từ điểm vừa chấm; nhấp lên điểm đã chấm không chấm thêm; nhấp đúp chỉ hoàn tất khi trúng điểm có từ trước; bỏ `autoClosedDraftRef`, `lastCompletionRef`, `lastPolygonDownRef` và nhánh nhấp điểm đầu; bỏ prop `colorByLabel`. `editor-workspace.tsx` — bỏ ô “Màu theo label”, cập nhật gợi ý. Trang/kịch bản `canvas-browser-check` cập nhật theo hợp đồng mới.
+- **Test đổi theo hành vi đã xác nhận:** “double-click completes with 4 nodes (no duplicate)” thành ba kiểm tra (nhấp đúp chỗ trống chỉ chấm một điểm; nhấp đơn điểm đầu không hoàn tất; nhấp đúp lên điểm có sẵn hoàn tất 4 đỉnh); các kiểm tra cảnh `?seams=1` viết lại theo rule mới; “single colour by default” thay bằng “label colours by default”.
+- **Đã kiểm chứng:** `npm run typecheck`, `npm run lint` sạch; `npm test` 271 test / 29 file (+6 `findAutoAnchorPath`); `npm run build` qua; `canvas-browser-check` 45/45 trên dev server cô lập; ảnh chụp xem trước Shift (đường xanh tC → tB → tA từ điểm vừa chấm) và bản nháp vẫn mở sau Shift + click.
+- **Chưa kiểm chứng:** editor thật (cần đăng nhập + DB), ảnh/mask thật, thiết bị thật. Thay đổi vẫn chỉ ở nhánh local `dev/debug_anchor`, chưa commit/deploy (production trên `master` vẫn là bản cũ).
+- **Tài liệu đã cập nhật:** `EDITOR_PIPELINE.md` (hợp đồng P, mục Auto anchor, Lớp phủ), `ARCHITECTURE.md` (yêu cầu 13, 14), `AGENT_GUIDE.md`, baseline `ENGINEERING_POLICY.md`/`CLAUDE.md`.
+
+## 2026-11-05 — Thông báo trong sidebar phải, magnet trong Select, Ctrl+Shift cuộn, bật lại thanh cuộn
+
+- **Người dùng xác nhận:** chuyển toast vào sidebar phải thay cho đoạn gợi ý Ctrl+Z/Di chuột lên điểm; magnet trong chế độ V (dính vào điểm gần đó) với nút bật/tắt icon nam châm dưới nút lớp phủ; thêm Ctrl+Shift để cuộn; bật lại thanh cuộn.
+- **Thay đổi:** `editor-workspace.tsx` — ô `.panel-message` (thông báo + nút ×, mặc định gợi ý theo công cụ), toast nổi chỉ khi sidebar không hiện; nút magnet (`select-magnet`, mặc định bật); icon `magnet`; mẹo sử dụng thêm phím cuộn. `editor-canvas.tsx` — prop `magnet`, hút node đang nắm vào đỉnh gần nhất của mask khác (≤ 10 px màn hình) + vòng chỉ báo trên lớp draft; Ctrl+Shift+wheel cuộn dọc; thanh cuộn tự vẽ (kéo thumb, bấm rãnh) theo `viewRef`. `polygon-geometry.ts` — `nearestMagnetVertex`. CSS tương ứng.
+- **Kiến trúc/ảnh hưởng:** không đổi dữ liệu, lưu/khóa/export, `PolygonDraft`. Thanh cuộn không dùng cuộn gốc để giữ kiến trúc lớp canvas cỡ màn hình. Magnet chỉ ở Select khi kéo node (không áp dụng công cụ A, kéo cả polygon).
+- **Quyết định của agent:** magnet mặc định bật; ô thông báo hiện gợi ý ngắn khi chưa có thông báo; giữ toast nổi khi sidebar phải bị ẩn/thu gọn hoặc ở bước khác; Ctrl (không Shift) vẫn zoom vì pinch touchpad.
+- **Đã kiểm chứng:** typecheck/lint sạch; `npm test` 265 test / 29 file (+4 `nearestMagnetVertex`); build qua; `canvas-browser-check` 43/43 (+6: magnet dính đúng (300,320), tắt magnet không dính, thanh cuộn ẩn sau Fit/hiện khi zoom, Ctrl+Shift+wheel cuộn dọc không zoom, kéo thumb ngang dịch view). Ảnh chụp vòng chỉ báo magnet và thanh cuộn.
+- **Chưa kiểm chứng:** ô thông báo và nút magnet trong editor thật (cần đăng nhập + DB); touchpad thật; Safari/Firefox.
+- **Ghi chú vận hành:** tắt dev server giữa lúc ghi có thể để lại `.next/dev/types/validator.ts` hỏng làm `typecheck` lỗi; xóa `.next/dev` (file sinh tự động) rồi chạy lại. Một lần `lock-service.test.ts` lỗi khi máy tải nặng, chạy lại riêng và toàn bộ đều qua.
+- **Tài liệu đã cập nhật:** `EDITOR_PIPELINE.md`, `EDITOR_RENDERING.md`, `ARCHITECTURE.md` (yêu cầu 15), baseline `ENGINEERING_POLICY.md`/`CLAUDE.md`.
+
+## 2026-11-05 — Shift + chuột trái chỉ nối biên, nhấp đúp mới hoàn tất
+
+- **Người dùng xác nhận (sửa lại hành vi cùng ngày):** Shift + chuột trái thì polygon đang vẽ được nối đường biên tự động vào mask đang có nhưng không kết thúc; chỉ nhấp đúp mới kết thúc.
+- **Thay đổi:** `editor-canvas.tsx` — Shift + chuột trái chèn anchor + các đỉnh của đường tự nối vào `PolygonDraft` (mỗi đỉnh một bước undo, giữ hợp đồng Ctrl+Z từng điểm), không gọi hoàn tất. Bản nháp vừa khép theo biên vẽ như đã khép (không có cạnh tới con trỏ). Nhấp đúp sau đó bỏ đỉnh tại vị trí nhấp; lần nhấp thứ hai của nhấp đúp ngay sau khi hoàn tất (< 500 ms, < 8 px) bị bỏ qua. `commitDraft`/`completePolygon` bỏ nhánh tự nối lúc hoàn tất (không còn dùng). Gợi ý trong `editor-workspace.tsx` cập nhật.
+- **Kiến trúc/ảnh hưởng:** chỉ `editor-canvas.tsx` (pointer down/double-click/draft preview) và chuỗi gợi ý; `PolygonDraft`, thuật toán `findMultiPolygonAutofillPath`, lưu/khóa/export không đổi.
+- **Đã kiểm chứng:** typecheck/lint sạch; `npm test` 261 test / 29 file; build qua; `canvas-browser-check` 37/37 (kiểm tra Shift + click giờ tách thành “nối vào bản nháp, chưa kết thúc” và “nhấp đúp mới hoàn tất, polygon w1 đúng 8 đỉnh”). Thử thêm bằng script tạm: nhấp đúp lên điểm đầu sau Shift + click → 7 mask, w1:8, không còn bản nháp thừa; ảnh chụp bản nháp đã khép theo biên.
+- **Chưa kiểm chứng:** editor thật, ảnh thật.
+- **Tài liệu đã cập nhật:** `EDITOR_PIPELINE.md`, `ARCHITECTURE.md` (yêu cầu 13), baseline `ENGINEERING_POLICY.md`/`CLAUDE.md`.
+
+## 2026-11-05 — Lớp phủ màu theo label; độ mờ áp dụng cả đường biên
+
+- **Nhánh:** `dev/debug_anchor` (cùng đợt với sửa tự nối biên bên dưới). Chưa commit.
+- **Thay đổi:** thêm `src/lib/label-colors.ts` (màu theo chuỗi label: cùng label cùng màu, golden-angle theo số, r*/w* khác hue gốc và độ sáng, bỏ dải xanh lá). `EditorCanvas` nhận prop tùy chọn `colorByLabel` (mặc định `false`): tô mask và viền theo label. Viền vẽ với `globalAlpha = maskOpacity` (node/tag giữ alpha 1); đổi độ mờ/chế độ màu chỉ vẽ lại lớp mask/vector. Workspace: thẻ tùy chọn dưới nút Lớp phủ (checkbox Màu theo label, thanh Độ mờ dùng chung state với thanh ở panel phải), lưu localStorage; khi dùng brush cả nhóm nằm dưới thanh brush; màn hình ≤ 760 px thành một hàng.
+- **Kiến trúc/ảnh hưởng:** `editor-canvas.tsx` (render mask/vector, effect hiển thị), `editor-workspace.tsx` (UI lớp phủ), `globals.css`, trang `/canvas-browser-check` (cảnh `?labels=1`, nút điều khiển lớp phủ). Không đổi dữ liệu, type dùng chung, lưu/khóa/export; prop mới là tùy chọn nên chỗ dùng khác giữ hành vi cũ.
+- **Người dùng xác nhận:** lớp phủ cho phép mask khác màu theo label, hai mask tách biệt cùng label (r1) cùng màu; thêm thanh kéo độ mờ áp dụng cả đường biên (biên đậm nhạt theo, giữ nguyên là sai).
+- **Quyết định của agent (chưa được người dùng duyệt riêng):** màu theo label mặc định tắt; viền dùng đúng độ mờ của thanh (ở mặc định 50% viền nhạt hơn trước); node và tag label luôn rõ; giữ thanh độ mờ cũ ở panel phải; nhóm lớp phủ dời xuống dưới thanh brush khi dùng brush.
+- **Đã kiểm chứng:** `npm run typecheck` sạch; `npm run lint` sạch; `npm test` 261 test / 29 file qua (+5 test `label-colors.test.ts`); `npm run build` qua; `canvas-browser-check` 36/36 trên dev server cô lập (+3: một màu mặc định; hai mask r1 tách rời cùng màu, w1 khác; viền ở 20% nhạt hơn hẳn 100%), chạy hai lần. Ảnh chụp trang tĩnh dựng từ CSS thật: thẻ không đè thanh brush ở vùng canvas 700 px và màn hình 375 px.
+- **Chưa kiểm chứng:** thẻ lớp phủ trong editor thật, ảnh khổ qua thật, Safari/Firefox.
+- **Tài liệu đã cập nhật:** `EDITOR_PIPELINE.md`, `EDITOR_RENDERING.md` §3, `ARCHITECTURE.md` (yêu cầu 14, việc còn lại §7), `AGENT_GUIDE.md`, baseline trong `ENGINEERING_POLICY.md` và `CLAUDE.md`.
+
+## 2026-11-05 — Sửa tự nối biên (auto anchor): chỉ nối theo biên tự do, không gộp mask; Shift để nối
+
+- **Nhánh:** `dev/debug_anchor`, tạo từ `master` sau khi fast-forward local `master` lên `origin/master` (`02d5c16`). Chưa commit.
+- **Lỗi:** bắt đầu polygon từ anchor trên mask lân cận thì đường tự nối gộp các mask riêng biệt xung quanh thành một khối (`mergePolygonsIntoSingle` lấp cả vùng trống bị bao quanh) rồi đi vòng ngoài khối; nhấp điểm thứ hai lên mask bất kỳ thì polygon tự kết thúc; hoàn tất polygon còn tự nối biên ngầm.
+- **Thay đổi:** `findMultiPolygonAutofillPath` viết lại thành tìm đường ngắn nhất trên đồ thị biên tự do (cạnh chưa có mask khác nối, chưa bị bản nháp nối), mỗi cạnh có chiều giữ mask ở ngoài polygon mới, bỏ đường vòng xa bản nháp. Canvas: nhấp thường lên mask chỉ chấm anchor; Shift + trỏ để xem trước, Shift + chuột trái để hoàn tất theo đường đó; nhấn/nhả Shift cập nhật xem trước; hoàn tất thường khép bằng đoạn thẳng; chỉ chèn đỉnh điểm đầu/cuối vào mask mà điểm thật sự nằm trên biên. Thêm gợi ý thao tác trong `editor-workspace.tsx` (chỉ chuỗi hiển thị).
+- **Kiến trúc/ảnh hưởng:** `polygon-geometry.ts` (chỉ canvas gọi hàm này; chữ ký và kiểu trả về giữ nguyên), `editor-canvas.tsx` (pointer down/move polygon, `commitDraft`, `completePolygon(options)`, listener phím Shift), trang `/canvas-browser-check` thêm cảnh `?seams=1`. Không đổi schema, type dùng chung, lưu, khóa, export hay dữ liệu đã lưu; undo từng điểm khi vẽ polygon giữ nguyên.
+- **Người dùng xác nhận:** chỉ nối theo biên, không gộp mask; nhấp lên mask khác khi đang vẽ là chấm anchor chứ không phải điểm kết thúc, polygon hoàn tất khi nhấp đúp; Shift + trỏ anchor để xem trước; không đi phần biên đã có mask khác nối; kết thúc bằng Shift + chuột trái.
+- **Test đổi theo hành vi đã xác nhận:** test “preserves shared boundary … along seam of touching polygons” (đi dọc đường nối giữa hai mask) đổi thành “does not follow a seam that two existing masks already share”, kỳ vọng `null`.
+- **Đã kiểm chứng:** `npm run typecheck` sạch; `npm run lint` sạch; `npm test` 256 test / 28 file qua (thêm 6 test mới, trước đó 250); `npm run build` qua; `node scripts/canvas-browser-check.mjs http://localhost:3217` trên dev server cô lập 33/33 (thêm 4 kiểm tra cảnh `?seams=1`), ảnh chụp xác nhận xem trước khi giữ Shift đi dọc biên dưới các mask phía trên, các mask đó vẫn riêng biệt.
+- **Chưa kiểm chứng:** ảnh/mask thật, thiết bị thật, mask vector hóa có khe hở > 2.5 px, mask có lỗ; xem ARCHITECTURE “Việc còn lại” §7.
+- **Tài liệu đã cập nhật:** `EDITOR_PIPELINE.md`, `ARCHITECTURE.md` (yêu cầu 13, việc còn lại §7), `AGENT_GUIDE.md` (bản đồ ảnh hưởng), `ENGINEERING_POLICY.md` và `CLAUDE.md` gốc (baseline).
+
 ## 2026-11-01 — Xác định sai root Cloudflare và khớp tên Worker Containers
 
 - **Người dùng xác nhận:** root Cloudflare hiện là `/annotation-tool`; yêu cầu sửa deploy, giữ dữ liệu label03.

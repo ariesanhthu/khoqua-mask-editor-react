@@ -631,6 +631,33 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
 }
 .layer-toggle svg { width: 15px; height: 15px; }
 .layer-toggle.active { color: var(--editor-primary-dark); }
+/* Nút lớp phủ + tùy chọn màu theo label và độ mờ (áp dụng cả mask lẫn đường biên), 2026-11-05. */
+.overlay-controls { position: absolute; z-index: 6; top: 84px; left: 38px; display: grid; gap: 6px; justify-items: start; }
+.overlay-controls .layer-toggle { position: static; }
+.overlay-options { display: grid; gap: 7px; width: 172px; padding: 8px 10px; color: var(--editor-muted); background: rgba(255,255,255,.94); border: 1px solid var(--editor-border); border-radius: 10px; box-shadow: 0 4px 14px rgba(16,24,40,.06); font-size: 10px; }
+.overlay-opacity { display: grid; grid-template-columns: auto minmax(0, 1fr) 30px; align-items: center; gap: 6px; }
+.overlay-opacity input { width: 100%; height: 3px; margin: 0; padding: 0; accent-color: var(--editor-primary); box-shadow: none; }
+.overlay-opacity strong { color: var(--editor-primary-dark); font-size: 9px; text-align: right; }
+/* Thanh brush (top 92px, cao 46px, giữa vùng canvas) che nút lớp phủ khi vùng canvas hẹp (~700px, hai sidebar mở):
+   khi đang dùng brush, đặt cả nhóm lớp phủ xuống dưới thanh đó. */
+.overlay-controls.with-brush-toolbar { top: 146px; }
+.overlay-controls .magnet-toggle:not(.active) { color: var(--editor-muted); }
+/* Thông báo editor trong sidebar phải thay cho toast nổi (2026-11-05); toast nổi chỉ còn khi sidebar không hiện. */
+.panel-message { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; color: var(--editor-muted); background: #f8f9fc; border: 1px solid var(--editor-border); border-radius: 10px; font-size: 11px; line-height: 1.55; }
+.panel-message.has-message { color: var(--editor-body); background: #f6f3ff; border-color: #ded6ff; }
+.panel-message > span { flex: 1; min-width: 0; }
+.panel-message > button { flex: 0 0 auto; width: 20px; height: 20px; padding: 0; color: var(--editor-muted); background: transparent; border: 0; border-radius: 5px; font-size: 15px; line-height: 1; cursor: pointer; }
+.panel-message > button:hover { color: var(--editor-primary-dark); background: #ede8ff; }
+@media (min-width: 761px) { .toast.in-sidebar { display: none; } }
+/* Thanh cuộn tự vẽ của canvas (view ảo, không dùng cuộn gốc của trình duyệt): chỉ hiện khi ảnh vượt khung. */
+.canvas-scrollbar { position: absolute; z-index: 5; background: rgba(238,240,244,.88); border-radius: 999px; touch-action: none; }
+.canvas-scrollbar[hidden] { display: none; }
+.canvas-scrollbar.horizontal { right: 18px; bottom: 4px; left: 4px; height: 11px; }
+.canvas-scrollbar.vertical { top: 4px; right: 4px; bottom: 18px; width: 11px; }
+.canvas-scrollbar-thumb { position: absolute; background: #98a2b3; border-radius: 999px; cursor: grab; }
+.canvas-scrollbar-thumb:hover,.canvas-scrollbar-thumb.dragging { background: #667085; }
+.canvas-scrollbar.horizontal .canvas-scrollbar-thumb { top: 2px; bottom: 2px; left: 0; }
+.canvas-scrollbar.vertical .canvas-scrollbar-thumb { top: 0; right: 2px; left: 2px; }
 .canvas-control-stack { position: absolute; z-index: 7; top: 24px; right: 14px; display: grid; gap: 12px; width: 50px; }
 .viewport-zoom,.floating-toolbar { display: grid; place-items: center; padding: 5px; background: #fff; border: 1px solid var(--editor-border); border-radius: 14px; box-shadow: 0 8px 24px rgba(16,24,40,.09); }
 .viewport-zoom button,.floating-toolbar button { display: grid; width: 38px; height: 38px; place-items: center; color: var(--editor-body); background: transparent; border: 0; border-radius: 9px; cursor: pointer; }
@@ -823,6 +850,12 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
   .brush-mode-switch button { padding: 0 8px; }
   .brush-mode-switch button span,.brush-size-field > span { display: none; }
   .layer-toggle span { display: none; }
+  /* Một hàng ngắn cạnh nút lớp phủ, không đè thanh brush (top 104px). */
+  .overlay-controls { top: 64px; left: 22px; grid-auto-flow: column; align-items: center; }
+  .overlay-options { display: flex; align-items: center; width: auto; gap: 8px; padding: 6px 8px; }
+  .overlay-opacity > span { display: none; }
+  .overlay-opacity { grid-template-columns: 72px 28px; }
+  .overlay-controls.with-brush-toolbar { top: 64px; }
   .shortcut-content { grid-template-columns: 1fr; }
   .draft-choice-dialog { padding: 22px 18px; }
   .draft-choice-options { grid-template-columns: 1fr; }

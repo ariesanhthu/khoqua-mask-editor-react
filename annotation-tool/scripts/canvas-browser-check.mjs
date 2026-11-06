@@ -84,11 +84,12 @@ await send('Page.addScriptToEvaluateOnNewDocument', { source: `
 ` });
 
 const mouse = (type, x, y, extra = {}) => send('Input.dispatchMouseEvent', { type, x, y, button: 'none', ...extra });
-async function click(x, y, { button = 'left', clickCount = 1 } = {}) {
-  await mouse('mouseMoved', x, y);
-  await mouse('mousePressed', x, y, { button, buttons: button === 'left' ? 1 : 2, clickCount });
-  await mouse('mouseReleased', x, y, { button, buttons: 0, clickCount });
+async function click(x, y, { button = 'left', clickCount = 1, modifiers = 0 } = {}) {
+  await mouse('mouseMoved', x, y, { modifiers });
+  await mouse('mousePressed', x, y, { button, buttons: button === 'left' ? 1 : 2, clickCount, modifiers });
+  await mouse('mouseReleased', x, y, { button, buttons: 0, clickCount, modifiers });
 }
+const SHIFT = 8; // CDP Input modifiers bit
 async function drag(map, from, to, steps = 30) {
   const a = map(...from); const b = map(...to);
   await mouse('mouseMoved', a.x, a.y);
@@ -215,13 +216,23 @@ try {
   s = await state();
   check('handle redo() restores the point → 4 nodes', /last=w2:4/.test(s.history), s.history);
 
-  // Double-click completion drops the vertex duplicated by the second pointerdown
+  // Hoàn tất chỉ bằng nhấp đúp lên một điểm đã chấm (người dùng xác nhận 2026-11-06): nhấp đúp ở chỗ trống chỉ chấm
+  // một điểm, nhấp đơn lên điểm đầu không hoàn tất, nhấp lên điểm đã có không chấm thêm.
   to = await imageToScreen(800, 500);
   for (const [x, y] of [[40, 430], [150, 430], [150, 480]]) { const p = to(x, y); await click(p.x, p.y); await sleep(60); }
   { const p = to(40, 480); await click(p.x, p.y, { clickCount: 1 }); await click(p.x, p.y, { clickCount: 2 }); }
   await sleep(400);
   s = await state();
-  check('double-click completes with 4 nodes (no duplicate)', /last=w3:4/.test(s.history), s.history);
+  check('double-click on empty space only places one point (polygon not finished)', field(s.history, 'local') === 'true' && /last=w2:4/.test(s.history), s.history);
+  { const p = to(40, 430); await click(p.x, p.y); }
+  await sleep(300);
+  s = await state();
+  check('single click on the first point does not finish the polygon', field(s.history, 'local') === 'true' && /last=w2:4/.test(s.history), s.history);
+  await sleep(700);
+  { const p = to(150, 480); await click(p.x, p.y, { clickCount: 1 }); await click(p.x, p.y, { clickCount: 2 }); }
+  await sleep(400);
+  s = await state();
+  check('double-click on an existing point finishes with 4 nodes (no duplicate)', /last=w3:4/.test(s.history) && field(s.history, 'local') === 'false', s.history);
 
   // Right-click removes a draft point; Ctrl+Z restores it
   to = await imageToScreen(800, 500);
@@ -302,6 +313,124 @@ try {
   check('Delete removes selected polygons', (await evaluate(masksOf)) === 0);
   await ctrl('z'); await sleep(200);
   check('undo restores all selected polygons', (await evaluate(masksOf)) === 4);
+
+  // Auto anchor (người dùng xác nhận 2026-11-06): nhấp thường chỉ chấm điểm; giữ Shift + trỏ vào trong mask kế bên để
+  // xem trước, Shift + chuột trái chèn các điểm bám biên tự do TỪ ĐIỂM VỪA CHẤM tới điểm biên gần con trỏ; không hoàn tất;
+  // nhấp đúp lên một điểm mới hoàn tất. Cảnh ?seams=1: 6 mask r1..r6 bao vùng trống x 160..540, y 160..400.
+  await send('Page.navigate', { url: `${base}/canvas-browser-check?seams=1` });
+  await waitFor(pageReady, 120000); await sleep(700);
+  await clickButtonText('Fit'); await sleep(200);
+  await clickSelector('button[data-tool=polygon]'); await sleep(200);
+  // Mỗi thông báo hiện phía trên canvas và đẩy canvas xuống: tính lại tọa độ trước mỗi lần nhấp.
+  const clickImage = async (x, y, options) => { const p = (await imageToScreen(800, 500))(x, y); await click(p.x, p.y, options); await sleep(120); };
+  const shiftClickImage = async (x, y) => {
+    const p = (await imageToScreen(800, 500))(x, y);
+    await mouse('mouseMoved', p.x, p.y, { modifiers: SHIFT }); await sleep(150);
+    await click(p.x, p.y, { modifiers: SHIFT }); await sleep(250);
+  };
+  // A trên biên trên của Bm, một điểm tự do, P trên biên dưới của tC: nhấp lên mask khác chỉ chấm điểm (chèn đỉnh vào mask).
+  for (const [x, y] of [[450, 400], [510, 300], [470, 160]]) await clickImage(x, y);
+  s = await state();
+  check('clicking another mask while drawing only adds a point (polygon not finished)', field(s.status, 'masks') === '6' && field(s.history, 'local') === 'true' && field(s.history, 'totalNodes') === '26', `${s.status} | ${s.history}`);
+  // Shift + chuột trái trong tA: chèn (400,160), (300,160) và đích (230,160) trên biên dưới tA; vẫn đang vẽ.
+  await shiftClickImage(230, 150);
+  s = await state();
+  check('Shift + left click inside a neighbour mask inserts boundary points without finishing', field(s.status, 'masks') === '6' && field(s.history, 'local') === 'true' && field(s.history, 'totalNodes') === '27', `${s.status} | ${s.history} | ${s.message}`);
+  // Tiếp từ (230,160) sang L: chèn (160,160) và đích (160,380) trên biên phải của L.
+  await shiftClickImage(150, 380);
+  s = await state();
+  check('a second Shift + left click continues from the point just placed', field(s.status, 'masks') === '6' && field(s.history, 'local') === 'true' && field(s.history, 'totalNodes') === '28', `${s.status} | ${s.history} | ${s.message}`);
+  await sleep(700);
+  // Nhấp đúp lên điểm đầu A mới hoàn tất: 3 điểm vẽ + 5 điểm auto, 6 mask cũ còn nguyên (+4 đỉnh chèn vào biên).
+  { const p = (await imageToScreen(800, 500))(450, 400); await click(p.x, p.y, { clickCount: 1 }); await click(p.x, p.y, { clickCount: 2 }); }
+  await sleep(400);
+  s = await state();
+  check('double-click on a point finishes along the free boundary without merging masks', field(s.status, 'masks') === '7' && /last=w1:8/.test(s.history) && field(s.history, 'totalNodes') === '36' && field(s.history, 'local') === 'false', `${s.status} | ${s.history} | ${s.message}`);
+  await ctrl('z'); await sleep(250);
+  check('undo removes the auto-anchored polygon', (await evaluate(masksOf)) === 6);
+  // Điểm vừa chấm không nằm trên biên (bắt đầu ngoài các mask): Shift + chuột trái trong R không chèn gì, vẫn vẽ tiếp.
+  for (const [x, y] of [[700, 300], [680, 200]]) await clickImage(x, y);
+  await shiftClickImage(570, 250);
+  s = await state();
+  check('Shift + left click without a free boundary path inserts nothing and keeps drawing', (await evaluate(masksOf)) === 6 && field(s.history, 'local') === 'true' && field(s.history, 'totalNodes') === '28', `${s.status} | ${s.history}`);
+  await escape(); await sleep(150);
+
+  // Màu theo label và độ mờ áp dụng cả lên viền (người dùng xác nhận 2026-11-05). Cảnh ?labels=1: hai mask tách
+  // rời cùng là r1 và một mask w1. Pixel đọc từ ảnh chụp trang giải mã trên canvas tạm, không getImageData lớp hiển thị.
+  const pixelsAt = async (points) => {
+    const { data } = await send('Page.captureScreenshot', { format: 'png' });
+    return evaluate(`(async () => {
+      const image = new Image(); image.src = 'data:image/png;base64,${data}'; await image.decode();
+      const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+      const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
+      return ${JSON.stringify(points)}.map(([x, y]) => Array.from(context.getImageData(Math.round(x), Math.round(y), 1, 1).data.slice(0, 3)));
+    })()`);
+  };
+  const sameColor = (a, b) => a.every((value, index) => Math.abs(value - b[index]) <= 2);
+  await send('Page.navigate', { url: `${base}/canvas-browser-check?labels=1` });
+  await waitFor(pageReady, 120000); await sleep(700);
+  await clickButtonText('Fit'); await sleep(300);
+  const maskCenters = async () => { const map = await imageToScreen(800, 500); return [map(175, 200), map(575, 200), map(375, 385)].map((p) => [p.x, p.y]); };
+  // Màu theo label là chế độ duy nhất (người dùng xác nhận 2026-11-06).
+  const [labelA, labelB, labelW] = await pixelsAt(await maskCenters());
+  check('label colours by default: two separate r1 masks share a colour, w1 differs', sameColor(labelA, labelB) && !sameColor(labelA, labelW), JSON.stringify([labelA, labelB, labelW]));
+  // Ẩn lớp tô để chỉ còn viền; so pixel đậm nhất quanh cạnh trái của mask r1 ở độ mờ 100% và 20%.
+  await clickButtonText('Mask layer'); await sleep(200);
+  const edgeDarkness = async () => {
+    const edge = (await imageToScreen(800, 500))(100, 200);
+    const pixels = await pixelsAt([-2, -1, 0, 1, 2].map((dx) => [edge.x + dx, edge.y]));
+    return Math.max(...pixels.map(([r, g, b]) => 765 - r - g - b));
+  };
+  await clickButtonText('Opacity 100'); await sleep(300);
+  const strongEdge = await edgeDarkness();
+  await clickButtonText('Opacity 20'); await sleep(300);
+  const faintEdge = await edgeDarkness();
+  check('outline follows the opacity slider (20% much lighter than 100%)', strongEdge > 150 && faintEdge < strongEdge * 0.45, `100%: ${strongEdge}, 20%: ${faintEdge}`);
+
+  // Magnet trong Select (người dùng xác nhận 2026-11-05): kéo góc (250,300) của r1 tới gần góc (300,320) của w1.
+  await clickButtonText('Mask layer'); await sleep(150);
+  await clickSelector('button[data-tool=select]'); await sleep(200);
+  const cornerOf = () => evaluate(`(() => { const n = window.__polygons.find((p) => p.id === 'l0').nodes[2]; return [n.x, n.y]; })()`);
+  const dragCorner = async () => {
+    const map = await imageToScreen(800, 500);
+    const fill = map(175, 200); await click(fill.x, fill.y); await sleep(200);
+    await drag(map, [250, 300], [295, 316], 12); await sleep(300);
+  };
+  await dragCorner();
+  const snapped = await cornerOf();
+  check('magnet: dragged node sticks to the nearby vertex of another mask', snapped[0] === 300 && snapped[1] === 320, JSON.stringify(snapped));
+  await ctrl('z'); await sleep(250);
+  await clickButtonText('Magnet'); await sleep(150);
+  await dragCorner();
+  const free = await cornerOf();
+  check('magnet off: the node stays where it is dropped', Math.abs(free[0] - 300) > 2 && Math.abs(free[0] - 295) < 2.5, JSON.stringify(free));
+  await ctrl('z'); await sleep(250);
+  await clickButtonText('Magnet'); await sleep(150);
+
+  // Thanh cuộn tự vẽ + Ctrl/Shift + con lăn (người dùng yêu cầu 2026-11-05).
+  const scrollbars = () => evaluate(`(() => ['horizontal', 'vertical'].map((name) => { const bar = document.querySelector('.canvas-scrollbar.' + name); return { hidden: bar.hidden, transform: bar.firstElementChild.style.transform }; }))()`);
+  await clickButtonText('Fit'); await sleep(300);
+  check('scrollbars hidden after Fit', (await scrollbars()).every((bar) => bar.hidden), JSON.stringify(await scrollbars()));
+  { const c = (await imageToScreen(800, 500))(400, 250); for (let i = 0; i < 8; i += 1) { await mouse('mouseWheel', c.x, c.y, { deltaX: 0, deltaY: -120 }); await sleep(20); } }
+  await sleep(300);
+  const zoomed = await scrollbars();
+  check('scrollbars appear when zoomed beyond the viewport', zoomed.every((bar) => !bar.hidden), JSON.stringify(zoomed));
+  const zoomBefore = field((await state()).status, 'zoom');
+  { const c = (await imageToScreen(800, 500))(400, 250); await mouse('mouseWheel', c.x, c.y, { deltaX: 0, deltaY: 240, modifiers: 10 }); }
+  await sleep(250);
+  const afterCtrlShift = await scrollbars();
+  check('Ctrl + Shift + wheel scrolls vertically without zooming', afterCtrlShift[1].transform !== zoomed[1].transform && afterCtrlShift[0].transform === zoomed[0].transform && field((await state()).status, 'zoom') === zoomBefore, JSON.stringify(afterCtrlShift));
+  {
+    const thumb = await evaluate(`(() => { const r = document.querySelector('.canvas-scrollbar.horizontal .canvas-scrollbar-thumb').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+    await mouse('mouseMoved', thumb.x, thumb.y);
+    await mouse('mousePressed', thumb.x, thumb.y, { button: 'left', buttons: 1, clickCount: 1 });
+    for (let i = 1; i <= 6; i += 1) { await mouse('mouseMoved', thumb.x - i * 10, thumb.y, { button: 'left', buttons: 1 }); await sleep(20); }
+    await mouse('mouseReleased', thumb.x - 60, thumb.y, { button: 'left', buttons: 0, clickCount: 1 });
+  }
+  await sleep(250);
+  const afterDrag = await scrollbars();
+  check('dragging the horizontal scrollbar thumb pans the view', afterDrag[0].transform !== afterCtrlShift[0].transform && field((await state()).status, 'zoom') === zoomBefore, JSON.stringify(afterDrag));
+  await clickButtonText('Fit'); await sleep(300);
 
   // ── Large polygon-mode file (600 saved polygons, 2400×1600) under 4× CPU throttle ──
   await send('Emulation.setCPUThrottlingRate', { rate: 4 });

@@ -39,7 +39,11 @@ Mỗi lớp có cờ bẩn riêng trong `dirtyRef` và chỉ vẽ lại khi nộ
 | `stage` (ảnh) | đổi view (zoom/pan), đổi kích thước, mất GPU context | chọn, kéo node, chấm điểm, nét brush, vector hóa |
 | `draft` | chấm/gỡ điểm, di chuột xem trước cạnh, kéo khung chọn, đổi view | mọi thứ khác |
 | `mask` | đổi mask (`maskRect` = chỉ vùng nét brush), zoom settle | kéo node, chấm điểm |
-| `vectors` | đổi polygon/chọn (`vectorsRect` = chỉ vùng kéo node), zoom settle | nét brush |
+| `vectors` | đổi polygon/chọn (`vectorsRect` = chỉ vùng kéo node), zoom settle, đổi độ mờ hoặc chế độ màu theo label (2026-11-05) | nét brush |
+
+Thanh cuộn (2026-11-05) là hai `div` HTML trên `.canvas-viewport`, cập nhật mỗi khi lớp `stage` vẽ lại (mọi thay đổi view); kéo thumb chỉ đổi `viewRef` rồi `renderView()` như pan. Vòng chỉ báo magnet vẽ trên lớp `draft`.
+
+Độ mờ của lớp `mask` là CSS `opacity` (không vẽ lại); viền trên lớp `vectors` nhận cùng độ mờ qua `globalAlpha` khi vẽ, còn node và tag label vẽ với alpha 1 nên đổi độ mờ phải vẽ lại lớp `vectors`. Đổi chế độ màu theo label vẽ lại `mask` và `vectors`. Không vẽ lại `stage`. Chế độ màu áp dụng giống nhau ở vẽ toàn bộ và dirty rectangle (kiểm tra trùng pixel vẫn qua).
 
 ## 4. Thuật toán theo tình huống
 

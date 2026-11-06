@@ -23,12 +23,42 @@ Kiến trúc và backlog: [ARCHITECTURE.md](ARCHITECTURE.md). Bản cập nhật
 
 Người dùng nhấn mạnh (2026-10-25) giữ nguyên hành vi này; khóa bằng `src/lib/polygon-draft.test.ts` và `scripts/canvas-browser-check.mjs`.
 
-- Mỗi click chấm một điểm; click lại điểm đầu (khi đã có ≥ 3 điểm), Enter, nút “Hoàn tất polygon” hoặc double-click thì hoàn tất. Double-click bỏ đỉnh trùng do lần pointer-down thứ hai.
+- Mỗi click chấm một điểm; nhấp lên một điểm đã chấm không chấm thêm. **Hoàn tất (người dùng xác nhận 2026-11-06): nhấp đúp lên một điểm đã chấm, Enter, hoặc nút “Hoàn tất polygon”.** Nhấp đơn lên điểm đầu và nhấp đúp ở chỗ trống không còn hoàn tất (nhấp đúp ở chỗ trống chỉ chấm đúng một điểm như nhấp đơn). Thay cho hợp đồng 2026-10-25 “click lại điểm đầu hoặc double-click ở đâu cũng hoàn tất”.
 - Đang chấm điểm: **Ctrl+Z gỡ đúng một điểm vừa chấm** mỗi lần; Ctrl+Y/Ctrl+Shift+Z chấm lại; nút Hoàn tác/Làm lại trên thanh công cụ có cùng hiệu ứng và hiện trạng thái “cục bộ”. Chấm điểm mới sau khi undo bỏ nhánh redo.
 - Chuột phải lên một điểm của bản nháp xóa điểm đó (hoàn tác được).
 - Gỡ hết điểm rồi undo tiếp: rời bản nháp, undo chuyển sang lịch sử chung (ví dụ hoàn tác cả polygon vừa hoàn tất trước đó). Polygon đã hoàn tất được hoàn tác cả vùng bằng một bước.
 - Esc hủy bản nháp. Đổi sang công cụ khác ngoài Pan cũng hủy bản nháp; Pan giữ bản nháp.
 - “Hoàn tất & Tiếp theo” bị khóa khi đang có điểm nháp (undo cục bộ).
+
+## Auto anchor khi vẽ polygon (Shift) — người dùng xác nhận 2026-11-06
+
+Thay rule 2026-11-05 (đường nối từ điểm trỏ về điểm đầu). Rule đã chốt qua hỏi–đáp ngày 2026-11-06:
+
+- **Nhấp chuột trái thường**: chấm một điểm bình thường (snap/chèn đỉnh vào biên mask khác như trước), không áp dụng gì thêm, không hoàn tất.
+- **Giữ Shift + trỏ vào bên trong mask kế bên** (hoặc sát biên ngoài mask): xem trước (viền xanh lá) đường bám biên chạy **từ điểm vừa chấm** tới **điểm trên biên tự do của mask đó gần con trỏ nhất**. Nhấn/nhả Shift bật/tắt xem trước ngay.
+- **Shift + chuột trái**: chèn các điểm của đường đó vào bản nháp (điểm đích thành đỉnh của mask chứa nó). **Không hoàn tất, không chuyển sang V**; vẽ tiếp được, Ctrl+Z gỡ từng điểm. Lần Shift + chuột trái kế tiếp chạy tiếp từ điểm cuối vừa chèn. Không có đường hợp lệ (điểm vừa chấm không nằm trên biên tự do, hoặc con trỏ không ở trong/sát mask nào) thì không chèn gì và báo lý do.
+- Đích trỏ gần điểm đầu (trong ngưỡng bắt điểm) và điểm đầu nằm trên biên tự do: đường nối về đúng điểm đầu (khép polygon theo biên), vẫn chưa hoàn tất.
+- Rule đường đi (ví dụ mask lân cận A→B→C→D→A, cạnh C→D đã dính mask khác): chỉ đi trên phần biên tự do D→A→B (biên có thể bao polygon mới), loang qua nhiều mask theo biên đó; không đi phần biên đã dính/đè mask khác (≤ 2.5 px ảnh, người dùng giữ ngưỡng này); không đi lại phần biên bản nháp đã nối. Trong hai chiều đi quanh biên tới đích, **chọn đường ngắn nhất** (quyết định của agent: rule không nêu; muốn đi phía kia thì Shift + chuột trái từng chặng). Khi khép về điểm đầu, ưu tiên chiều không bao mask vào trong polygon.
+- Điền vùng kín (nhấp vào vùng trống bị bao kín khi chưa có điểm nháp) không đổi.
+
+Thuật toán (`src/lib/polygon-geometry.ts`): `findAutoAnchorPath` = `autoAnchorTarget` (đích dưới con trỏ) + `freeBoundaryRoutes` (Dijkstra trên đồ thị biên tự do, dùng chung với `findMultiPolygonAutofillPath`):
+
+1. **Chỉ đi trên biên tự do.** Cạnh mask bị loại nếu có cạnh của mask khác chạy gần song song sát bên (≤ 2.5 px ảnh, chân đường vuông góc nằm trên cạnh kia) hoặc nằm trong mask khác.
+2. **Không đi lại phần biên bản nháp đã nối.** Cạnh chạm bản nháp (≤ 0.5 px) bị loại, trừ tại điểm vừa chấm (và điểm đầu khi khép), nơi chỉ coi là chạm khi hai đoạn chồng lên nhau.
+3. **Đi qua chỗ nối giữa các mask.** Đỉnh của các mask khác nhau cách nhau ≤ 2.5 px được gộp thành một nút (mỗi nút tối đa một đỉnh của mỗi mask); cạnh được tách tại đỉnh của mask khác nằm trên nó (chỗ nối chữ T).
+4. **Polygon mới luôn ở cùng một phía.** Mỗi đường chỉ đi theo một chiều nhất quán (mask luôn bên trái hoặc luôn bên phải), Dijkstra chạy cho cả hai chiều.
+5. Không gộp, không làm mịn mask cũ; điểm chèn là đỉnh thật của mask cũ (tại chỗ chuyển mask giữ đỉnh của cả hai mask).
+6. Đồ thị biên cache theo mảng polygon (canvas luôn tạo mảng mới khi đổi, không sửa tại chỗ). Đo bằng Node trên máy dev: ~30 ms dựng cho cảnh 15–20 nghìn đỉnh, mỗi lần rê chuột ~0.2–1 ms.
+
+Khóa bằng `polygon-geometry.test.ts` (describe “findAutoAnchorPath” và “free boundary only”) và các kiểm tra cảnh `?seams=1` trong `scripts/canvas-browser-check.mjs`. Chưa thử trên dữ liệu thật, thiết bị thật hay mask vector hóa có khe hở > 2.5 px.
+
+## Lớp phủ: màu theo label và độ mờ (người dùng xác nhận 2026-11-05)
+
+- Nút **Lớp phủ** (góc trên trái canvas) có thêm thẻ **Độ mờ** khi lớp phủ đang bật; thanh này dùng chung giá trị với thanh “Độ mờ” ở panel phải (lưu `mask-opacity` trong localStorage).
+- **Màu theo label là chế độ mặc định và duy nhất** (người dùng xác nhận 2026-11-06; bỏ ô bật/tắt và chế độ một màu của 2026-11-05): mask và viền tô theo màu của label, cùng label cùng màu kể cả hai vùng tách rời (ví dụ hai mask cùng là `r1`), label khác màu khác. Màu chỉ phụ thuộc chuỗi label (`src/lib/label-colors.ts`), ổn định giữa các ảnh, bỏ dải xanh lá để không lẫn vào nền khổ qua. Chỉ hiển thị: không lưu vào annotation, không ảnh hưởng export/ZIP/Drive.
+- **Độ mờ áp dụng cả đường biên**: viền của mọi polygon (thường, khóa, đang chọn) đậm nhạt cùng phần tô. Node và tag label của polygon đang chọn luôn rõ để vẫn chỉnh được khi kéo thấp.
+- Giới hạn: trong lúc đang tô brush (raster chưa vector hóa) lớp phủ vẫn một màu vì raster không có label; vẽ lại theo label sau khi vector hóa (rời brush). Polygon khóa vẫn tô trắng/viền xám. Bản nháp polygon đang vẽ giữ màu tím.
+- Khi đang dùng brush, cả nhóm lớp phủ nằm dưới thanh brush (thanh brush che nút lớp phủ khi vùng canvas hẹp ~700 px). Màn hình ≤ 760 px: tùy chọn thành một hàng gọn cạnh nút.
 
 ## Hợp đồng thao tác trong Select
 
@@ -40,7 +70,10 @@ Người dùng nhấn mạnh (2026-10-25) giữ nguyên hành vi này; khóa b�
 - Merge nhận các polygon có node được chọn, cho phép khác label và luôn trả về một outer ring hợp lệ.
 - Trong công cụ Select, `1` tạo/gán label u vấu kế tiếp (`w*`) và `2` tạo/gán label vết gợn kế tiếp (`r*`) cho toàn bộ polygon đang chọn.
 - Đổi tool không được reset zoom/pan. Chỉ nút “Vừa khung hình” hoặc đổi sang file khác được fit lại.
-- Zoom vượt viewport phải hiện scrollbar ngang/dọc; Fit đưa surface về 100%, scroll về 0 và tự ẩn scrollbar.
+- Zoom vượt viewport phải hiện scrollbar ngang/dọc; Fit tự ẩn scrollbar. Từ 2026-11-05 (người dùng yêu cầu bật lại) đây là **thanh cuộn tự vẽ** ở mép canvas theo view ảo (`viewRef`), không phải cuộn gốc của trình duyệt (bị bỏ từ 2026-09-11 khi chuyển sang các lớp canvas cỡ màn hình): kéo thumb để cuộn, bấm vào rãnh để nhảy tới đó; phần đã kéo ra ngoài ảnh cũng tính vào chiều dài cuộn.
+- Con lăn: zoom; **Shift + con lăn** cuộn ngang; **Ctrl + Shift + con lăn** cuộn dọc (2026-11-05). Ctrl không kèm Shift vẫn là zoom (pinch trên touchpad gửi wheel có ctrlKey).
+- **Magnet (người dùng xác nhận 2026-11-05):** trong Select (V), kéo node tới gần (≤ 10 px màn hình) một đỉnh của mask khác thì node dính đúng vào đỉnh đó (vòng xanh chỉ báo); khi kéo nhiều node, cả nhóm dịch cùng một đoạn theo node đang nắm. Không hút vào đỉnh của chính polygon đang kéo. Nút bật/tắt (icon nam châm) nằm dưới nút Lớp phủ ở góc trên trái; mặc định bật, nhớ theo trình duyệt (`select-magnet`). Không áp dụng cho công cụ A (anchor) và kéo cả polygon. Hàm: `nearestMagnetVertex`.
+- **Thông báo của editor** hiện trong sidebar phải, thay cho hai đoạn gợi ý cũ (Ctrl+Z… / Di chuột lên điểm…) (người dùng xác nhận 2026-11-05); chưa có thông báo thì ô đó hiện gợi ý ngắn theo công cụ; nút × ẩn thông báo. Toast nổi chỉ còn khi sidebar phải thu gọn, đang ở bước khác, hoặc màn hình ≤ 760 px (sidebar ẩn), để lỗi lưu không bị mất.
 
 ## Invariant khi sửa conflict
 

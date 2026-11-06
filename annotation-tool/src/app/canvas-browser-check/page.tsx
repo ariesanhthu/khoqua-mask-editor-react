@@ -28,6 +28,37 @@ function spikyScene() {
   return { width, height, photo, mask, operations: [] as MaskOperation[] };
 }
 
+/**
+ * ?seams=1: vùng trống x 160..540, y 160..400 bao kín bởi 6 mask (L | tA | tB | tC | R ở trên/hai bên, Bm ở dưới)
+ * để kiểm tra tự nối biên bằng Shift (người dùng xác nhận 2026-11-05).
+ */
+function seamsScene() {
+  const width = 800; const height = 500;
+  const boxes: Array<[number, number, number, number]> = [
+    [100, 100, 160, 400], [160, 100, 300, 160], [300, 100, 400, 160], [400, 100, 540, 160], [540, 100, 600, 400], [100, 400, 600, 460],
+  ];
+  const polygons: AnnotationPolygon[] = boxes.map(([left, top, right, bottom], i) => ({
+    id: `s${i}`, label: `r${i + 1}`,
+    nodes: [[left, top], [right, top], [right, bottom], [left, bottom]].map(([x, y], j) => ({ id: `s${i}-${j}`, x, y })),
+  }));
+  const photo = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="${width}" height="${height}" fill="white"/></svg>`);
+  const mask = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"/>`);
+  return { width, height, photo, mask, operations: [{ type: 'POLYGON_SET', polygons }] as MaskOperation[] };
+}
+
+/** ?labels=1: hai mask tách rời cùng label r1 và một mask w1, để kiểm tra màu theo label và độ mờ của viền. */
+function labelsScene() {
+  const width = 800; const height = 500;
+  const boxes: Array<[string, number, number, number, number]> = [['r1', 100, 100, 250, 300], ['r1', 500, 100, 650, 300], ['w1', 300, 320, 450, 450]];
+  const polygons: AnnotationPolygon[] = boxes.map(([label, left, top, right, bottom], i) => ({
+    id: `l${i}`, label,
+    nodes: [[left, top], [right, top], [right, bottom], [left, bottom]].map(([x, y], j) => ({ id: `l${i}-${j}`, x, y })),
+  }));
+  const photo = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="${width}" height="${height}" fill="white"/></svg>`);
+  const mask = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"/>`);
+  return { width, height, photo, mask, operations: [{ type: 'POLYGON_SET', polygons }] as MaskOperation[] };
+}
+
 /** ?many=1: large polygon-mode file (600 saved polygons) to profile zoom/tool switches. */
 function manyScene() {
   const width = 2400; const height = 1600;
@@ -61,9 +92,12 @@ export default function BrowserCheck() {
   // Hiển thị cho script kiểm tra trình duyệt: undo/redo cục bộ khi đang chấm điểm polygon.
   const [history, setHistory] = useState<EditorHistoryState>({ local: false, canUndo: false, canRedo: false });
   const [selected, setSelected] = useState<string[]>([]);
+  const [overlay, setOverlay] = useState({ opacity: 0.5, showMask: true, magnet: true });
+  // Cho script kiểm tra đọc tọa độ node (magnet).
+  useEffect(() => { (window as unknown as { __polygons?: AnnotationPolygon[] }).__polygons = polygons; }, [polygons]);
   useEffect(() => {
     const query = new URLSearchParams(window.location.search);
-    const next = query.has('spiky') ? spikyScene() : query.has('many') ? manyScene() : null;
+    const next = query.has('spiky') ? spikyScene() : query.has('many') ? manyScene() : query.has('seams') ? seamsScene() : query.has('labels') ? labelsScene() : null;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- read the URL once after hydration
     setScene(next);
     if (next) { setPolygons(next.operations.flatMap((operation) => operation.type === 'POLYGON_SET' ? operation.polygons : [])); setTool('select'); }
@@ -97,6 +131,10 @@ export default function BrowserCheck() {
       <button data-tool="circle" onClick={() => chooseTool('circle')}>Circle</button>
       <button data-tool="anchor" onClick={() => chooseTool('anchor')}>Anchor</button>
       <button data-action="flush" onClick={async () => { await ref.current?.flushPendingEdits(); await ref.current?.exportMask(); setMessage('flushed'); }}>Flush</button>
+      <button data-overlay="hide" onClick={() => setOverlay((value) => ({ ...value, showMask: !value.showMask }))}>Mask layer</button>
+      <button data-overlay="low" onClick={() => setOverlay((value) => ({ ...value, opacity: 0.2 }))}>Opacity 20</button>
+      <button data-overlay="full" onClick={() => setOverlay((value) => ({ ...value, opacity: 1 }))}>Opacity 100</button>
+      <button data-overlay="magnet" onClick={() => setOverlay((value) => ({ ...value, magnet: !value.magnet }))}>Magnet</button>
     </div>
     <p>Mode={mode}; tool={tool}; masks={polygons.length}; holes={polygons.reduce((n, p) => n + (p.holes?.length ?? 0), 0)}; center filled={String(polygons.some((p) => pointInMask({ x: 400, y: 250 }, p)))}; zoom={zoom.toFixed(4)}</p>
     <p data-testid="history">history local={String(history.local)}; canUndo={String(history.canUndo)}; canRedo={String(history.canRedo)}; last={polygons.at(-1)?.label ?? '-'}:{polygons.at(-1)?.nodes.length ?? 0}; selected={selected.length}; totalNodes={polygons.reduce((sum, polygon) => sum + polygon.nodes.length, 0)}; maxNodes={polygons.reduce((max, polygon) => Math.max(max, polygon.nodes.length + (polygon.holes ?? []).reduce((sum, hole) => sum + hole.length, 0)), 0)}</p>
@@ -106,11 +144,11 @@ export default function BrowserCheck() {
         {scene
           ? <EditorCanvas ref={ref} width={scene.width} height={scene.height} imageUrl={scene.photo} predictionUrl={scene.mask}
             initialHumanAction={scene.operations.length ? 'MODIFIED' : 'UNTOUCHED'} initialBreakpoints={breaks} initialOperations={scene.operations}
-            tool={tool} brushMode={mode} brushSize={mode === 'add' ? 40 : 20} maskOpacity={0.5} showMask
+            tool={tool} brushMode={mode} brushSize={mode === 'add' ? 40 : 20} maskOpacity={overlay.opacity} showMask={overlay.showMask} magnet={overlay.magnet}
             onChange={change} onSelectionChange={setSelected} onHistoryChange={setHistory} onReady={noop} onMessage={setMessage} onZoomChange={setZoom} />
           : <EditorCanvas ref={ref} width={800} height={500} imageUrl={image} predictionUrl={blank}
             initialHumanAction="MODIFIED" initialBreakpoints={breaks} initialOperations={operations}
-            tool={tool} brushMode={mode} brushSize={mode === 'add' ? 12 : 1} maskOpacity={0.5} showMask
+            tool={tool} brushMode={mode} brushSize={mode === 'add' ? 12 : 1} maskOpacity={overlay.opacity} showMask={overlay.showMask} magnet={overlay.magnet}
             onChange={change} onSelectionChange={setSelected} onHistoryChange={setHistory} onReady={noop} onMessage={setMessage} onZoomChange={setZoom} />}
       </div>
     </div>

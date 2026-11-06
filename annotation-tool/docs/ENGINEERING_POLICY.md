@@ -61,7 +61,7 @@ npm run build
 ```
 
 - Cả bốn PHẢI qua. CI (`.github/workflows/vercel.yml`) chạy test → typecheck → build và chặn deploy nếu fail.
-- Baseline 2026-10-25: typecheck và lint sạch; 113 test / 18 file qua; sau thay đổi nhóm ảnh/phân công/nhập COCO cùng ngày: 158 test / 23 file qua; sau tối ưu render editor + nhập COCO 1.0 trong editor (cùng ngày): 180 test / 26 file qua, `canvas-browser-check` 21/21; sau `compactPolygon` + nhập surface (cùng ngày): **184 test / 26 file** qua, `canvas-browser-check` 21/21. Số test chỉ được tăng khi có hành vi mới; nếu giảm phải giải thích.
+- Baseline 2026-10-25: typecheck và lint sạch; 113 test / 18 file qua; sau thay đổi nhóm ảnh/phân công/nhập COCO cùng ngày: 158 test / 23 file qua; sau tối ưu render editor + nhập COCO 1.0 trong editor (cùng ngày): 180 test / 26 file qua, `canvas-browser-check` 21/21; sau `compactPolygon` + nhập surface (cùng ngày): 184 test / 26 file qua, `canvas-browser-check` 21/21; 2026-11-05 sau sửa tự nối biên (nhánh `dev/debug_anchor`): 256 test / 28 file qua, `canvas-browser-check` 33/33; sau lớp phủ màu theo label (cùng ngày): 261 test / 29 file qua, `canvas-browser-check` 36/36; sau đổi Shift + chuột trái chỉ nối biên (cùng ngày): 261 test / 29 file, `canvas-browser-check` 37/37; sau magnet/thanh cuộn/thông báo sidebar (cùng ngày): 265 test / 29 file, `canvas-browser-check` 43/43; 2026-11-06 sau auto anchor theo rule đã chốt + màu theo label duy nhất: **271 test / 29 file**, `canvas-browser-check` **45/45**. Số test chỉ được tăng khi có hành vi mới; nếu giảm phải giải thích.
 - Báo cáo cuối PHẢI nêu lệnh nào đã chạy, kết quả thật, lệnh nào chưa chạy và vì sao.
 
 ### 3.4 Kiểm tra thủ công / E2E

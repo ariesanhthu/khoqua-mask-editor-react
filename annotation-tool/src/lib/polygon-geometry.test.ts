@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import polygonClipping from 'polygon-clipping';
 import {
   applyBrushStroke,
   resolvePolygonCut,
@@ -11,6 +12,7 @@ import {
   createRectanglePolygon,
   drawSmoothClosedPath,
   ensurePolygonHasNodeAt,
+  findAutoAnchorPath,
   findEnclosedPocketAtPoint,
   findMultiPolygonAutofillPath,
   findSnapTargetToPolygons,
@@ -19,6 +21,7 @@ import {
   insertNodeAtEdge,
   isSegmentOnPolygonsBoundary,
   mergePolygonsIntoSingle,
+  nearestMagnetVertex,
   pointInPolygon,
   polygonArea,
   raySegmentIntersection,
@@ -873,8 +876,10 @@ describe('findMultiPolygonAutofillPath', () => {
     expect(result!.targetPolygons.map((p) => p.id)).toEqual(['w1', 'w2', 'w3']);
   });
 
-  it('preserves shared boundary and selects closest edge when drawing along seam of touching polygons', () => {
-    // Top polygon at y: 0..50, bottom polygon at y: 50..100 touching along y=50
+  it('does not follow a seam that two existing masks already share (user-confirmed 2026-11-05)', () => {
+    // Top polygon at y: 0..50, bottom polygon at y: 50..100 touching along y=50.
+    // Trước đây hàm đi dọc đường nối này; người dùng xác nhận 2026-11-05: biên đã có mask khác nối
+    // thì không đi nữa, nên điểm đầu/cuối nằm giữa đường nối không có biên tự do để nối.
     const topPoly = rectangle('top', 0, 0, 100, 50);
     const bottomPoly = rectangle('bottom', 0, 50, 100, 100);
 
@@ -886,12 +891,8 @@ describe('findMultiPolygonAutofillPath', () => {
       endPoint,
     ];
 
-    // User clicks on the seam at y=50 and draws arch above it
     const result = findMultiPolygonAutofillPath([topPoly, bottomPoly], startPoint, endPoint, draftNodes);
-    expect(result).not.toBeNull();
-
-    // Must choose the seam/closest boundary at y=50, NOT the bottom boundary at y=100
-    expect(result!.nodes.every((n) => Math.abs(n.y - 50) <= 2)).toBe(true);
+    expect(result).toBeNull();
   });
 
   it('rejects detour through distant bottom polygons when drawing between separated upper polygons', () => {
@@ -922,6 +923,112 @@ describe('findMultiPolygonAutofillPath', () => {
       draftNodes,
     );
 
+    expect(result).toBeNull();
+  });
+});
+
+describe('findMultiPolygonAutofillPath — free boundary only (user-confirmed 2026-11-05)', () => {
+  const overlapArea = (ring: Array<{ x: number; y: number }>, mask: { nodes: Array<{ x: number; y: number }> }) => {
+    const toRing = (points: Array<{ x: number; y: number }>) => points.map((point): [number, number] => [point.x, point.y]);
+    const pieces = polygonClipping.intersection([toRing(ring)], [toRing(mask.nodes)]);
+    return pieces.reduce((sum, piece) => sum + Math.abs(polygonArea(piece[0].map(([x, y]) => ({ x, y })))), 0);
+  };
+
+  it('follows the free edges of the surrounding masks instead of merging them (bug report 2026-11-05)', () => {
+    // Vùng trống x 0..260, y 50..200 được bao kín bởi 6 mask (giống ảnh người dùng gửi):
+    // ba mask riêng ở trên (tA | tB | tC), mask trái L, mask phải R và mask dưới Bm.
+    const L = rectangle('L', -60, 0, 0, 200);
+    const tA = rectangle('tA', 0, 0, 100, 50);
+    const tB = rectangle('tB', 100, 0, 160, 50);
+    const tC = rectangle('tC', 160, 0, 260, 50);
+    const R = rectangle('R', 260, 0, 320, 200);
+    const Bm = rectangle('Bm', -60, 200, 320, 260);
+    const masks = [L, tA, tB, tC, R, Bm];
+
+    // Bắt đầu trên L, chấm dọc biên trên của Bm (anchor trên mask khác), rồi rê Shift tới biên dưới của tC.
+    const startPoint = { x: 0, y: 180 };
+    const endPoint = { x: 220, y: 50 };
+    const draftNodes = [startPoint, { x: 60, y: 200 }, { x: 130, y: 200 }, { x: 200, y: 200 }, { x: 250, y: 150 }, endPoint];
+
+    const result = findMultiPolygonAutofillPath(masks, startPoint, endPoint, draftNodes);
+    expect(result).not.toBeNull();
+    const nodes = result!.nodes;
+    // Đi dọc biên dưới của tC → tB → tA rồi xuống biên phải của L; không vòng qua phía trên các mask.
+    expect(nodes.every((node) => (Math.abs(node.y - 50) < 1e-6 && node.x >= -1e-6 && node.x <= 220)
+      || (Math.abs(node.x) < 1e-6 && node.y >= 50 && node.y <= 180))).toBe(true);
+    for (const [x, y] of [[160, 50], [100, 50], [0, 50]]) {
+      expect(nodes.some((node) => Math.hypot(node.x - x, node.y - y) < 1e-6)).toBe(true);
+    }
+    // Polygon mới không chồng lên mask nào: chỉ nối theo biên.
+    const ring = [...draftNodes, ...nodes];
+    expect(Math.abs(polygonArea(ring))).toBeGreaterThan(30000);
+    for (const mask of masks) expect(overlapArea(ring, mask)).toBeLessThan(1);
+    expect(result!.targetPolygons.map((polygon) => polygon.id).sort()).toEqual(['L', 'tA', 'tB', 'tC']);
+  });
+
+  it('never walks through the seam shared by two masks, going around the free side instead', () => {
+    const A = rectangle('A', 0, 0, 100, 100);
+    const B = rectangle('B', 100, 0, 200, 100);
+    // Bản nháp ôm quanh B từ đầu dưới của đường nối A|B tới đầu trên của nó.
+    const startPoint = { x: 100, y: 100 };
+    const endPoint = { x: 100, y: 0 };
+    const draftNodes = [startPoint, { x: 220, y: 120 }, { x: 220, y: -20 }, endPoint];
+
+    const result = findMultiPolygonAutofillPath([A, B], startPoint, endPoint, draftNodes);
+    expect(result).not.toBeNull();
+    const nodes = result!.nodes;
+    expect(nodes.some((node) => Math.hypot(node.x - 200, node.y) < 1e-6)).toBe(true);
+    expect(nodes.some((node) => Math.hypot(node.x - 200, node.y - 100) < 1e-6)).toBe(true);
+    expect(nodes.some((node) => Math.abs(node.x - 100) < 1e-6 && node.y > 0.5 && node.y < 99.5)).toBe(false);
+    const ring = [...draftNodes, ...nodes];
+    expect(overlapArea(ring, A)).toBeLessThan(1);
+    expect(overlapArea(ring, B)).toBeLessThan(1);
+    expect(result!.targetPolygons.map((polygon) => polygon.id)).toEqual(['B']);
+  });
+
+  it('takes the side of a single mask that faces the draft, never wrapping around the mask', () => {
+    const A = rectangle('A', 0, 0, 100, 100);
+    const startPoint = { x: 50, y: 0 };
+    const endPoint = { x: 100, y: 50 };
+    const draftNodes = [startPoint, { x: 150, y: -50 }, endPoint];
+
+    const result = findMultiPolygonAutofillPath([A], startPoint, endPoint, draftNodes);
+    expect(result).not.toBeNull();
+    expect(result!.nodes.map(({ x, y }) => [x, y])).toEqual([[100, 0]]);
+  });
+
+  it('crosses the junction of two vectorized masks separated by a sub-pixel gap', () => {
+    const tA = rectangle('tA', 0, 0, 100, 50);
+    const tB = rectangle('tB', 101.5, 0, 160, 50);
+    const startPoint = { x: 20, y: 50 };
+    const endPoint = { x: 140, y: 50 };
+    const draftNodes = [startPoint, { x: 20, y: 120 }, { x: 140, y: 120 }, endPoint];
+
+    const result = findMultiPolygonAutofillPath([tA, tB], startPoint, endPoint, draftNodes);
+    expect(result).not.toBeNull();
+    expect(result!.nodes.length).toBeGreaterThan(0);
+    expect(result!.nodes.every((node) => Math.abs(node.y - 50) < 1e-6 && node.x > 20 && node.x < 140)).toBe(true);
+    // Giữ đỉnh của cả hai mask tại chỗ nối để biên mới khớp từng mask.
+    expect(result!.nodes.some((node) => Math.abs(node.x - 101.5) < 1e-6)).toBe(true);
+    expect(result!.nodes.some((node) => Math.abs(node.x - 100) < 1e-6)).toBe(true);
+  });
+
+  it('keeps a long boundary path that stays close to a draft wrapped around the mask', () => {
+    // Bản nháp ôm ba cạnh của A cách 20 px: đường tự nối dài hơn nhiều so với khoảng cách đầu–cuối nhưng
+    // luôn sát bản nháp, nên không bị coi là đường vòng; phía còn lại (qua góc trên trái) sẽ bao luôn A.
+    const A = rectangle('A', 0, 0, 100, 100);
+    const startPoint = { x: 0, y: 80 };
+    const endPoint = { x: 20, y: 0 };
+    const draftNodes = [startPoint, { x: -20, y: 80 }, { x: -20, y: 120 }, { x: 120, y: 120 }, { x: 120, y: -20 }, { x: 20, y: -20 }, endPoint];
+
+    const result = findMultiPolygonAutofillPath([A], startPoint, endPoint, draftNodes);
+    expect(result).not.toBeNull();
+    expect(result!.nodes.map(({ x, y }) => [x, y])).toEqual([[100, 0], [100, 100], [0, 100]]);
+  });
+
+  it('returns null when the start point is not on any mask boundary', () => {
+    const A = rectangle('A', 0, 0, 100, 100);
+    const result = findMultiPolygonAutofillPath([A], { x: 150, y: 150 }, { x: 100, y: 50 }, [{ x: 150, y: 150 }, { x: 100, y: 50 }]);
     expect(result).toBeNull();
   });
 });
@@ -990,5 +1097,77 @@ describe('findEnclosedPocketAtPoint', () => {
 
     // Center point should be strictly inside the resulting pocket
     expect(pointInPolygon(centerPoint, pocket!.nodes)).toBe(true);
+  });
+});
+
+describe("nearestMagnetVertex (magnet trong Select, người dùng xác nhận 2026-11-05)", () => {
+  const A = rectangle("A", 0, 0, 100, 100);
+  const B = rectangle("B", 200, 0, 300, 100);
+  const withHole = { ...rectangle("H", 400, 0, 600, 200), holes: [[{ id: "h0", x: 450, y: 50 }, { id: "h1", x: 550, y: 50 }, { id: "h2", x: 550, y: 150 }, { id: "h3", x: 450, y: 150 }]] };
+
+  it("snaps to the closest vertex of another mask within tolerance", () => {
+    expect(nearestMagnetVertex([A, B], new Set(["A"]), 205, 4, 10)).toEqual({ x: 200, y: 0 });
+  });
+
+  it("returns null when no vertex is within tolerance", () => {
+    expect(nearestMagnetVertex([A, B], new Set(["A"]), 150, 50, 10)).toBeNull();
+  });
+
+  it("never snaps to the polygons being dragged", () => {
+    expect(nearestMagnetVertex([A, B], new Set(["A", "B"]), 101, 1, 10)).toBeNull();
+  });
+
+  it("picks the nearest of several candidates and includes hole vertices", () => {
+    expect(nearestMagnetVertex([A, B], new Set(), 103, 2, 10)).toEqual({ x: 100, y: 0 });
+    expect(nearestMagnetVertex([withHole], new Set(), 452, 53, 10)).toEqual({ x: 450, y: 50 });
+  });
+});
+
+describe("findAutoAnchorPath (Shift khi vẽ polygon, người dùng xác nhận 2026-11-06)", () => {
+  // Vùng trống x 0..260, y 50..200 bao bởi L | tA | tB | tC | R ở trên/hai bên và Bm ở dưới.
+  const L = rectangle("L", -60, 0, 0, 200);
+  const tA = rectangle("tA", 0, 0, 100, 50);
+  const tB = rectangle("tB", 100, 0, 160, 50);
+  const tC = rectangle("tC", 160, 0, 260, 50);
+  const R = rectangle("R", 260, 0, 320, 200);
+  const Bm = rectangle("Bm", -60, 200, 320, 260);
+  const masks = [L, tA, tB, tC, R, Bm];
+  const xy = (nodes: Array<{ x: number; y: number }>) => nodes.map(({ x, y }) => [x, y]);
+
+  it("runs from the point just placed along the free edges of several masks to the mask under the cursor", () => {
+    const draft = [{ x: 60, y: 200 }, { x: 250, y: 150 }, { x: 220, y: 50 }];
+    const result = findAutoAnchorPath(masks, { x: 40, y: 40 }, draft);
+    expect(result).not.toBeNull();
+    // tC → tB → tA dọc biên dưới; không đi qua đường nối dọc giữa các mask; kết thúc ở điểm biên gần con trỏ.
+    expect(xy(result!.nodes)).toEqual([[160, 50], [100, 50], [40, 50]]);
+    expect(result!.target).toEqual({ x: 40, y: 50, polygonId: "tA" });
+    expect(result!.closesToStart).toBe(false);
+  });
+
+  it("closes onto the first point when the target is next to it, without the start point twice", () => {
+    const draft = [{ x: 0, y: 180 }, { x: 60, y: 200 }, { x: 250, y: 150 }, { x: 220, y: 50 }];
+    const result = findAutoAnchorPath(masks, { x: -10, y: 175 }, draft);
+    expect(result).not.toBeNull();
+    expect(result!.closesToStart).toBe(true);
+    expect(xy(result!.nodes)).toEqual([[160, 50], [100, 50], [0, 50]]);
+  });
+
+  it("returns null when the point just placed is not on a mask boundary", () => {
+    expect(findAutoAnchorPath(masks, { x: 40, y: 40 }, [{ x: 60, y: 200 }, { x: 130, y: 120 }])).toBeNull();
+  });
+
+  it("returns null when the cursor is neither inside a mask nor near a free boundary", () => {
+    expect(findAutoAnchorPath(masks, { x: 130, y: 120 }, [{ x: 60, y: 200 }, { x: 220, y: 50 }])).toBeNull();
+  });
+
+  it("targets the nearest free boundary when the cursor is just outside a mask", () => {
+    const result = findAutoAnchorPath(masks, { x: 240, y: 58 }, [{ x: 60, y: 200 }, { x: 220, y: 50 }]);
+    expect(xy(result!.nodes)).toEqual([[240, 50]]);
+  });
+
+  it("takes the shorter way around a single mask", () => {
+    const A = rectangle("A", 0, 0, 100, 100);
+    const result = findAutoAnchorPath([A], { x: 90, y: 5 }, [{ x: 150, y: -20 }, { x: 100, y: 20 }]);
+    expect(xy(result!.nodes)).toEqual([[100, 0], [90, 0]]);
   });
 });
