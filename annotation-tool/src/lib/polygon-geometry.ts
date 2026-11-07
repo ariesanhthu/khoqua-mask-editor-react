@@ -1313,12 +1313,6 @@ export function getSharedBoundaryAutofillPath(
   const distForward = hasDraft ? pathDistanceToDraft(pathForward, startPoint, endPoint, draftNodes) : 0;
   const distBackward = hasDraft ? pathDistanceToDraft(pathBackward, startPoint, endPoint, draftNodes) : 0;
 
-  // Primary rule: Choose the boundary closest to draftNodes ("biên gần nhất").
-  // If one candidate boundary is closer to what the user is drawing, choose it.
-  if (hasDraft && Math.abs(distForward - distBackward) > 1.0) {
-    return distForward < distBackward ? pathForward : pathBackward;
-  }
-
   const targetRing = normalizeRing(targetPolygon.nodes.map((p): GeometryPoint => [p.x, p.y]));
   const targetTotalArea = targetRing ? Math.abs(ringArea(targetRing)) : 0;
 
@@ -1565,6 +1559,263 @@ export function closestPointOnPolygon(
   return { point: bestPoint, edgeIndex: bestEdge, distance: minD };
 }
 
+export interface ExactUnionResult {
+  outerRing: GeometryRing;
+  holeRings: GeometryRing[];
+  area: number;
+}
+
+/**
+ * Hợp hình học chính xác (Exact Boolean Union) giữa các polygon trong cùng một cụm liên thông.
+ * - KHÔNG tạo bridge qua khoảng trống.
+ * - KHÔNG xóa/lấp lỗ hổng (giữ nguyên holeRings).
+ * - Diện tích được bảo toàn chuẩn xác: S_merged = S(outerRing) - sum(S(holeRings)).
+ */
+export function exactUnionPolygons(
+  polygons: AnnotationPolygon[],
+  gapTolerance = 2.0,
+): ExactUnionResult | null {
+  if (!polygons || polygons.length === 0) return null;
+  if (polygons.length === 1) {
+    const rawRing = polygons[0].nodes.map((node): GeometryPoint => [node.x, node.y]);
+    const ring = normalizeRing(rawRing) || normalizeRing(convexHull(rawRing));
+    if (!ring) return null;
+    return {
+      outerRing: ring,
+      holeRings: (polygons[0].holes ?? []).map((h) => normalizeRing(h.map((n): GeometryPoint => [n.x, n.y]))).filter(Boolean) as GeometryRing[],
+      area: Math.abs(polygonArea(polygons[0].nodes)),
+    };
+  }
+
+  const rawRings: GeometryRing[] = [];
+  for (const polygon of polygons) {
+    if (polygon.nodes.length < 3) continue;
+    const rawRing = polygon.nodes.map((node): GeometryPoint => [node.x, node.y]);
+    const ring = normalizeRing(rawRing) || normalizeRing(convexHull(rawRing));
+    if (ring) rawRings.push(ring);
+  }
+  if (!rawRings.length) return null;
+
+  // Snap subpixel gap vertices between touching polygons if gap <= gapTolerance
+  const adjustedRings = rawRings.map((ring, ringIdx) => {
+    return ring.map((pt): GeometryPoint => {
+      let closestPt = pt;
+      let minD = gapTolerance;
+      for (let otherIdx = 0; otherIdx < rawRings.length; otherIdx += 1) {
+        if (otherIdx === ringIdx) continue;
+        const otherRing = rawRings[otherIdx];
+        for (let i = 0; i < otherRing.length - 1; i += 1) {
+          const a = { x: otherRing[i][0], y: otherRing[i][1] };
+          const b = { x: otherRing[i + 1][0], y: otherRing[i + 1][1] };
+          const cand = closestPointOnSegment({ x: pt[0], y: pt[1] }, a, b);
+          if (cand.distance < minD) {
+            minD = cand.distance;
+            closestPt = [cand.point.x, cand.point.y];
+          }
+        }
+      }
+      return closestPt;
+    });
+  });
+
+  try {
+    const multiPoly = polygonClipping.union(adjustedRings.map((ring) => [ring]));
+    if (!multiPoly || !multiPoly.length) return null;
+
+    let bestPoly = multiPoly[0];
+    let maxArea = -1;
+    for (const poly of multiPoly) {
+      if (!poly.length) continue;
+      const a = Math.abs(ringArea(poly[0]));
+      if (a > maxArea) {
+        maxArea = a;
+        bestPoly = poly;
+      }
+    }
+
+    if (!bestPoly || !bestPoly.length) return null;
+
+    const outerRing = bestPoly[0];
+    const holeRings = bestPoly.slice(1);
+
+    let totalArea = Math.abs(ringArea(outerRing));
+    for (const hole of holeRings) {
+      totalArea -= Math.abs(ringArea(hole));
+    }
+
+    return {
+      outerRing,
+      holeRings,
+      area: Math.max(0, totalArea),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Tạo polygon bao ngoài tổng quát (Outermost Boundary Envelope) từ một cụm mask liên thông.
+ * Biên ngoài cùng này đã lọc sạch toàn bộ seam tiếp xúc nội bộ và không đi vào lỗ hổng bên trong.
+ */
+export function getCollectiveBoundaryEnvelope(
+  polygons: AnnotationPolygon[],
+): AnnotationPolygon | null {
+  if (!polygons.length) return null;
+  if (polygons.length === 1) return polygons[0];
+
+  const unionRes = exactUnionPolygons(polygons);
+  if (!unionRes) return null;
+
+  const pts = unionRes.outerRing.slice(0, unionRes.outerRing.length - 1);
+  return {
+    id: 'collective_envelope',
+    label: polygons[0].label,
+    nodes: pts.map(([x, y]) => ({ id: createId(), x, y, isAnchor: true })),
+  };
+}
+
+/**
+ * Làm giàu đường đi bám biên bằng các đỉnh gốc của các mask thành phần.
+ * Đảm bảo các đoạn thẳng sau phép union vẫn giữ nguyên từng đỉnh cong uốn lượn ban đầu.
+ */
+export function enrichPathWithOriginalNodes(
+  pathPoints: Array<{ x: number; y: number }>,
+  sourcePolygons: AnnotationPolygon[],
+  tolerance = 2.0,
+): Array<{ id: string; x: number; y: number; isAnchor: boolean }> {
+  if (pathPoints.length < 2) {
+    return pathPoints.map((p) => ({ id: createId(), x: p.x, y: p.y, isAnchor: true }));
+  }
+
+  const enriched: Array<{ id: string; x: number; y: number; isAnchor: boolean }> = [];
+  for (let i = 0; i < pathPoints.length - 1; i += 1) {
+    const p1 = pathPoints[i];
+    const p2 = pathPoints[i + 1];
+    enriched.push({ id: createId(), x: p1.x, y: p1.y, isAnchor: true });
+
+    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    if (segLen > 1.0) {
+      const intermediate: Array<{ x: number; y: number; t: number }> = [];
+      for (const poly of sourcePolygons) {
+        for (const orig of poly.nodes) {
+          const cand = closestPointOnSegment(orig, p1, p2);
+          if (cand.distance <= tolerance && cand.projection > 0.02 && cand.projection < 0.98) {
+            const dup = intermediate.some((item) => Math.hypot(item.x - orig.x, item.y - orig.y) < 0.5);
+            if (!dup) {
+              intermediate.push({ x: orig.x, y: orig.y, t: cand.projection });
+            }
+          }
+        }
+      }
+      intermediate.sort((a, b) => a.t - b.t);
+      for (const item of intermediate) {
+        enriched.push({ id: createId(), x: item.x, y: item.y, isAnchor: true });
+      }
+    }
+  }
+
+  const last = pathPoints[pathPoints.length - 1];
+  enriched.push({ id: createId(), x: last.x, y: last.y, isAnchor: true });
+  return enriched;
+}
+
+function doesPolygonTouchDraftInterior(
+  polygon: AnnotationPolygon,
+  draftNodes?: Array<{ x: number; y: number }>,
+): boolean {
+  if (!draftNodes || draftNodes.length <= 2) return false;
+  for (let i = 1; i < draftNodes.length - 1; i += 1) {
+    const pt = draftNodes[i];
+    const cand = closestPointOnPolygon(polygon, pt);
+    if (cand.distance <= 1.0) return true;
+  }
+  return false;
+}
+
+function draftProximityToPolygon(
+  polygon: AnnotationPolygon,
+  draftNodes: Array<{ x: number; y: number }>,
+): number {
+  if (!draftNodes || draftNodes.length < 2) return 0;
+  const points = draftNodes.length >= 3 ? draftNodes.slice(1, -1) : draftNodes;
+  let totalD = 0;
+  for (const pt of points) {
+    totalD += closestPointOnPolygon(polygon, pt).distance;
+  }
+  return totalD / points.length;
+}
+
+export function findBestSnapTarget(
+  allPolygons: AnnotationPolygon[],
+  point: { x: number; y: number },
+  tolerance: number,
+  draftNodes?: Array<{ x: number; y: number }>,
+): SnapTarget | null {
+  const candidates = allPolygons.filter((p) => {
+    return closestPointOnPolygon(p, point).distance <= tolerance;
+  });
+  if (!candidates.length) return null;
+  if (candidates.length > 1 && draftNodes && draftNodes.length >= 2) {
+    candidates.sort((a, b) => draftProximityToPolygon(a, draftNodes) - draftProximityToPolygon(b, draftNodes));
+  }
+  return findSnapTargetToPolygons(candidates, point, tolerance);
+}
+
+/**
+ * Tìm chuỗi các polygon tiếp xúc kề nhau (connected chain) từ startId tới endId.
+ * Ưu tiên các polygon gần draftNodes nhất.
+ * Loại bỏ các polygon trung gian mà bản nháp đã đi qua bên trong.
+ * Nếu tách rời nhau (không liên thông) trả về null.
+ */
+export function findTouchingChain(
+  allPolygons: AnnotationPolygon[],
+  startId: string,
+  endId: string,
+  tolerance = 14,
+  draftNodes?: Array<{ x: number; y: number }>,
+): string[] | null {
+  if (startId === endId) return [startId];
+
+  type QueueItem = { path: string[]; cost: number };
+  const queue: QueueItem[] = [{ path: [startId], cost: 0 }];
+  const bestCost = new Map<string, number>([[startId, 0]]);
+  let foundPath: string[] | null = null;
+
+  while (queue.length > 0) {
+    queue.sort((a, b) => a.cost - b.cost);
+    const { path: currentPath, cost: currentCost } = queue.shift()!;
+    const currentId = currentPath[currentPath.length - 1];
+
+    if (currentId === endId) {
+      foundPath = currentPath;
+      break;
+    }
+
+    if (currentCost > (bestCost.get(currentId) ?? Infinity)) continue;
+
+    const currentPoly = allPolygons.find((p) => p.id === currentId);
+    if (!currentPoly) continue;
+
+    for (const other of allPolygons) {
+      if (currentPath.includes(other.id)) continue;
+      // Không đi qua mask trung gian mà bản nháp đã đi qua bên trong
+      if (other.id !== startId && other.id !== endId && doesPolygonTouchDraftInterior(other, draftNodes)) {
+        continue;
+      }
+      if (arePolygonsTouching(currentPoly, other, Math.max(tolerance * 0.5, 4))) {
+        const proxCost = draftNodes && draftNodes.length >= 2 ? polygonDistanceToDraft(other, draftNodes) : 0;
+        const nextCost = currentCost + 1 + proxCost;
+        if (nextCost < (bestCost.get(other.id) ?? Infinity)) {
+          bestCost.set(other.id, nextCost);
+          queue.push({ path: [...currentPath, other.id], cost: nextCost });
+        }
+      }
+    }
+  }
+
+  return foundPath;
+}
+
 const collectiveCache = new Map<string, AnnotationPolygon>();
 
 export function getCachedCollectivePolygon(polygons: AnnotationPolygon[]): AnnotationPolygon | null {
@@ -1575,674 +1826,35 @@ export function getCachedCollectivePolygon(polygons: AnnotationPolygon[]): Annot
   const cached = collectiveCache.get(key);
   if (cached) return cached;
 
-  const res = mergePolygonsIntoSingle(polygons);
-  if (res.polygon) {
+  const res = getCollectiveBoundaryEnvelope(polygons);
+  if (res) {
     if (collectiveCache.size > 20) collectiveCache.clear();
-    collectiveCache.set(key, res.polygon);
-    return res.polygon;
+    collectiveCache.set(key, res);
+    return res;
   }
   return null;
 }
 
 // ── Tự nối biên (auto anchor, giữ Shift khi vẽ polygon) ─────────────────────────────────────────────
-// Người dùng xác nhận 2026-11-05: đường tự nối chỉ đi theo biên "tự do" của các mask — cạnh chưa có mask
-// khác nối vào và chưa bị chính bản nháp nối — và KHÔNG gộp các mask lân cận. Cách cũ gộp chuỗi mask chạm
-// nhau thành một khối (lấp cả vùng trống bị bao quanh) rồi đi vòng ngoài khối đó, nên polygon mới nuốt
-// luôn các mask riêng biệt.
-
-/** px ảnh: cạnh cách biên của mask khác không quá giá trị này là đường nối đã có, không đi lại. */
-const AUTOFILL_SEAM_TOLERANCE = 2.5;
-/** px ảnh: đỉnh của hai mask khác nhau gần hơn giá trị này là một nút (chỗ nối lệch do vector hóa). */
-const AUTOFILL_MERGE_TOLERANCE = 2.5;
-/** px ảnh: đường tự nối không được đi sát bản nháp hơn giá trị này (trừ tại điểm đầu/cuối). */
-const AUTOFILL_TOUCH_TOLERANCE = 0.5;
-/** px ảnh: điểm đầu/cuối phải nằm cách biên tự do không quá giá trị này. */
-const AUTOFILL_ATTACH_MAX = 6;
-/** px ảnh: điểm gắn gần đầu cạnh hơn giá trị này thì dùng luôn đỉnh có sẵn. */
-const AUTOFILL_ENDPOINT_SNAP = 0.5;
-const AUTOFILL_GRID_CELL = 8;
-const AUTOFILL_POLYGON_CELL = 96;
+// Người dùng xác nhận 2026-11-07:
+// Dựa trên các mask có sẵn merge lại thành mask chung theo thành phần đồ thị liên thông (Connected Components)
+// để chỉ có 1 biên bao quanh tổng quát (outer boundary envelope).
+// Auto-fill bám tới phần biên ngoài cùng của mask chung đó.
+// Bảo toàn diện tích tuyệt đối (S_merged = S(A U B) = S_A + S_B - S_AB), không thêm diện tích, không bắc cầu qua khoảng trống.
+// Trong trường hợp các mask tạo thành Ring (có khoảng trống ở giữa), bảo toàn toàn bộ lỗ hổng ring, không auto-fill nội dung bên trong.
 
 type FlatPoint = { x: number; y: number };
-
-/** Một bước đi trên biên tự do, tọa độ là đỉnh thật của mask (để biên mới trùng khít biên cũ). */
-interface BoundaryStep {
-  to: number;
-  fx: number;
-  fy: number;
-  tx: number;
-  ty: number;
-  length: number;
-  polygon: number;
-}
-
-interface BoundarySegment {
-  from: number;
-  to: number;
-  /** Mask nằm bên trái khi đi a → b. */
-  ax: number;
-  ay: number;
-  bx: number;
-  by: number;
-  polygon: number;
-}
-
-interface BoundaryGraph {
-  nodeCount: number;
-  segments: BoundarySegment[];
-  /** Đi theo chiều để mask nằm bên trái: polygon mới (bên phải) có diện tích có dấu âm. */
-  maskLeft: BoundaryStep[][];
-  /** Đi theo chiều để mask nằm bên phải: polygon mới (bên trái) có diện tích có dấu dương. */
-  maskRight: BoundaryStep[][];
-  /** Lưới các cạnh vòng biên (nới AUTOFILL_SEAM_TOLERANCE) và đoạn tự do sinh từ mỗi cạnh: [edgeSegmentStart[e], edgeSegmentStart[e + 1]). */
-  edgeGrid: DenseGrid;
-  edgeSegmentStart: Int32Array;
-  /** Đoạn tự do của polygon p: [polygonSegmentStart[p], polygonSegmentStart[p + 1]) (vòng biên được duyệt theo thứ tự polygon). */
-  polygonSegmentStart: Int32Array;
-}
-
-// Khóa số nhỏ (small integer) cho lưới động dùng khi gộp đỉnh. Ô ngoài ±16384 có thể trùng khóa: chỉ thêm
-// ứng viên, mọi ứng viên đều được kiểm lại bằng khoảng cách nên kết quả không đổi.
-const gridKey = (cellX: number, cellY: number) => ((cellX & 0x7fff) << 15) | (cellY & 0x7fff);
-const NO_ENTRIES: readonly number[] = [];
-
-/**
- * Lưới đều phủ hộp bao, lưu dạng CSR (mảng phẳng) để dựng và tra cứu không cấp phát theo từng ô — với
- * hàng chục nghìn cạnh, Map theo ô chiếm phần lớn thời gian dựng đồ thị.
- */
-interface DenseGrid {
-  left: number;
-  top: number;
-  cell: number;
-  columns: number;
-  rows: number;
-  starts: Int32Array;
-  items: Int32Array;
-  /** Dấu ô đã thăm: ≥ 0 khi dựng (giá trị vừa thêm), < 0 khi tra cứu (mã lượt tra). */
-  marks: Int32Array;
-  query: number;
-}
-
-function denseGrid(
-  left: number,
-  top: number,
-  right: number,
-  bottom: number,
-  minimumCell: number,
-  fill: (grid: DenseGrid, add: (grid: DenseGrid, cellIndex: number, value: number) => void) => void,
-): DenseGrid {
-  const width = Math.max(1, right - left);
-  const height = Math.max(1, bottom - top);
-  const cell = Math.max(minimumCell, Math.sqrt((width * height) / 2_000_000));
-  const columns = Math.floor(width / cell) + 1;
-  const rows = Math.floor(height / cell) + 1;
-  const cells = columns * rows;
-  const grid: DenseGrid = {
-    left, top, cell, columns, rows,
-    starts: new Int32Array(cells + 1),
-    items: new Int32Array(0),
-    marks: new Int32Array(cells).fill(-1),
-    query: -1,
-  };
-  fill(grid, (target, cellIndex, value) => {
-    if (target.marks[cellIndex] === value) return;
-    target.marks[cellIndex] = value;
-    target.starts[cellIndex + 1] += 1;
-  });
-  for (let index = 0; index < cells; index += 1) grid.starts[index + 1] += grid.starts[index];
-  grid.items = new Int32Array(grid.starts[cells]);
-  const cursor = grid.starts.slice(0, cells);
-  grid.marks.fill(-1);
-  fill(grid, (target, cellIndex, value) => {
-    if (target.marks[cellIndex] === value) return;
-    target.marks[cellIndex] = value;
-    target.items[cursor[cellIndex]] = value;
-    cursor[cellIndex] += 1;
-  });
-  grid.marks.fill(-1);
-  return grid;
-}
-
-function denseCellAt(grid: DenseGrid, x: number, y: number): number {
-  const cellX = Math.floor((x - grid.left) / grid.cell);
-  const cellY = Math.floor((y - grid.top) / grid.cell);
-  if (cellX < 0 || cellY < 0 || cellX >= grid.columns || cellY >= grid.rows) return -1;
-  return cellY * grid.columns + cellX;
-}
-
-/** Gọi visit cho các ô mà đoạn a–b (nới thêm pad) đi qua; đoạn dài chia khúc để không phủ cả hình chữ nhật bao. */
-function forSegmentCells(
-  grid: DenseGrid,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-  pad: number,
-  value: number,
-  visit: (grid: DenseGrid, cellIndex: number, value: number) => void,
-) {
-  const pieces = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / grid.cell));
-  for (let piece = 0; piece < pieces; piece += 1) {
-    const x0 = ax + ((bx - ax) * piece) / pieces;
-    const y0 = ay + ((by - ay) * piece) / pieces;
-    const x1 = ax + ((bx - ax) * (piece + 1)) / pieces;
-    const y1 = ay + ((by - ay) * (piece + 1)) / pieces;
-    const fromX = Math.max(0, Math.floor((Math.min(x0, x1) - pad - grid.left) / grid.cell));
-    const toX = Math.min(grid.columns - 1, Math.floor((Math.max(x0, x1) + pad - grid.left) / grid.cell));
-    const fromY = Math.max(0, Math.floor((Math.min(y0, y1) - pad - grid.top) / grid.cell));
-    const toY = Math.min(grid.rows - 1, Math.floor((Math.max(y0, y1) + pad - grid.top) / grid.cell));
-    for (let cellY = fromY; cellY <= toY; cellY += 1) {
-      for (let cellX = fromX; cellX <= toX; cellX += 1) visit(grid, cellY * grid.columns + cellX, value);
-    }
-  }
-}
-
-const scratchCells: number[] = [];
-/** Các ô (không trùng) mà đoạn a–b nới thêm pad đi qua, ghi vào scratchCells. */
-function segmentCellList(grid: DenseGrid, ax: number, ay: number, bx: number, by: number, pad: number): number[] {
-  scratchCells.length = 0;
-  grid.query -= 1;
-  forSegmentCells(grid, ax, ay, bx, by, pad, grid.query, (target, cellIndex, stamp) => {
-    if (target.marks[cellIndex] === stamp) return;
-    target.marks[cellIndex] = stamp;
-    scratchCells.push(cellIndex);
-  });
-  return scratchCells;
-}
-
-function pointSegmentDistance(point: FlatPoint, ax: number, ay: number, bx: number, by: number): number {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const lengthSquared = dx * dx + dy * dy;
-  const t = lengthSquared <= 1e-12 ? 0 : Math.max(0, Math.min(1, ((point.x - ax) * dx + (point.y - ay) * dy) / lengthSquared));
-  return Math.hypot(point.x - (ax + t * dx), point.y - (ay + t * dy));
-}
-
-/** Khoảng cách lớn nhất từ một đường gấp khúc (lấy mẫu mỗi ≤ 8 px) tới đường gấp khúc khác. */
-function maxDistanceToPolyline(path: FlatPoint[], polyline: FlatPoint[]): number {
-  const distanceTo = (point: FlatPoint) => {
-    let best = Infinity;
-    for (let index = 0; index + 1 < polyline.length; index += 1) {
-      const a = polyline[index];
-      const b = polyline[index + 1];
-      best = Math.min(best, pointSegmentDistance(point, a.x, a.y, b.x, b.y));
-    }
-    return best;
-  };
-  let worst = 0;
-  for (let index = 0; index < path.length; index += 1) {
-    const a = path[index];
-    worst = Math.max(worst, distanceTo(a));
-    const b = path[index + 1];
-    if (!b) break;
-    const samples = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 8);
-    for (let sample = 1; sample < samples; sample += 1) {
-      worst = Math.max(worst, distanceTo({ x: a.x + ((b.x - a.x) * sample) / samples, y: a.y + ((b.y - a.y) * sample) / samples }));
-    }
-  }
-  return worst;
-}
-
-function segmentDistance(a: FlatPoint, b: FlatPoint, c: FlatPoint, d: FlatPoint): number {
-  if (segmentsIntersect([a.x, a.y], [b.x, b.y], [c.x, c.y], [d.x, d.y])) return 0;
-  return Math.min(
-    pointSegmentDistance(a, c.x, c.y, d.x, d.y),
-    pointSegmentDistance(b, c.x, c.y, d.x, d.y),
-    pointSegmentDistance(c, a.x, a.y, b.x, b.y),
-    pointSegmentDistance(d, a.x, a.y, b.x, b.y),
-  );
-}
-
-/**
- * Đồ thị các cạnh biên tự do của mọi mask. Cạnh nằm trên đường nối giữa hai mask (hoặc nằm trong mask
- * khác) bị loại; cạnh được tách tại đỉnh của mask khác nằm trên nó (chỗ nối chữ T) và đỉnh của các mask
- * khác nhau trùng/gần nhau được gộp thành một nút, để đường đi chuyển được từ mask này sang mask kế bên.
- */
-function buildBoundaryGraph(polygons: AnnotationPolygon[]): BoundaryGraph {
-  const rings: Array<{ polygon: number; points: FlatPoint[] }> = [];
-  polygons.forEach((polygon, index) => {
-    polygonRings(polygon).forEach((ring, ringIndex) => {
-      const points: FlatPoint[] = [];
-      for (const node of ring) {
-        if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) continue;
-        const last = points[points.length - 1];
-        if (!last || Math.hypot(last.x - node.x, last.y - node.y) > 1e-9) points.push({ x: node.x, y: node.y });
-      }
-      while (points.length > 1 && Math.hypot(points[0].x - points[points.length - 1].x, points[0].y - points[points.length - 1].y) <= 1e-9) points.pop();
-      if (points.length < 3) return;
-      const area = polygonArea(points);
-      if (Math.abs(area) < 1e-6) return;
-      // Vòng ngoài diện tích dương, lỗ diện tích âm: phần mask luôn nằm bên trái mỗi cạnh.
-      if ((area > 0) !== (ringIndex === 0)) points.reverse();
-      rings.push({ polygon: index, points });
-    });
-  });
-
-  // Gộp đỉnh của các mask khác nhau; mỗi nút giữ tối đa một đỉnh của mỗi mask nên không gộp dây chuyền dọc đường nối.
-  const nodeX: number[] = [];
-  const nodeY: number[] = [];
-  const nodeMembers: number[][] = [];
-  const nodeGrid = new Map<number, number[]>();
-  const mergeCell = AUTOFILL_MERGE_TOLERANCE * 2;
-  const ringNodes = rings.map((ring) => ring.points.map((point) => {
-    const cellX = Math.floor(point.x / mergeCell);
-    const cellY = Math.floor(point.y / mergeCell);
-    // Ô rộng gấp đôi bán kính gộp: chỉ khối 2×2 ô phía điểm đang nằm có thể chứa nút trong bán kính.
-    const nearX = point.x - cellX * mergeCell < mergeCell / 2 ? -1 : 1;
-    const nearY = point.y - cellY * mergeCell < mergeCell / 2 ? -1 : 1;
-    let best = -1;
-    let bestDistance = AUTOFILL_MERGE_TOLERANCE;
-    for (let corner = 0; corner < 4; corner += 1) {
-      const key = gridKey(cellX + (corner & 1 ? nearX : 0), cellY + (corner & 2 ? nearY : 0));
-      for (const id of nodeGrid.get(key) ?? NO_ENTRIES) {
-        if (nodeMembers[id].includes(ring.polygon)) continue;
-        const distanceToNode = Math.hypot(nodeX[id] - point.x, nodeY[id] - point.y);
-        if (distanceToNode <= bestDistance) {
-          best = id;
-          bestDistance = distanceToNode;
-        }
-      }
-    }
-    if (best >= 0) {
-      nodeMembers[best].push(ring.polygon);
-      return best;
-    }
-    const id = nodeX.length;
-    nodeX.push(point.x);
-    nodeY.push(point.y);
-    nodeMembers.push([ring.polygon]);
-    const key = gridKey(cellX, cellY);
-    const list = nodeGrid.get(key);
-    if (list) list.push(id); else nodeGrid.set(key, [id]);
-    return id;
-  }));
-
-  const tolerance = AUTOFILL_SEAM_TOLERANCE;
-  const vertices: Array<{ x: number; y: number; polygon: number; node: number }> = [];
-  const edges: Array<{ ax: number; ay: number; bx: number; by: number; polygon: number }> = [];
-  let left = Infinity;
-  let top = Infinity;
-  let right = -Infinity;
-  let bottom = -Infinity;
-  rings.forEach((ring, ringIndex) => {
-    ring.points.forEach((a, index) => {
-      vertices.push({ x: a.x, y: a.y, polygon: ring.polygon, node: ringNodes[ringIndex][index] });
-      const b = ring.points[(index + 1) % ring.points.length];
-      edges.push({ ax: a.x, ay: a.y, bx: b.x, by: b.y, polygon: ring.polygon });
-      left = Math.min(left, a.x);
-      top = Math.min(top, a.y);
-      right = Math.max(right, a.x);
-      bottom = Math.max(bottom, a.y);
-    });
-  });
-  if (!vertices.length) {
-    left = 0;
-    top = 0;
-    right = 1;
-    bottom = 1;
-  }
-  const margin = AUTOFILL_ATTACH_MAX + 1;
-  left -= margin;
-  top -= margin;
-  right += margin;
-  bottom += margin;
-  const vertexGrid = denseGrid(left, top, right, bottom, AUTOFILL_GRID_CELL, (grid, add) => {
-    vertices.forEach((vertex, index) => {
-      const cellIndex = denseCellAt(grid, vertex.x, vertex.y);
-      if (cellIndex >= 0) add(grid, cellIndex, index);
-    });
-  });
-  const edgeGrid = denseGrid(left, top, right, bottom, AUTOFILL_GRID_CELL, (grid, add) => {
-    edges.forEach((edge, index) => forSegmentCells(grid, edge.ax, edge.ay, edge.bx, edge.by, tolerance, index, add));
-  });
-  const bounds = polygons.map((polygon) => cachedPolygonBounds(polygon));
-  const polygonGrid = denseGrid(left, top, right, bottom, AUTOFILL_POLYGON_CELL, (grid, add) => {
-    bounds.forEach((box, index) => {
-      if (![box.left, box.top, box.right, box.bottom].every(Number.isFinite)) return;
-      const fromX = Math.max(0, Math.floor((box.left - grid.left) / grid.cell));
-      const toX = Math.min(grid.columns - 1, Math.floor((box.right - grid.left) / grid.cell));
-      const fromY = Math.max(0, Math.floor((box.top - grid.top) / grid.cell));
-      const toY = Math.min(grid.rows - 1, Math.floor((box.bottom - grid.top) / grid.cell));
-      for (let cellY = fromY; cellY <= toY; cellY += 1) {
-        for (let cellX = fromX; cellX <= toX; cellX += 1) add(grid, cellY * grid.columns + cellX, index);
-      }
-    });
-  });
-  // Điểm có cạnh của mask khác chạy song song sát bên (đường nối) hoặc nằm trong mask khác (chồng lấn):
-  // không phải biên tự do. Chỉ tính cạnh gần song song và có chân đường vuông góc nằm trên cạnh đó, để
-  // cạnh của mask kế bên đi tiếp thẳng hàng hoặc rẽ vuông góc tại chỗ nối không làm đứt biên tự do.
-  const occupied = (x: number, y: number, own: number, directionX: number, directionY: number) => {
-    const edgeCell = denseCellAt(edgeGrid, x, y);
-    if (edgeCell < 0) return false;
-    for (let slot = edgeGrid.starts[edgeCell]; slot < edgeGrid.starts[edgeCell + 1]; slot += 1) {
-      const edge = edges[edgeGrid.items[slot]];
-      if (edge.polygon === own) continue;
-      const ex = edge.bx - edge.ax;
-      const ey = edge.by - edge.ay;
-      const edgeLength = Math.hypot(ex, ey);
-      if (edgeLength <= 1e-9 || Math.abs(ex * directionX + ey * directionY) < 0.7 * edgeLength) continue;
-      const t = ((x - edge.ax) * ex + (y - edge.ay) * ey) / (edgeLength * edgeLength);
-      if (t < -1e-6 || t > 1 + 1e-6) continue;
-      if (Math.abs((x - edge.ax) * ey - (y - edge.ay) * ex) / edgeLength <= tolerance) return true;
-    }
-    const polygonCell = denseCellAt(polygonGrid, x, y);
-    for (let slot = polygonGrid.starts[polygonCell]; slot < polygonGrid.starts[polygonCell + 1]; slot += 1) {
-      const index = polygonGrid.items[slot];
-      const box = bounds[index];
-      if (index === own || x < box.left || x > box.right || y < box.top || y > box.bottom) continue;
-      if (pointInMask({ x, y }, polygons[index])) return true;
-    }
-    return false;
-  };
-
-  const segments: BoundarySegment[] = [];
-  const maskLeft: BoundaryStep[][] = nodeX.map(() => []);
-  const maskRight: BoundaryStep[][] = nodeX.map(() => []);
-  const splits: Array<{ t: number; x: number; y: number; node: number }> = [];
-  // Cạnh được duyệt đúng thứ tự mảng edges, nên các đoạn tự do của một cạnh nằm liền nhau trong segments.
-  const edgeSegmentStart = new Int32Array(edges.length + 1);
-  let edgeIndex = 0;
-  rings.forEach((ring, ringIndex) => {
-    const count = ring.points.length;
-    for (let index = 0; index < count; index += 1) {
-      edgeSegmentStart[edgeIndex] = segments.length;
-      edgeIndex += 1;
-      const a = ring.points[index];
-      const b = ring.points[(index + 1) % count];
-      const aNode = ringNodes[ringIndex][index];
-      const bNode = ringNodes[ringIndex][(index + 1) % count];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const lengthSquared = dx * dx + dy * dy;
-      if (lengthSquared <= 1e-12) continue;
-      // Tách cạnh tại đỉnh của mask khác nằm trên cạnh (chỗ nối chữ T) để chuyển mask được tại đó.
-      splits.length = 0;
-      for (const cellIndex of segmentCellList(vertexGrid, a.x, a.y, b.x, b.y, tolerance)) {
-        for (let slot = vertexGrid.starts[cellIndex]; slot < vertexGrid.starts[cellIndex + 1]; slot += 1) {
-          const vertex = vertices[vertexGrid.items[slot]];
-          if (vertex.polygon === ring.polygon || vertex.node === aNode || vertex.node === bNode) continue;
-          const t = ((vertex.x - a.x) * dx + (vertex.y - a.y) * dy) / lengthSquared;
-          if (t <= 0 || t >= 1) continue;
-          if (Math.hypot(vertex.x - (a.x + t * dx), vertex.y - (a.y + t * dy)) > tolerance) continue;
-          if (Math.hypot(vertex.x - a.x, vertex.y - a.y) <= AUTOFILL_MERGE_TOLERANCE
-            || Math.hypot(vertex.x - b.x, vertex.y - b.y) <= AUTOFILL_MERGE_TOLERANCE) continue;
-          if (splits.some((split) => split.node === vertex.node)) continue;
-          splits.push({ t, x: vertex.x, y: vertex.y, node: vertex.node });
-        }
-      }
-      splits.sort((first, second) => first.t - second.t);
-      let px = a.x;
-      let py = a.y;
-      let pNode = aNode;
-      for (let step = 0; step <= splits.length; step += 1) {
-        const qx = step < splits.length ? splits[step].x : b.x;
-        const qy = step < splits.length ? splits[step].y : b.y;
-        const qNode = step < splits.length ? splits[step].node : bNode;
-        if (pNode !== qNode) {
-          const length = Math.hypot(qx - px, qy - py);
-          const ux = (qx - px) / length;
-          const uy = (qy - py) / length;
-          // Cạnh dài lấy 3 mẫu và cần đa số bị chiếm mới loại (đường nối có thể chỉ phủ một phần cạnh).
-          const taken = length > 6 * tolerance
-            ? Number(occupied(px + (qx - px) * 0.25, py + (qy - py) * 0.25, ring.polygon, ux, uy))
-              + Number(occupied((px + qx) / 2, (py + qy) / 2, ring.polygon, ux, uy))
-              + Number(occupied(px + (qx - px) * 0.75, py + (qy - py) * 0.75, ring.polygon, ux, uy)) >= 2
-            : occupied((px + qx) / 2, (py + qy) / 2, ring.polygon, ux, uy);
-          if (!taken) {
-            segments.push({ from: pNode, to: qNode, ax: px, ay: py, bx: qx, by: qy, polygon: ring.polygon });
-            maskLeft[pNode].push({ to: qNode, fx: px, fy: py, tx: qx, ty: qy, length, polygon: ring.polygon });
-            maskRight[qNode].push({ to: pNode, fx: qx, fy: qy, tx: px, ty: py, length, polygon: ring.polygon });
-          }
-        }
-        px = qx;
-        py = qy;
-        pNode = qNode;
-      }
-    }
-  });
-  edgeSegmentStart[edges.length] = segments.length;
-  const polygonSegmentStart = new Int32Array(polygons.length + 1);
-  for (let polygon = 0, cursor = 0; polygon <= polygons.length; polygon += 1) {
-    while (cursor < segments.length && segments[cursor].polygon < polygon) cursor += 1;
-    polygonSegmentStart[polygon] = cursor;
-  }
-  return { nodeCount: nodeX.length, segments, maskLeft, maskRight, edgeGrid, edgeSegmentStart, polygonSegmentStart };
-}
-
-// Mảng polygon của canvas không bị sửa tại chỗ (mỗi thao tác tạo mảng mới), nên cache theo mảng là an toàn.
-const boundaryGraphCache = new WeakMap<AnnotationPolygon[], BoundaryGraph>();
-function boundaryGraphFor(polygons: AnnotationPolygon[]): BoundaryGraph {
-  let graph = boundaryGraphCache.get(polygons);
-  if (!graph) {
-    graph = buildBoundaryGraph(polygons);
-    boundaryGraphCache.set(polygons, graph);
-  }
-  return graph;
-}
-
-function attachToBoundary(graph: BoundaryGraph, point: FlatPoint, tolerance: number) {
-  let best: { segment: number; t: number; x: number; y: number; distance: number } | null = null;
-  const grid = graph.edgeGrid;
-  const centerX = Math.floor((point.x - grid.left) / grid.cell);
-  const centerY = Math.floor((point.y - grid.top) / grid.cell);
-  // Ô lưới ≥ AUTOFILL_ATTACH_MAX: khối 3×3 ô quanh điểm chứa mọi cạnh trong bán kính gắn.
-  for (let cellY = Math.max(0, centerY - 1); cellY <= Math.min(grid.rows - 1, centerY + 1); cellY += 1) {
-    for (let cellX = Math.max(0, centerX - 1); cellX <= Math.min(grid.columns - 1, centerX + 1); cellX += 1) {
-      const cellIndex = cellY * grid.columns + cellX;
-      for (let slot = grid.starts[cellIndex]; slot < grid.starts[cellIndex + 1]; slot += 1) {
-        const edge = grid.items[slot];
-        for (let index = graph.edgeSegmentStart[edge]; index < graph.edgeSegmentStart[edge + 1]; index += 1) {
-          const segment = graph.segments[index];
-          const dx = segment.bx - segment.ax;
-          const dy = segment.by - segment.ay;
-          const t = Math.max(0, Math.min(1, ((point.x - segment.ax) * dx + (point.y - segment.ay) * dy) / (dx * dx + dy * dy)));
-          const x = segment.ax + t * dx;
-          const y = segment.ay + t * dy;
-          const distanceToSegment = Math.hypot(point.x - x, point.y - y);
-          if (distanceToSegment <= tolerance && (!best || distanceToSegment < best.distance - 1e-9)) {
-            best = { segment: index, t, x, y, distance: distanceToSegment };
-          }
-        }
-      }
-    }
-  }
-  return best;
-}
-
-type BoundaryAttach = NonNullable<ReturnType<typeof attachToBoundary>>;
-type BoundaryRoute = { nodes: FlatPoint[]; steps: BoundaryStep[]; length: number; sign: -1 | 1 };
-
-function binaryHeap() {
-  const heap: Array<[number, number]> = [];
-  return {
-    get size() { return heap.length; },
-    push(item: [number, number]) {
-      heap.push(item);
-      let index = heap.length - 1;
-      while (index > 0) {
-        const parent = (index - 1) >> 1;
-        if (heap[parent][0] <= heap[index][0]) break;
-        [heap[parent], heap[index]] = [heap[index], heap[parent]];
-        index = parent;
-      }
-    },
-    pop() {
-      const top = heap[0];
-      const last = heap.pop()!;
-      if (heap.length) {
-        heap[0] = last;
-        let index = 0;
-        for (;;) {
-          const left = index * 2 + 1;
-          const right = left + 1;
-          let smallest = index;
-          if (left < heap.length && heap[left][0] < heap[smallest][0]) smallest = left;
-          if (right < heap.length && heap[right][0] < heap[smallest][0]) smallest = right;
-          if (smallest === index) break;
-          [heap[smallest], heap[index]] = [heap[index], heap[smallest]];
-          index = smallest;
-        }
-      }
-      return top;
-    },
-  };
-}
-
-/**
- * Đường ngắn nhất trên biên tự do từ `fromAttach` tới `toAttach`, cho từng chiều đi (mask luôn ở bên trái
- * hoặc luôn ở bên phải, tức polygon mới luôn ở cùng một phía). Cạnh chạm bản nháp bị loại, trừ tại đầu đường
- * trùng một điểm của bản nháp (`fromDraftIndex`/`toDraftIndex`), nơi chỉ coi là chạm khi hai đoạn chồng lên nhau.
- * `nodes` là các đỉnh giữa hai đầu (không gồm hai đầu), theo thứ tự đi.
- */
-function freeBoundaryRoutes(
-  graph: BoundaryGraph,
-  fromAttach: BoundaryAttach,
-  toAttach: BoundaryAttach,
-  draft: FlatPoint[],
-  fromDraftIndex: number | null,
-  toDraftIndex: number | null,
-): BoundaryRoute[] {
-  // Đầu đường nằm giữa cạnh thì thêm nút tạm (không sửa đồ thị đã cache).
-  let nodeCount = graph.nodeCount;
-  const overlayLeft = new Map<number, BoundaryStep[]>();
-  const overlayRight = new Map<number, BoundaryStep[]>();
-  const addOverlay = (overlay: Map<number, BoundaryStep[]>, from: number, step: BoundaryStep) => {
-    const list = overlay.get(from);
-    if (list) list.push(step); else overlay.set(from, [step]);
-  };
-  const resolveNode = (attach: BoundaryAttach) => {
-    const segment = graph.segments[attach.segment];
-    if (Math.hypot(attach.x - segment.ax, attach.y - segment.ay) <= AUTOFILL_ENDPOINT_SNAP) return segment.from;
-    if (Math.hypot(attach.x - segment.bx, attach.y - segment.by) <= AUTOFILL_ENDPOINT_SNAP) return segment.to;
-    return -1;
-  };
-  const fromFixed = resolveNode(fromAttach);
-  const toFixed = resolveNode(toAttach);
-  const fromNode = fromFixed >= 0 ? fromFixed : nodeCount++;
-  const toNode = toFixed >= 0 ? toFixed : nodeCount++;
-  if (fromNode === toNode) return [];
-  const temporary = [
-    ...(fromFixed < 0 ? [{ ...fromAttach, node: fromNode }] : []),
-    ...(toFixed < 0 ? [{ ...toAttach, node: toNode }] : []),
-  ];
-  for (const segmentIndex of new Set(temporary.map((item) => item.segment))) {
-    const segment = graph.segments[segmentIndex];
-    const chain = [
-      { x: segment.ax, y: segment.ay, node: segment.from },
-      ...temporary.filter((item) => item.segment === segmentIndex).sort((left, right) => left.t - right.t),
-      { x: segment.bx, y: segment.by, node: segment.to },
-    ];
-    for (let index = 0; index + 1 < chain.length; index += 1) {
-      const p = chain[index];
-      const q = chain[index + 1];
-      const length = Math.hypot(q.x - p.x, q.y - p.y);
-      addOverlay(overlayLeft, p.node, { to: q.node, fx: p.x, fy: p.y, tx: q.x, ty: q.y, length, polygon: segment.polygon });
-      addOverlay(overlayRight, q.node, { to: p.node, fx: q.x, fy: q.y, tx: p.x, ty: p.y, length, polygon: segment.polygon });
-    }
-  }
-
-  let draftLeft = Infinity;
-  let draftTop = Infinity;
-  let draftRight = -Infinity;
-  let draftBottom = -Infinity;
-  for (const point of draft) {
-    draftLeft = Math.min(draftLeft, point.x - AUTOFILL_TOUCH_TOLERANCE);
-    draftTop = Math.min(draftTop, point.y - AUTOFILL_TOUCH_TOLERANCE);
-    draftRight = Math.max(draftRight, point.x + AUTOFILL_TOUCH_TOLERANCE);
-    draftBottom = Math.max(draftBottom, point.y + AUTOFILL_TOUCH_TOLERANCE);
-  }
-  const draftIndexOf = (node: number) => (node === fromNode ? fromDraftIndex : node === toNode ? toDraftIndex : null);
-  // Cạnh đi sát/cắt bản nháp là phần biên bản nháp đã nối (hoặc sẽ làm polygon tự cắt): không đi.
-  const touchesDraft = (step: BoundaryStep, from: number) => {
-    if (Math.max(step.fx, step.tx) < draftLeft || Math.min(step.fx, step.tx) > draftRight
-      || Math.max(step.fy, step.ty) < draftTop || Math.min(step.fy, step.ty) > draftBottom) return false;
-    const f = { x: step.fx, y: step.fy };
-    const t = { x: step.tx, y: step.ty };
-    const fromIndex = draftIndexOf(from);
-    const toIndex = draftIndexOf(step.to);
-    for (let index = 0; index + 1 < draft.length; index += 1) {
-      const c = draft[index];
-      const d = draft[index + 1];
-      const sharedFrom = fromIndex === index ? c : fromIndex === index + 1 ? d : null;
-      const sharedTo = toIndex === index ? c : toIndex === index + 1 ? d : null;
-      if (sharedFrom && sharedTo) continue;
-      const shared = sharedFrom ?? sharedTo;
-      if (shared) {
-        // Cùng xuất phát từ một điểm của bản nháp: chỉ coi là chạm khi hai đoạn chồng lên nhau.
-        const edgeFar = sharedFrom ? t : f;
-        const draftFar = shared === c ? d : c;
-        if (pointSegmentDistance(edgeFar, c.x, c.y, d.x, d.y) <= AUTOFILL_TOUCH_TOLERANCE
-          || pointSegmentDistance(draftFar, f.x, f.y, t.x, t.y) <= AUTOFILL_TOUCH_TOLERANCE) return true;
-        continue;
-      }
-      if (segmentDistance(f, t, c, d) <= AUTOFILL_TOUCH_TOLERANCE) return true;
-    }
-    return false;
-  };
-
-  const shortestPath = (base: BoundaryStep[][], overlay: Map<number, BoundaryStep[]>) => {
-    const distances = new Float64Array(nodeCount).fill(Infinity);
-    const previous: Array<{ node: number; step: BoundaryStep } | undefined> = new Array(nodeCount);
-    const heap = binaryHeap();
-    distances[fromNode] = 0;
-    heap.push([0, fromNode]);
-    while (heap.size) {
-      const [distanceSoFar, node] = heap.pop();
-      if (distanceSoFar > distances[node]) continue;
-      if (node === toNode) break;
-      const steps = [...(node < graph.nodeCount ? base[node] : []), ...(overlay.get(node) ?? [])];
-      for (const step of steps) {
-        const next = distanceSoFar + step.length;
-        if (next >= distances[step.to] || touchesDraft(step, node)) continue;
-        distances[step.to] = next;
-        previous[step.to] = { node, step };
-        heap.push([next, step.to]);
-      }
-    }
-    if (!Number.isFinite(distances[toNode])) return null;
-    const steps: BoundaryStep[] = [];
-    for (let node = toNode; node !== fromNode;) {
-      const link = previous[node]!;
-      steps.unshift(link.step);
-      node = link.node;
-    }
-    return { steps, length: distances[toNode] };
-  };
-
-  const routes: BoundaryRoute[] = [];
-  for (const [base, overlay, sign] of [[graph.maskLeft, overlayLeft, -1], [graph.maskRight, overlayRight, 1]] as const) {
-    const found = shortestPath(base, overlay);
-    if (!found) continue;
-    const nodes: FlatPoint[] = [];
-    const pushNode = (x: number, y: number) => {
-      const last = nodes[nodes.length - 1];
-      if (!last || Math.hypot(last.x - x, last.y - y) > 0.05) nodes.push({ x, y });
-    };
-    found.steps.forEach((step, index) => {
-      // Tại chỗ chuyển mask, giữ đỉnh của cả hai mask (có thể lệch nhau vài px do vector hóa).
-      if (index > 0) pushNode(step.fx, step.fy);
-      if (index < found.steps.length - 1) pushNode(step.tx, step.ty);
-    });
-    const ends = [fromAttach, toAttach];
-    routes.push({
-      nodes: nodes.filter((node) => ends.every((end) => Math.hypot(node.x - end.x, node.y - end.y) > 0.05)),
-      steps: found.steps,
-      length: found.length,
-      sign,
-    });
-  }
-  return routes;
-}
 
 function finiteDraft(draftNodes: Array<{ x: number; y: number }>): FlatPoint[] {
   return draftNodes.filter((node) => Number.isFinite(node.x) && Number.isFinite(node.y)).map((node) => ({ x: node.x, y: node.y }));
 }
 
 /**
- * Đường tự nối từ endPoint về startPoint dọc theo biên tự do của các mask (không gồm hai điểm đó). Quy tắc
- * (người dùng xác nhận 2026-11-05): không gộp mask, không đi lại phần biên bản nháp đã nối, mỗi cạnh đi theo chiều
- * giữ mask ở NGOÀI polygon mới; giữ đường có dấu diện tích khớp chiều đó, bỏ đường vòng xa bản nháp, chọn ngắn nhất.
- * Canvas hiện dùng `findAutoAnchorPath` (2026-11-06); hàm này giữ cho việc khép polygon theo biên.
+ * Tự nối biên qua nhiều mask (findMultiPolygonAutofillPath):
+ * Dựa trên các mask có sẵn, gộp (merge) lại thành mask chung theo thành phần liên thông
+ * (kề nhau thì merge, tách rời nhau thì KHÔNG merge), tạo 1 biên bao quanh tổng quát.
+ * Auto-fill bám theo biên ngoài cùng của mask chung đó.
+ * Bảo toàn diện tích tuyệt đối: không tạo bridge, không xóa lỗ rỗng, diện tích trước và sau bằng nhau.
  */
 export function findMultiPolygonAutofillPath(
   allPolygons: AnnotationPolygon[],
@@ -2253,46 +1865,104 @@ export function findMultiPolygonAutofillPath(
 ): MultiPolygonAutofillResult | null {
   if (!allPolygons || allPolygons.length === 0) return null;
   if (Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y) < 1.0) return null;
-  const graph = boundaryGraphFor(allPolygons);
-  if (!graph.segments.length) return null;
-  const attachTolerance = Math.max(AUTOFILL_SEAM_TOLERANCE + 0.5, Math.min(tolerance, AUTOFILL_ATTACH_MAX));
-  const startAttach = attachToBoundary(graph, startPoint, attachTolerance);
-  const endAttach = attachToBoundary(graph, endPoint, attachTolerance);
-  if (!startAttach || !endAttach) return null;
 
-  const draft = finiteDraft(draftNodes);
-  if (!draft.length || Math.hypot(draft[0].x - startPoint.x, draft[0].y - startPoint.y) > 0.01) draft.unshift({ ...startPoint });
-  if (Math.hypot(draft[draft.length - 1].x - endPoint.x, draft[draft.length - 1].y - endPoint.y) > 0.01) draft.push({ ...endPoint });
-  const routes = freeBoundaryRoutes(graph, endAttach, startAttach, draft, draft.length - 1, 0);
+  const startSnap = findBestSnapTarget(allPolygons, startPoint, tolerance, draftNodes);
+  const endSnap = findBestSnapTarget(allPolygons, endPoint, tolerance, draftNodes);
+  if (!startSnap || !endSnap) return null;
 
-  let draftLeft = Infinity;
-  let draftTop = Infinity;
-  let draftRight = -Infinity;
-  let draftBottom = -Infinity;
-  for (const point of draft) {
-    draftLeft = Math.min(draftLeft, point.x);
-    draftTop = Math.min(draftTop, point.y);
-    draftRight = Math.max(draftRight, point.x);
-    draftBottom = Math.max(draftBottom, point.y);
+  // Trường hợp cùng 1 polygon
+  if (startSnap.polygonId === endSnap.polygonId) {
+    const cluster = getConnectedPolygonCluster(allPolygons, [startSnap.polygonId], tolerance);
+    if (cluster.length > 1) {
+      const collective = getCollectiveBoundaryEnvelope(cluster);
+      if (collective) {
+        const dStart = closestPointOnPolygon(collective, startSnap.point).distance;
+        const dEnd = closestPointOnPolygon(collective, endSnap.point).distance;
+        if (dStart > tolerance || dEnd > tolerance) {
+          // Điểm nằm trên đường nối nội bộ (seam) giữa 2 mask, không có biên tự do
+          return null;
+        }
+      }
+    }
+
+    const singlePath = getSharedBoundaryAutofillPath(
+      startSnap.polygon,
+      startSnap.point,
+      endSnap.point,
+      draftNodes,
+    );
+    if (singlePath && singlePath.length >= 0) {
+      const enriched = enrichPathWithOriginalNodes([endSnap.point, ...singlePath, startSnap.point], [startSnap.polygon]);
+      return {
+        nodes: enriched.slice(1, -1),
+        targetPolygons: [startSnap.polygon],
+      };
+    }
+    return null;
   }
-  const draftExtent = Math.hypot(draftRight - draftLeft, draftBottom - draftTop);
-  const candidates = routes.filter((route) => {
-    const ring = [...draft, ...route.nodes];
-    if (ring.length < 3) return false;
+
+  // Trường hợp nhiều polygon: chỉ merge nếu các mask kế nhau (cùng thành phần liên thông)
+  const chainIds = findTouchingChain(allPolygons, startSnap.polygonId, endSnap.polygonId, tolerance, draftNodes);
+  if (!chainIds || chainIds.length < 2) {
+    // Tách rời nhau: tuyệt đối không merge
+    return null;
+  }
+
+  const chainPolygons = chainIds
+    .map((id) => allPolygons.find((p) => p.id === id))
+    .filter((p): p is AnnotationPolygon => Boolean(p));
+
+  // Kiểm tra không đi đường vòng quá xa bản nháp
+  if (draftNodes && draftNodes.length >= 2) {
+    let draftLeft = Infinity, draftTop = Infinity, draftRight = -Infinity, draftBottom = -Infinity;
+    for (const p of draftNodes) {
+      draftLeft = Math.min(draftLeft, p.x);
+      draftTop = Math.min(draftTop, p.y);
+      draftRight = Math.max(draftRight, p.x);
+      draftBottom = Math.max(draftBottom, p.y);
+    }
+    const draftExtent = Math.hypot(draftRight - draftLeft, draftBottom - draftTop);
+    const maxAllowedDist = Math.max(tolerance * 3, 50, draftExtent * 1.5);
+    for (const poly of chainPolygons) {
+      const d = polygonDistanceToDraft(poly, draftNodes);
+      if (d > maxAllowedDist && d > 100) {
+        return null; // Bỏ đường vòng xa
+      }
+    }
+  }
+
+  // Gộp các mask liên thông thành 1 mask chung (Outermost boundary envelope)
+  const collectivePoly = getCollectiveBoundaryEnvelope(chainPolygons);
+  if (!collectivePoly) return null;
+
+  const closestToOuterStart = closestPointOnPolygon(collectivePoly, startSnap.point);
+  const closestToOuterEnd = closestPointOnPolygon(collectivePoly, endSnap.point);
+  if (closestToOuterStart.distance > tolerance || closestToOuterEnd.distance > tolerance) {
+    // Nằm trong seam nội bộ hoặc trong lỗ hổng đã bị loại bỏ khỏi biên ngoài
+    return null;
+  }
+
+  const autofillNodes = getSharedBoundaryAutofillPath(
+    collectivePoly,
+    closestToOuterStart.point,
+    closestToOuterEnd.point,
+    draftNodes,
+  );
+  if (!autofillNodes) return null;
+
+  const waypoints = [closestToOuterEnd.point, ...autofillNodes, closestToOuterStart.point];
+  const enrichedNodes = enrichPathWithOriginalNodes(waypoints, chainPolygons);
+  const finalNodes = enrichedNodes.slice(1, -1);
+
+  const ring = [...draftNodes, ...finalNodes];
+  if (ring.length >= 3) {
     const area = polygonArea(ring);
-    // Dấu diện tích sai nghĩa là polygon mới sẽ bao luôn mask (đi vòng phía bên kia của mask).
-    if (Math.sign(area) !== route.sign || Math.abs(area) < 1) return false;
-    // Bỏ đường vòng đi xa bản nháp hơn cả kích thước bản nháp (ví dụ chui vào khe giữa hai mask rồi quay ra).
-    const excursion = maxDistanceToPolyline([endPoint, ...route.nodes, startPoint], draft);
-    return !(excursion > Math.max(tolerance * 3, 50) && excursion > draftExtent);
-  });
-  if (!candidates.length) return null;
-  candidates.sort((left, right) => left.length - right.length);
-  const best = candidates[0];
-  const used = new Set(best.steps.map((step) => step.polygon));
+    if (Math.abs(area) < 1) return null;
+  }
+
   return {
-    nodes: best.nodes.map((node) => ({ id: createId(), x: node.x, y: node.y, isAnchor: true })),
-    targetPolygons: allPolygons.filter((_, index) => used.has(index)),
+    nodes: finalNodes,
+    targetPolygons: chainPolygons,
   };
 }
 
@@ -2306,38 +1976,12 @@ export interface AutoAnchorResult {
 }
 
 /**
- * Điểm đích của auto anchor dưới con trỏ: con trỏ trong một mask (mask trên cùng) thì lấy điểm gần nhất trên biên
- * tự do của mask đó; con trỏ ngoài mask nhưng sát biên thì lấy đoạn biên tự do gần nhất.
- */
-function autoAnchorTarget(graph: BoundaryGraph, polygons: AnnotationPolygon[], cursor: FlatPoint, tolerance: number): BoundaryAttach | null {
-  for (let index = polygons.length - 1; index >= 0; index -= 1) {
-    const polygon = polygons[index];
-    if (polygon.nodes.length < 3) continue;
-    const box = cachedPolygonBounds(polygon);
-    if (cursor.x < box.left || cursor.x > box.right || cursor.y < box.top || cursor.y > box.bottom || !pointInMask(cursor, polygon)) continue;
-    let best: BoundaryAttach | null = null;
-    for (let segmentIndex = graph.polygonSegmentStart[index]; segmentIndex < graph.polygonSegmentStart[index + 1]; segmentIndex += 1) {
-      const segment = graph.segments[segmentIndex];
-      const dx = segment.bx - segment.ax;
-      const dy = segment.by - segment.ay;
-      const t = Math.max(0, Math.min(1, ((cursor.x - segment.ax) * dx + (cursor.y - segment.ay) * dy) / (dx * dx + dy * dy)));
-      const x = segment.ax + t * dx;
-      const y = segment.ay + t * dy;
-      const distanceToSegment = Math.hypot(cursor.x - x, cursor.y - y);
-      if (!best || distanceToSegment < best.distance - 1e-9) best = { segment: segmentIndex, t, x, y, distance: distanceToSegment };
-    }
-    // Mask bị bao kín (không còn biên tự do) thì không có đích.
-    return best;
-  }
-  return attachToBoundary(graph, cursor, Math.min(tolerance, graph.edgeGrid.cell));
-}
-
-/**
- * Auto anchor khi vẽ polygon (người dùng xác nhận 2026-11-06): giữ Shift và trỏ vào trong mask kế bên để xem trước,
- * Shift + chuột trái để chèn. Đường chạy từ ĐIỂM VỪA CHẤM (phải nằm trên biên tự do) dọc theo biên tự do, qua nhiều
- * mask nếu cần, tới điểm đích trên biên mask đang trỏ; không đi phần biên đã dính mask khác (≤ AUTOFILL_SEAM_TOLERANCE)
- * và không đi lại phần bản nháp đã nối. Trong hai chiều đi quanh biên, chọn đường ngắn nhất; khi đích là điểm đầu
- * (khép polygon) thì ưu tiên chiều không bao mask vào trong. Không bao giờ hoàn tất polygon.
+ * Auto anchor khi vẽ polygon (Shift):
+ * Dựa trên các mask có sẵn, gộp các mask liên thông kề nhau thành mask chung để có 1 biên bao quanh tổng quát.
+ * Sau đó auto-fill bám tới biên ngoài cùng của mask.
+ * Nếu tách rời nhau thì không merge.
+ * Giữ nguyên lỗ rỗng (nếu có dạng Ring), không auto-fill nội dung bên trong của mask.
+ * Diện tích trước và sau khi gộp bằng nhau chuẩn xác.
  */
 export function findAutoAnchorPath(
   allPolygons: AnnotationPolygon[],
@@ -2347,29 +1991,75 @@ export function findAutoAnchorPath(
 ): AutoAnchorResult | null {
   const draft = finiteDraft(draftNodes);
   if (!allPolygons?.length || !draft.length) return null;
-  const graph = boundaryGraphFor(allPolygons);
-  if (!graph.segments.length) return null;
+
   const last = draft[draft.length - 1];
-  const fromAttach = attachToBoundary(graph, last, Math.max(AUTOFILL_SEAM_TOLERANCE + 0.5, Math.min(tolerance, AUTOFILL_ATTACH_MAX)));
-  let toAttach = autoAnchorTarget(graph, allPolygons, cursor, tolerance);
-  if (!fromAttach || !toAttach) return null;
-  // Đích gần điểm đầu (trong ngưỡng bắt điểm) và điểm đầu nằm trên biên tự do: nối về đúng điểm đầu.
   const start = draft[0];
-  const startAttach = draft.length >= 2 ? attachToBoundary(graph, start, AUTOFILL_ENDPOINT_SNAP) : null;
-  const closesToStart = Boolean(startAttach && Math.hypot(toAttach.x - start.x, toAttach.y - start.y) <= tolerance);
-  if (closesToStart && startAttach) toAttach = startAttach;
-  if (Math.hypot(toAttach.x - last.x, toAttach.y - last.y) < 0.5) return null;
-  const routes = freeBoundaryRoutes(graph, fromAttach, toAttach, draft, draft.length - 1, closesToStart ? 0 : null);
-  const valid = closesToStart
-    ? routes.filter((route) => Math.sign(polygonArea([...draft, ...route.nodes])) === route.sign)
-    : routes;
-  const best = [...(valid.length ? valid : routes)].sort((left, right) => left.length - right.length)[0];
-  if (!best) return null;
-  const target = { x: closesToStart ? start.x : toAttach.x, y: closesToStart ? start.y : toAttach.y };
-  const points = closesToStart ? best.nodes : [...best.nodes, target];
+
+  const lastSnap = findBestSnapTarget(allPolygons, last, Math.max(tolerance, 6), draft);
+  if (!lastSnap) return null;
+
+  let targetPoly: AnnotationPolygon | null = null;
+  for (let i = allPolygons.length - 1; i >= 0; i -= 1) {
+    const p = allPolygons[i];
+    if (pointInMask(cursor, p)) {
+      targetPoly = p;
+      break;
+    }
+  }
+  if (!targetPoly) {
+    const cursorSnap = findBestSnapTarget(allPolygons, cursor, tolerance, draft);
+    targetPoly = cursorSnap?.polygon ?? null;
+  }
+  if (!targetPoly) return null;
+
+  const startSnap = draft.length >= 2 ? findBestSnapTarget(allPolygons, start, tolerance, draft) : null;
+  const closesToStart = Boolean(startSnap && Math.hypot(cursor.x - start.x, cursor.y - start.y) <= tolerance);
+
+  const destinationId = closesToStart ? startSnap!.polygonId : targetPoly.id;
+
+  // Tìm chuỗi các mask tiếp xúc liên thông
+  let chainPolygons: AnnotationPolygon[];
+  if (lastSnap.polygonId === destinationId) {
+    chainPolygons = [lastSnap.polygon];
+  } else {
+    const chainIds = findTouchingChain(allPolygons, lastSnap.polygonId, destinationId, tolerance, draft);
+    if (!chainIds) {
+      // Tách rời nhau: không merge
+      return null;
+    }
+    chainPolygons = chainIds
+      .map((id) => allPolygons.find((p) => p.id === id))
+      .filter((p): p is AnnotationPolygon => Boolean(p));
+  }
+
+  // Gộp thành 1 biên bao ngoài tổng quát duy nhất
+  const collectivePoly = getCollectiveBoundaryEnvelope(chainPolygons);
+  if (!collectivePoly) return null;
+
+  const pFrom = closestPointOnPolygon(collectivePoly, last).point;
+  const pTo = closesToStart ? start : closestPointOnPolygon(collectivePoly, cursor).point;
+
+  if (Math.hypot(pTo.x - pFrom.x, pTo.y - pFrom.y) < 0.5) return null;
+
+  // Điểm bắt đầu phải nằm sát biên ngoài của cụm
+  if (Math.hypot(pFrom.x - last.x, pFrom.y - last.y) > tolerance) {
+    return null;
+  }
+
+  // Tìm đường đi bám biên ngoài từ pFrom tới pTo
+  const rawPath = getSharedBoundaryAutofillPath(collectivePoly, pTo, pFrom, draft);
+  if (!rawPath) return null;
+
+  const waypoints = [pFrom, ...rawPath, pTo];
+  const enriched = enrichPathWithOriginalNodes(waypoints, chainPolygons);
+  const nodes = enriched.slice(1, -1);
+
+  const target = { x: closesToStart ? start.x : pTo.x, y: closesToStart ? start.y : pTo.y };
+  const finalNodes = closesToStart ? nodes : [...nodes, { id: createId(), ...target, isAnchor: true }];
+
   return {
-    nodes: points.map((node) => ({ id: createId(), x: Math.round(node.x * 1000) / 1000, y: Math.round(node.y * 1000) / 1000, isAnchor: true })),
-    target: { ...target, polygonId: allPolygons[graph.segments[toAttach.segment].polygon].id },
+    nodes: finalNodes.map((n) => ({ id: n.id, x: Math.round(n.x * 1000) / 1000, y: Math.round(n.y * 1000) / 1000, isAnchor: true })),
+    target: { ...target, polygonId: targetPoly.id },
     closesToStart,
   };
 }

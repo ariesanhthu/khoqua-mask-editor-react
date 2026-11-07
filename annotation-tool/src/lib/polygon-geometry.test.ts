@@ -25,6 +25,9 @@ import {
   pointInPolygon,
   polygonArea,
   raySegmentIntersection,
+  exactUnionPolygons,
+  getCollectiveBoundaryEnvelope,
+  findTouchingChain,
 } from './polygon-geometry';
 
 const polygon = (id: string, points: Array<[number, number]>, label = 'damage') => ({
@@ -1169,5 +1172,84 @@ describe("findAutoAnchorPath (Shift khi vẽ polygon, người dùng xác nhận
     const A = rectangle("A", 0, 0, 100, 100);
     const result = findAutoAnchorPath([A], { x: 90, y: 5 }, [{ x: 150, y: -20 }, { x: 100, y: 20 }]);
     expect(xy(result!.nodes)).toEqual([[100, 0], [90, 0]]);
+  });
+});
+
+describe("exactUnionPolygons & connected component envelope autofill (người dùng yêu cầu 2026-11-07)", () => {
+  it("strictly preserves total area with 0 area expansion when merging touching masks", () => {
+    // Hai mask vuông 50x50 kề nhau tại x = 50:
+    // S_A = 2500, S_B = 2500 => S_merged = 5000 (không bridge, không phình buffer)
+    const A = rectangle("A", 0, 0, 50, 50);
+    const B = rectangle("B", 50, 0, 100, 50);
+
+    const union = exactUnionPolygons([A, B]);
+    expect(union).not.toBeNull();
+    expect(union!.area).toBe(5000);
+    expect(union!.holeRings.length).toBe(0);
+
+    // Không làm biến đổi cấu trúc và diện tích của polygon gốc A và B
+    expect(polygonArea(A.nodes)).toBe(2500);
+    expect(polygonArea(B.nodes)).toBe(2500);
+  });
+
+  it("strictly preserves inner hole in a ring of masks without filling it and does not autofill interior void", () => {
+    // 4 mask tạo thành hình khung vuông 100x100 bao quanh lỗ trống 40x40 ở giữa (x: 30..70, y: 30..70)
+    // Top: 0..100, 0..30 (S = 3000)
+    // Bottom: 0..100, 70..100 (S = 3000)
+    // Left: 0..30, 30..70 (S = 1200)
+    // Right: 70..100, 30..70 (S = 1200)
+    // Tổng diện tích mask = 3000 + 3000 + 1200 + 1200 = 8400. Diện tích lỗ rỗng = 1600.
+    const top = rectangle("top", 0, 0, 100, 30);
+    const bottom = rectangle("bottom", 0, 70, 100, 100);
+    const left = rectangle("left", 0, 30, 30, 70);
+    const right = rectangle("right", 70, 30, 100, 70);
+    const frame = [top, bottom, left, right];
+
+    const union = exactUnionPolygons(frame);
+    expect(union).not.toBeNull();
+    // Diện tích sau khi gộp đúng bằng tổng diện tích các mask (lỗ hổng không bị tính vào)
+    expect(union!.area).toBe(8400);
+    expect(union!.holeRings.length).toBe(1);
+
+    // Biên ngoài cùng tổng quát chỉ bao quanh hình 100x100 (không đi vào lỗ rỗng)
+    const envelope = getCollectiveBoundaryEnvelope(frame);
+    expect(envelope).not.toBeNull();
+
+    // Autofill trên biên ngoài từ (0, 15) tới (100, 15) với bản nháp ở phía trên (y = -20)
+    const draftNodes = [{ x: 0, y: 15 }, { x: 50, y: -20 }, { x: 100, y: 15 }];
+    const autofill = findMultiPolygonAutofillPath(frame, { x: 0, y: 15 }, { x: 100, y: 15 }, draftNodes);
+    expect(autofill).not.toBeNull();
+
+    // Đường bám biên chỉ đi qua biên ngoài cùng tại y = 0, tuyệt đối không đi vào lỗ hổng (y: 30..70)
+    expect(autofill!.nodes.every((n) => Math.abs(n.y - 0) <= 2)).toBe(true);
+  });
+
+  it("strictly separates disconnected masks and never merges across empty space", () => {
+    const A = rectangle("A", 0, 0, 50, 50);
+    const B = rectangle("B", 150, 0, 200, 50); // Cách xa 100px
+
+    const chain = findTouchingChain([A, B], "A", "B", 14);
+    expect(chain).toBeNull(); // Không liên thông => null
+
+    const result = findMultiPolygonAutofillPath([A, B], { x: 25, y: 0 }, { x: 175, y: 0 }, [
+      { x: 25, y: 0 },
+      { x: 100, y: -40 },
+      { x: 175, y: 0 },
+    ]);
+    expect(result).toBeNull(); // Tuyệt đối không merge/nối qua khoảng trống
+  });
+
+  it("dissolves all internal seams between touching masks so boundary envelope has only 1 outer contour", () => {
+    // 3 mask xếp hàng ngang: [0, 50], [50, 100], [100, 150]
+    const p1 = rectangle("p1", 0, 0, 50, 50);
+    const p2 = rectangle("p2", 50, 0, 100, 50);
+    const p3 = rectangle("p3", 100, 0, 150, 50);
+
+    const envelope = getCollectiveBoundaryEnvelope([p1, p2, p3]);
+    expect(envelope).not.toBeNull();
+
+    // Chu vi ngoài chỉ có 4 góc bao quanh hình chữ nhật 150x50
+    // Các đường ranh giới bên trong tại x = 50 và x = 100 hoàn toàn biến mất
+    expect(findSnapTargetToPolygons([envelope!], { x: 50, y: 25 }, 2)).toBeNull();
   });
 });

@@ -21,6 +21,36 @@ Mẫu một mục:
 
 ---
 
+## 2026-11-07 — Auto-fill theo Connected Components Envelope & Outermost Boundary, bảo toàn diện tích và cấu trúc Ring
+
+- **Người dùng xác nhận (2026-11-07):**
+  1. Thay đổi logic auto-fill: Dựa trên các mask có sẵn, gộp (merge) lại thành mask chung để chỉ có **1 biên bao quanh tổng quát (outermost boundary)**. Sau đó auto-fill bám tới phần biên ngoài cùng của mask chung đó.
+  2. Gộp theo logic **thành phần liên thông đồ thị (Connected Components)**: Nếu kề nhau (touching / overlapping) thì merge; nếu tách rời nhau (disconnected) thì tuyệt đối **không được merge** (không bắc cầu qua khoảng trống).
+  3. **Bảo toàn tính vẹn toàn của mask**: Quá trình merge chỉ là hình học ảo in-memory để trích xuất biên ngoài; không được merge auto-fill content của mask vào nhau trong state/canvas; các mask gốc giữ nguyên ID, label và đỉnh.
+  4. **Bảo toàn diện tích tuyệt đối**: Diện tích trước và sau khi merge phải bằng nhau ($S_{\text{merged}} = S(A \cup B) = S_A + S_B - S_{A \cap B}$). Không thêm bất kỳ diện tích thừa nào (zero area expansion), không tạo dải nối (bridge).
+  5. **Bảo tồn lỗ hổng cấu trúc Ring**: Trong trường hợp các mask tạo thành hình Ring (có khoảng trống ở giữa), sau khi merge phải đảm bảo **không auto-fill nội dung bên trong của mask** (giữ nguyên toàn bộ `holeRings`, không xóa lỗ hổng, diện tích lỗ hổng không bị gộp vào mask, và đường bám biên chỉ chạy trên `outerRing`).
+- **Thay đổi kỹ thuật:**
+  - `src/lib/polygon-geometry.ts`:
+    - Thêm `exactUnionPolygons(polygons, gapTolerance)`: Hợp boolean chính xác qua `polygonClipping.union`. Tự động khép khoảng hở subpixel $\le 2\text{px}$ mà không làm phình diện tích, giữ nguyên mảng các `holeRings`.
+    - Thêm `getCollectiveBoundaryEnvelope(polygons)`: Trích xuất `outerRing` làm đường bao tổng quát duy nhất, loại bỏ hoàn toàn các seam nội bộ (internal seams) giữa các mask kề nhau.
+    - Thêm `enrichPathWithOriginalNodes(pathPoints, sourcePolygons, tolerance)`: Bổ sung các đỉnh gốc của các mask thành phần nằm trên các cạnh của outer boundary để khớp từng khúc uốn lượn ban đầu.
+    - Thêm `findTouchingChain(allPolygons, startId, endId, tolerance, draftNodes)`: Tìm chuỗi mask tiếp xúc liên thông qua BFS/Dijkstra, ưu tiên gần draft, loại trừ các mask trung gian mà phần ruột của bản nháp (`draftNodes.slice(1, -1)`) đã đi qua.
+    - Thêm `draftProximityToPolygon(polygon, draftNodes)` & cải tiến `findBestSnapTarget(...)`: Chọn mask đích chính xác dựa trên độ gần với phần thân bản nháp khi điểm rơi trên ngã ba/ranh giới chung.
+    - Tái cấu trúc `findMultiPolygonAutofillPath` và `findAutoAnchorPath` sang sử dụng Collective Boundary Envelope.
+    - Dọn dẹp toàn bộ code dư thừa từ thuật toán đồ thị cũ (0 warnings ESLint).
+  - `src/lib/polygon-geometry.test.ts`:
+    - Thêm 4 test cases kiểm thử tự động chuyên sâu:
+      1. `strictly preserves total area with 0 area expansion when merging touching masks` ($S_{\text{merged}} = 5000 = 2500 + 2500$).
+      2. `strictly preserves inner hole in a ring of masks without filling it and does not autofill interior void` (4 mask tạo khung $100\times 100$ có lỗ rỗng $40\times 40$, $S = 8400$, lỗ rỗng giữ nguyên và autofill bám biên ngoài tại $y=0$).
+      3. `strictly separates disconnected masks and never merges across empty space` (2 mask cách nhau 100px không bị merge qua khoảng trống).
+      4. `dissolves all internal seams between touching masks so boundary envelope has only 1 outer contour` (Seam nội bộ tại $x=50, 100$ biến mất hoàn toàn).
+- **Đã kiểm chứng:**
+  - `npx eslint src/lib/polygon-geometry.ts`: Clean (0 errors, 0 warnings).
+  - `npx vitest run src/lib/polygon-geometry.test.ts`: 93/93 unit tests pass (100%).
+- **Tài liệu đã cập nhật:** `CHANGELOG.md`, `EDITOR_PIPELINE.md`.
+
+---
+
 ## 2026-11-06 — Auto anchor theo rule đã chốt; màu theo label là chế độ duy nhất
 
 - **Người dùng xác nhận (hỏi–đáp 2026-11-06):** nhấp chuột trái thường chỉ chấm điểm; giữ Shift + trỏ vào *bên trong* mask kế bên để xem trước; Shift + chuột trái chèn các điểm auto bám biên, đường chạy **từ điểm vừa chấm** tới điểm biên gần con trỏ, chỉ trên phần biên tự do (ví dụ A→B→C→D→A, C→D dính mask khác thì chỉ đi D→A→B), loang qua nhiều mask; không tự hoàn tất, không chuyển V; hoàn tất bằng nhấp đúp lên một điểm, Enter hoặc nút (bỏ hoàn tất bằng nhấp đơn điểm đầu và nhấp đúp chỗ trống); ngưỡng dính giữ ≤ 2.5 px ảnh. Lớp phủ: màu theo label là mặc định và duy nhất, bỏ ô bật/tắt.

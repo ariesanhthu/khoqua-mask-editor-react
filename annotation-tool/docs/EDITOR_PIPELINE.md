@@ -30,9 +30,13 @@ Người dùng nhấn mạnh (2026-10-25) giữ nguyên hành vi này; khóa b�
 - Esc hủy bản nháp. Đổi sang công cụ khác ngoài Pan cũng hủy bản nháp; Pan giữ bản nháp.
 - “Hoàn tất & Tiếp theo” bị khóa khi đang có điểm nháp (undo cục bộ).
 
-## Auto anchor khi vẽ polygon (Shift) — người dùng xác nhận 2026-11-06
+## Auto anchor khi vẽ polygon (Shift) — người dùng xác nhận 2026-11-06 & 2026-11-07
 
-Thay rule 2026-11-05 (đường nối từ điểm trỏ về điểm đầu). Rule đã chốt qua hỏi–đáp ngày 2026-11-06:
+Rule chốt qua hỏi–đáp ngày 2026-11-06 và cập nhật kiến trúc ngày 2026-11-07 (Connected Components & Collective Boundary Envelope):
+- **Cơ chế gộp biên bao ngoài tổng quát (2026-11-07)**: Dựa trên các mask có sẵn, gộp lại thành mask chung theo thành phần đồ thị liên thông (kề/chạm nhau thì merge, tách rời thì tuyệt đối KHÔNG merge).
+- **Bảo toàn diện tích tuyệt đối**: Diện tích không đổi sau khi merge ({merged} = S(A \cup B) = S_A + S_B - S_{A \cap B}$), không tạo bridge qua khoảng trống.
+- **Bảo tồn lỗ rỗng Ring**: Nếu chuỗi mask tạo thành Ring có khoảng trống ở giữa, toàn bộ holeRings được bảo toàn, không auto-fill ruột bên trong, đường bám chỉ chạy trên outerRing.
+- **Bảo toàn tính vẹn toàn của mask**: State canvas/mask gốc không bị thay đổi hay gộp ID; phép gộp chỉ là hình học ảo để lấy biên ngoài.
 
 - **Nhấp chuột trái thường**: chấm một điểm bình thường (snap/chèn đỉnh vào biên mask khác như trước), không áp dụng gì thêm, không hoàn tất.
 - **Giữ Shift + trỏ vào bên trong mask kế bên** (hoặc sát biên ngoài mask): xem trước (viền xanh lá) đường bám biên chạy **từ điểm vừa chấm** tới **điểm trên biên tự do của mask đó gần con trỏ nhất**. Nhấn/nhả Shift bật/tắt xem trước ngay.
