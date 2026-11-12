@@ -15,6 +15,8 @@ interface LockResult {
   lockToken: string;
   expiresAt: string;
   baseRevision: number;
+  /** Khóa vừa được lấy từ một phiên khác (tab/thiết bị/origin khác) của chính tài khoản này. */
+  takenOver: boolean;
 }
 
 interface LockDenied {
@@ -33,14 +35,19 @@ export async function acquireLock(fileId: string, userId: string, existingToken?
     const nowStr = now.toISOString();
     const expiresAt = new Date(now.getTime() + LOCK_TTL_MS).toISOString();
     const existingLock = await tx.prepare('SELECT * FROM file_locks WHERE dataset_file_id = ? FOR UPDATE').get(fileId);
+    let takenOver = false;
 
     if (existingLock) {
       const lockExpiry = new Date(existingLock.expires_at as string);
       if (lockExpiry > now && existingToken && existingLock.user_id === userId && existingLock.lock_token_hash === hashToken(existingToken)) {
         return { denied: false, sessionId: existingLock.session_id as string, lockToken: existingToken,
-          expiresAt: existingLock.expires_at as string, baseRevision: Number(file.latest_revision) };
+          expiresAt: existingLock.expires_at as string, baseRevision: Number(file.latest_revision), takenOver: false };
       }
-      if (lockExpiry > now) {
+      // Cùng tài khoản nhưng phiên khác (tab mới, thiết bị khác, localhost vs production) được nhận khóa
+      // (người dùng xác nhận 2026-11-07). Phiên cũ mất token: heartbeat/lưu/Hoàn tất nhận LOCK_LOST và tự
+      // chọn giữa hai bản, nên không ghi đè gì. Tài khoản khác vẫn bị từ chối như trước.
+      takenOver = lockExpiry > now && existingLock.user_id === userId;
+      if (lockExpiry > now && !takenOver) {
         const lockedUser = await tx.prepare('SELECT display_name FROM users WHERE id = ?').get(existingLock.user_id);
         return {
           denied: true,
@@ -57,7 +64,7 @@ export async function acquireLock(fileId: string, userId: string, existingToken?
         fileId,
         existingLock.user_id as string,
         nowStr,
-        lockExpiry <= now ? 'LOCK_EXPIRED' : 'REOPENED',
+        takenOver ? 'TAKEN_OVER' : 'LOCK_EXPIRED',
       );
       await tx.prepare('DELETE FROM file_locks WHERE dataset_file_id = ?').run(fileId);
     }
@@ -81,6 +88,7 @@ export async function acquireLock(fileId: string, userId: string, existingToken?
       lockToken: token,
       expiresAt,
       baseRevision: Number(file.latest_revision),
+      takenOver,
     };
   });
 }

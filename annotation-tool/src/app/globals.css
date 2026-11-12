@@ -1063,3 +1063,18 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
   .group-hero-actions .button { flex: 1; }
   .choice-cards.compact, .category-map label { grid-template-columns: 1fr; }
 }
+
+/* Hộp chọn giữa hai bản khi lưu bị xung đột (2026-11-07): ảnh + mask của bản máy chủ và bản trên thiết bị. */
+.conflict-dialog.compare { width: min(880px, 100%); }
+.version-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
+.version-card { display: grid; grid-template-rows: auto auto 1fr auto; gap: 10px; min-width: 0; padding: 14px; background: #fff; border: 1px solid var(--editor-border, #e6eaf2); border-radius: 14px; }
+.version-card.mine { background: #f8f6ff; border-color: #d8ceff; }
+.version-card h3 { margin: 0; font-size: 14px; color: var(--editor-text, #101828); }
+.version-preview-image { display: block; width: 100%; aspect-ratio: 4 / 3; background: #0f172a; border-radius: 10px; }
+.version-preview-loading { display: grid; place-items: center; gap: 8px; aspect-ratio: 4 / 3; color: var(--editor-muted, #667085); font-size: 12px; background: #f2f4f7; border-radius: 10px; }
+.version-facts { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; color: var(--editor-muted, #667085); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.version-compare-note { margin: 14px 0 0; font-size: 12px; }
+.conflict-actions.inline { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+@media (max-width: 680px) {
+  .version-compare { grid-template-columns: 1fr; }
+}

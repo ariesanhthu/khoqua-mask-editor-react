@@ -308,7 +308,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
       <section className="file-grid" aria-busy={filesLoading} aria-label="Danh sách ảnh">
         {filesLoading ? Array.from({ length: 8 }, (_, index) => <div className="file-card skeleton" key={index} />) : null}
         {!filesLoading && files.map((file) => (
-          <FileCard key={file.id} file={file} isAdmin={isAdmin} showGroup={!groupId} opening={openingId === file.id}
+          <FileCard key={file.id} file={file} userId={user.id} isAdmin={isAdmin} showGroup={!groupId} opening={openingId === file.id}
             onOpen={() => openFile(file)} onVersions={() => setVersionFile(file)} />
         ))}
       </section>
@@ -625,17 +625,21 @@ function GroupCard({ group, isAdmin, onOpen, onAssign }: { group: FileGroupSumma
   );
 }
 
-function FileCard({ file, isAdmin, showGroup, opening, onOpen, onVersions }: {
-  file: FileListItem; isAdmin: boolean; showGroup: boolean; opening: boolean; onOpen(): void; onVersions(): void;
+function FileCard({ file, userId, isAdmin, showGroup, opening, onOpen, onVersions }: {
+  file: FileListItem; userId: string; isAdmin: boolean; showGroup: boolean; opening: boolean; onOpen(): void; onVersions(): void;
 }) {
-  const locked = file.lock.state === 'LOCKED';
+  // Khóa của chính tài khoản này (tab/thiết bị khác) không chặn sửa: mở ở đây sẽ nhận lại quyền sửa.
+  const lockedBySelf = file.lock.state === 'LOCKED' && file.lock.userId === userId;
+  const locked = file.lock.state === 'LOCKED' && !lockedBySelf;
   const assetError = file.assetState === 'ERROR';
   const status = assetError
     ? 'Thiếu ảnh nguồn hoặc mặt nạ gợi ý'
+    : lockedBySelf
+      ? 'Bạn đang mở ở tab hoặc thiết bị khác'
     : file.lock.state === 'LOCKED'
       ? `Đang được ${file.lock.displayName} chỉnh sửa`
       : file.annotationState === 'DONE' ? 'Đã hoàn tất' : file.annotationState === 'DRAFT' ? 'Có bản nháp đã lưu' : 'Sẵn sàng chỉnh sửa';
-  const action = opening ? 'Đang mở…' : locked ? 'Chỉ xem' : file.annotationState === 'DONE' ? 'Chỉnh sửa lại'
+  const action = opening ? 'Đang mở…' : locked ? 'Chỉ xem' : lockedBySelf ? 'Sửa tại đây' : file.annotationState === 'DONE' ? 'Chỉnh sửa lại'
     : file.annotationState === 'DRAFT' ? 'Tiếp tục' : 'Bắt đầu';
   return (
     <article className={`file-card ${locked ? 'locked' : ''}`}>

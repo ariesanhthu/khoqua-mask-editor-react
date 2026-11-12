@@ -27,6 +27,7 @@ import { deleteLocalDraft, draftKey, getLocalDraft, putLocalDraft } from '@/lib/
 import { labelsForKind, nextLabel, polygonLabelKind, type PolygonLabelKind } from '@/lib/polygon-labels';
 import { parseWebPolygonImport } from '@/lib/web-import';
 import type { BrushMode } from '@/lib/polygon-geometry';
+import { formatTime, VersionFacts, VersionPreview } from './version-compare';
 import EditorCanvas, {
   type EditorCanvasHandle,
   type EditorHistoryState,
@@ -176,6 +177,13 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const [draftDecisionPending, setDraftDecisionPending] = useState(false);
   const prefetchedAssetsRef = useRef<HTMLImageElement[]>([]);
   const [conflictMinimized, setConflictMinimized] = useState(false);
+  // Bản trên máy chủ để đặt cạnh bản của người dùng trong hộp chọn khi xung đột.
+  const [conflictServer, setConflictServer] = useState<EditorBootstrap | null>(null);
+  const [conflictBusy, setConflictBusy] = useState(false);
+  // Lần lưu kế tiếp phải thành version riêng (giữ bản của mình sau xung đột, không gộp mất bản kia).
+  const forceNewVersionRef = useRef(false);
+  // Tăng để chạy lại bootstrap (nhận lại quyền sửa từ phiên khác của chính mình).
+  const [reloadKey, setReloadKey] = useState(0);
   const conflictRef = useRef(false);
   const dirtyVersionRef = useRef(0);
   const syncedVersionRef = useRef(0);
@@ -263,6 +271,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       transitioningFileRef.current = false;
       setConflict(null);
       setConflictMinimized(false);
+      setConflictServer(null);
+      forceNewVersionRef.current = false;
       setStaleDraft(null);
       setDraftDecisionPending(false);
       setStatus('SAVED');
@@ -277,6 +287,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         const canEdit = Boolean(lock && !data.readOnly);
         setReadOnly(!canEdit);
         if (!canEdit) setToast(`Chỉ xem · ${data.lockedBy || 'Phiên khác'} đang chỉnh sửa.`);
+        else if (lock?.takenOver) setToast('Đã nhận quyền sửa từ phiên khác của bạn (tab hoặc thiết bị khác). Phiên đó sẽ không ghi đè được bản này.');
         revisionRef.current = lock?.baseRevision ?? data.annotation?.revision ?? 0;
         legacyBreakpointsRef.current = data.annotation?.breakpoints ?? emptyBreakpoints;
         const serverSeed = createServerSeed(data);
@@ -320,7 +331,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       }
     })();
     return () => { cancelled = true; };
-  }, [createServerSeed, fileId, userId]);
+  }, [createServerSeed, fileId, userId, reloadKey]);
 
   // Ban nhap chi nen mang co DIRTY khi that su con thay doi chua gui len may chu.
   // Neu da dong bo xong ma van ghi DIRTY thi lan mo file sau se bao xung dot gia.
@@ -397,7 +408,9 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
             maskOperations: current.maskOperations,
           },
           breakpoints: legacyBreakpointsRef.current,
+          ...(forceNewVersionRef.current ? { newVersion: true } : {}),
         });
+        forceNewVersionRef.current = false;
         revisionRef.current = result.revision;
         syncedVersionRef.current = syncingVersion;
         await persistLocal(dirtyVersionRef.current === syncingVersion ? 'SYNCED' : 'DIRTY');
@@ -451,6 +464,20 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         // nhip sau van gia han duoc. Chi khi may chu bao LOCK_LOST moi la mat quyen sua.
         if ((error as ApiError).code !== 'LOCK_LOST') {
           if (!navigator.onLine && !conflictRef.current) setStatus('OFFLINE');
+          return;
+        }
+        // Khong con gi chua gui (thuong la chinh tai khoan nay vua mo tep o tab/thiet bi khac):
+        // khong co gi de chon, chi chuyen sang chi xem. Bam "Sua tai day" de nhan lai quyen sua.
+        if (dirtyVersionRef.current === syncedVersionRef.current && !staleDraftRef.current && !conflictRef.current) {
+          const latest = await getEditorData(fileId).catch(() => null);
+          if (transitioningFileRef.current) return;
+          setReadOnly(true);
+          setTool('pan');
+          setBootstrap((current) => current && { ...current, readOnly: true, lock: null,
+            lockedBy: latest?.lockedBy, lockedBySelf: latest ? latest.lockedBySelf : true });
+          setToast(latest?.lockedBySelf || !latest
+            ? 'Tệp đang được sửa ở phiên khác của bạn (tab hoặc thiết bị khác). Bấm "Sửa tại đây" để tiếp tục sửa ở tab này.'
+            : `Chỉ xem · ${latest.lockedBy || 'Phiên khác'} đang chỉnh sửa.`);
           return;
         }
         await persistLocal('CONFLICT').catch(() => undefined);
@@ -607,6 +634,10 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
 
   const showLatest = async () => {
     if (!bootstrap) return;
+    // Chon ban may chu cung la tiep tuc sua tren ban do: cung tai khoan nhan lai khoa, tai khoan khac
+    // dang giu khoa thi chi xem nhu truoc.
+    try { await acquireLock(fileId); }
+    catch (error) { if ((error as ApiError).code !== 'FILE_LOCKED') throw error; }
     const latest = await getEditorData(fileId);
     revisionRef.current = latest.annotation?.revision ?? 0;
     legacyBreakpointsRef.current = latest.annotation?.breakpoints ?? emptyBreakpoints;
@@ -618,7 +649,58 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     const next = { humanAction: serverSeed.humanAction, breakpoints: serverSeed.breakpoints, maskOperations: serverSeed.operations, polygons: polygonsFromOperations(serverSeed.operations) };
     snapshotRef.current = next; setSnapshot(next);
     dirtyVersionRef.current = 0; syncedVersionRef.current = 0;
-    conflictRef.current = false; setConflict(null); setConflictMinimized(false); setStatus('SAVED');
+    conflictRef.current = false; setConflict(null); setConflictMinimized(false); setConflictServer(null); setStatus('SAVED');
+    if (!latest.readOnly) setTool('select');
+  };
+
+  // Hop chon ban: tai ban moi nhat tren may chu de dat canh ban tren thiet bi (anh + mask).
+  useEffect(() => {
+    if (!conflict) return;
+    let cancelled = false;
+    void getEditorData(fileId)
+      .then((latest) => { if (!cancelled) setConflictServer(latest); })
+      .catch(() => { if (!cancelled) setToast('Chưa tải được bản trên máy chủ để so sánh. Bản của bạn vẫn an toàn trên thiết bị.'); });
+    return () => { cancelled = true; };
+  }, [conflict, fileId]);
+
+  const resolveConflict = async (choice: 'server' | 'mine') => {
+    if (!bootstrap || conflictBusy) return;
+    setConflictBusy(true);
+    try {
+      if (choice === 'server') {
+        await showLatest();
+        setToast('Đã chuyển sang bản trên máy chủ. Bản cũ của bạn không được lưu lên máy chủ.');
+        return;
+      }
+      // Nguoi dung tu chon giu ban cua minh: lay lai khoa (cung tai khoan) roi luu len tren revision moi
+      // nhat thanh version rieng. Ban kia van con trong lich su version. Tai khoan khac dang sua thi dung.
+      let lock;
+      try { lock = await acquireLock(fileId); }
+      catch (error) {
+        const apiError = error as ApiError;
+        if (apiError.code !== 'FILE_LOCKED') throw error;
+        const name = (apiError.lockedBy as { displayName?: string } | undefined)?.displayName || 'Người khác';
+        setToast(`${name} đang sửa tệp này nên chưa thể ghi bản của bạn. Hãy tải bản nháp về máy hoặc thử lại sau.`);
+        return;
+      }
+      revisionRef.current = lock.baseRevision;
+      forceNewVersionRef.current = true;
+      if (dirtyVersionRef.current === syncedVersionRef.current) dirtyVersionRef.current += 1;
+      conflictRef.current = false; setConflict(null); setConflictMinimized(false); setConflictServer(null);
+      setStatus('SAVING');
+      if (await syncNow()) setToast('Đã lưu bản của bạn thành version mới. Bản ở phiên kia vẫn nằm trong lịch sử version.');
+    } catch (error) {
+      setToast((error as ApiError).message || 'Chưa xử lý được xung đột. Bản của bạn vẫn an toàn trên thiết bị.');
+    } finally {
+      setConflictBusy(false);
+    }
+  };
+
+  // Chi xem vi khoa thuoc phien khac cua chinh minh (hoac khoa da het han): chay lai bootstrap de nhan khoa,
+  // gom ca buoc khoi phuc ban nhap tren thiet bi nhu luc mo tep.
+  const editHere = () => {
+    if (navigating || transitioningFileRef.current) return;
+    setReloadKey((key) => key + 1);
   };
 
   const onCanvasReady = useCallback(() => setReady(true), []);
@@ -777,7 +859,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               disabled={navigating || status === 'SYNCING' || file.assetState === 'ERROR'} title={file.externalKey}
               onClick={() => { if (file.id !== fileId) void navigateTo(`/editor/${file.id}`); }}>
               <strong>{file.externalKey}</strong>
-              <small>{file.id === fileId ? (readOnly ? 'Đang xem' : 'Đang sửa') : file.lock.state === 'LOCKED' ? `Chỉ xem · ${file.lock.displayName}` : file.assetState === 'ERROR' ? 'Thiếu dữ liệu' : 'Có thể làm'}</small>
+              <small>{file.id === fileId ? (readOnly ? 'Đang xem' : 'Đang sửa') : file.lock.state === 'LOCKED' ? (file.lock.userId === userId ? 'Bạn đang mở ở phiên khác' : `Chỉ xem · ${file.lock.displayName}`) : file.assetState === 'ERROR' ? 'Thiếu dữ liệu' : 'Có thể làm'}</small>
               <span>{({ UNSTARTED: 'Chưa làm', DRAFT: 'Bản nháp', DONE: 'Hoàn tất' })[file.annotationState]}</span>
             </button>)}
           </nav>
@@ -799,7 +881,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         <section className="editor-main">
           <div className="canvas-statusbar">
             <span className="canvas-file"><span className="queue-dot" />{bootstrap.file.externalKey}</span>
-            {readOnly ? <span className="save-indicator">Chỉ xem · {bootstrap.lockedBy || 'Khóa không thuộc phiên này'}</span> : <SaveIndicator status={status} />}
+            {readOnly ? <span className="save-indicator">Chỉ xem · {bootstrap.lockedBySelf ? 'bạn đang mở ở phiên khác' : bootstrap.lockedBy || 'Khóa không thuộc phiên này'}</span> : <SaveIndicator status={status} />}
+            {readOnly && (bootstrap.lockedBySelf || !bootstrap.lockedBy) ? <button disabled={navigating} onClick={editHere} title="Nhận lại quyền sửa từ phiên khác của chính bạn">Sửa tại đây</button> : null}
             <button disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} onClick={() => void saveExplicitly()}>Lưu</button>
           </div>
           {workspaceStep === 'mask' ? <div className={`overlay-controls ${tool === 'brush' ? 'with-brush-toolbar' : ''}`}>
@@ -994,13 +1077,34 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         <p className="draft-choice-note">Chưa có dữ liệu nào bị thay thế cho đến khi bạn chọn.</p>
       </section></div> : null}
       {conflict && conflictMinimized ? <button className="conflict-chip" onClick={() => setConflictMinimized(false)}>Có xung đột — mở lựa chọn xử lý</button> : null}
-      {conflict && !conflictMinimized ? <div className="modal-backdrop"><div className="conflict-dialog panel" role="dialog" aria-modal="true" aria-labelledby="conflict-title">
-        <p className="eyebrow">Cần bạn quyết định</p><h2 id="conflict-title">Tệp đã được cập nhật ở nơi khác</h2>
-        <p>Phần việc của bạn vẫn an toàn trên thiết bị này. Hệ thống sẽ không tự ghi đè bất kỳ phiên bản nào.</p>
-        <div className="conflict-actions">
-          <button className="button secondary" onClick={() => setConflictMinimized(true)}>Xem bản của tôi</button>
-          <button className="button secondary" onClick={() => void showLatest()}>Bỏ bản của tôi, xem bản mới nhất</button>
-          <button className="button primary" onClick={() => downloadConflict()}>Tải bản nháp về máy</button>
+      {conflict && !conflictMinimized ? <div className="modal-backdrop"><div className="conflict-dialog compare panel" role="dialog" aria-modal="true" aria-labelledby="conflict-title">
+        <p className="eyebrow">Cần bạn quyết định</p><h2 id="conflict-title">Có hai bản khác nhau của tệp này</h2>
+        <p>Tệp đã được lưu ở phiên khác (tab, thiết bị hoặc người khác) trong lúc bạn sửa. Chọn bản muốn tiếp tục. Hệ thống không tự ghi đè bản nào.</p>
+        <div className="version-compare">
+          <section className="version-card">
+            <h3>Bản trên máy chủ</h3>
+            {conflictServer ? <>
+              <VersionPreview imageUrl={conflictServer.assets.imageUrl} width={conflictServer.file.width} height={conflictServer.file.height}
+                polygons={polygonsFromOperations(conflictServer.annotation?.segmentation.maskOperations ?? conflictServer.prelabelOperations ?? [])}
+                maskUrl={conflictServer.assets.currentMaskUrl} />
+              <VersionFacts polygons={polygonsFromOperations(conflictServer.annotation?.segmentation.maskOperations ?? conflictServer.prelabelOperations ?? [])}
+                lines={[`Revision ${conflictServer.annotation?.revision ?? 0}`, `Lưu lúc ${formatTime(conflictServer.annotation?.updatedAt)}`]} />
+            </> : <div className="version-preview-loading"><div className="loader" /><span>Đang tải bản trên máy chủ…</span></div>}
+            <button className="button secondary" disabled={conflictBusy || !conflictServer} onClick={() => void resolveConflict('server')}>Dùng bản máy chủ</button>
+          </section>
+          <section className="version-card mine">
+            <h3>Bản của bạn (thiết bị này)</h3>
+            <VersionPreview imageUrl={bootstrap.assets.imageUrl} width={bootstrap.file.width} height={bootstrap.file.height}
+              polygons={polygonsFromOperations(conflict.localDraft.maskOperations ?? [])} maskBlob={conflict.localDraft.maskSnapshotBlob} />
+            <VersionFacts polygons={polygonsFromOperations(conflict.localDraft.maskOperations ?? [])}
+              lines={[`Dựa trên revision ${conflict.localDraft.baseServerRevision}`, `Sửa lúc ${formatTime(conflict.localDraft.updatedAt)}`]} />
+            <button className="button primary" disabled={conflictBusy} onClick={() => void resolveConflict('mine')}>Giữ bản của tôi và lưu</button>
+          </section>
+        </div>
+        <p className="version-compare-note">Giữ bản của bạn: bản máy chủ vẫn còn trong lịch sử version. Dùng bản máy chủ: bản của bạn bị bỏ, nên tải về trước nếu cần.</p>
+        <div className="conflict-actions inline">
+          <button className="button ghost" onClick={() => setConflictMinimized(true)}>Thu nhỏ, xem bản của tôi trên canvas</button>
+          <button className="button ghost" onClick={() => downloadConflict()}>Tải bản nháp về máy</button>
         </div>
       </div></div> : null}
     </main>

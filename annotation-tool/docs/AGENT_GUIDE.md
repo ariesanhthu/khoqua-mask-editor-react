@@ -42,7 +42,7 @@ Sơ đồ chi tiết, bản đồ code và bảng API: [ARCHITECTURE.md](ARCHITE
 ## 4. Claude KHÔNG ĐƯỢC làm
 
 - Tự chạy migration dữ liệu thật; tự giải thích breakpoint cũ thành u vấu; tự vector hóa/làm mịn annotation đã lưu khi mở hoặc xuất.
-- Thêm force-unlock, hoặc cơ chế tự giải quyết conflict bằng cách ghi đè (đã bị loại bỏ có chủ đích).
+- Thêm force-unlock (chiếm khóa của **tài khoản khác**), hoặc cơ chế tự giải quyết conflict bằng cách ghi đè (đã bị loại bỏ có chủ đích). Cùng tài khoản nhận lại khóa từ phiên khác của chính mình và hộp chọn hai bản khi xung đột là hành vi người dùng xác nhận 2026-11-07, không phải force-unlock.
 - Ghi server/Drive theo timer hoặc trong pointer-move; để client giữ OAuth token Drive.
 - Ghi secret (`.env*`, token, refresh token, service account JSON) vào code, log, docs, test, `.mcp.json` hoặc câu trả lời.
 - Sửa test cho khớp hành vi mới mà không có xác nhận của người dùng; xóa/skip/nới assertion.
@@ -80,7 +80,7 @@ Danh sách người dùng module dựa trên import tại 2026-10-25 (Grep lại
 | --- | --- | --- |
 | `src/types/index.ts` (22 file import) | `typecheck` toàn dự án; mọi route, service, `api-client`, `local-drafts`, canvas/workspace; dữ liệu cũ | ARCHITECTURE (hợp đồng dữ liệu) |
 | `lib/db.ts` (schema, adapter) | Mọi service/route dùng `getDb()`; chạy lại `lock-service`, `version-service`, `export-service` tests; schema chỉ thêm, idempotent | ARCHITECTURE (schema/stack) |
-| `lib/lock-service.ts` | routes `lock`, `lock/heartbeat`, `mask`, `upload-chunks`; `annotation-service` (kiểm token); UI read-only trong workspace; `lock-service.test.ts` | ARCHITECTURE (Khóa và conflict) |
+| `lib/lock-service.ts` | routes `lock`, `lock/heartbeat`, `mask`, `upload-chunks`; `annotation-service` (kiểm token); UI read-only trong workspace; cùng tài khoản phiên khác nhận khóa (`takenOver`, 2026-11-07), tài khoản khác vẫn bị từ chối; `lock-service.test.ts` | ARCHITECTURE (Khóa và conflict) |
 | `lib/annotation-service.ts` | routes `annotation`, `done`, `editor`; version history; revision/`baseRevision`; `wart-points` validate | ARCHITECTURE, EDITOR_PIPELINE |
 | `lib/wart-points.ts` | routes `annotation`, `done`; mapping `snapshot.breakpoints` ↔ `segmentation.wartPoints` trong workspace; export `wart-points.jsonl` | ARCHITECTURE (Hợp đồng u vấu) |
 | `lib/api-client.ts` | `dashboard`, `editor-workspace`, `admin-panel`, `login`; gộp request khóa; xử lý lỗi/offline; `api-client.test.ts` | ARCHITECTURE (Lưu local, server) |
@@ -140,6 +140,7 @@ Nguồn: [Cloudflare MCP servers](https://developers.cloudflare.com/agents/model
 - PowerShell gán biến môi trường chuỗi rỗng có thể xóa biến và khiến Next nạp lại `.env` (production) — kiểm tra cách ly trước khi thử mutation.
 - Bản local có thể ở trạng thái “chưa commit / chưa deploy”; đọc ngày trong tài liệu trước khi nói “đã lên production”.
 - Quyền xem theo nhóm nằm ở server: truy vấn mới trả ảnh/nhóm/dự án cho người dùng phải nhúng `FILE_ACCESS_SQL`/`GROUP_ACCESS_SQL` (vai trò từ DB, không từ JWT). Ảnh `group_id` NULL chỉ ADMIN thấy; bảng `assignments` (theo ảnh) cũ không quyết định quyền xem.
+- `.env.local` trỏ DB + Blob production: dev server localhost ghi thẳng vào dữ liệu thật và giữ khóa thật bằng heartbeat (so `/api/health` `fingerprints` để biết). Tab localhost bị bỏ quên mở từng làm phiên Vercel cùng tài khoản kẹt chỉ xem (2026-11-07).
 - Bỏ phân công không được cắt phiên đang sửa: chỉ chặn ở bootstrap và xin khóa, không thêm kiểm tra vào heartbeat/lưu/Hoàn tất.
 - Thumbnail cache luôn ghi vào `annotation-storage/thumbnails` dưới cwd (không theo `ANNOTATION_STORAGE_PATH`), kể cả khi chạy dev server cô lập; dọn file do lần thử tạo ra.
 - PGlite không tự tạo thư mục cha của `PGLITE_DATA_PATH`, và `getDb()` giữ promise lỗi: tạo thư mục trước rồi mới khởi động server thử.

@@ -11,7 +11,7 @@ beforeAll(async () => {
   for (const id of ['a', 'b']) await db.prepare('INSERT INTO users (id, display_name, hashed_password) VALUES (?, ?, ?)').run(id, id, 'test');
   await db.prepare("INSERT INTO projects (id, name) VALUES ('project', 'Test')").run();
   await db.prepare("INSERT INTO datasets (id, project_id, name) VALUES ('dataset', 'project', 'Test')").run();
-  for (const id of ['race', 'revisions', 'expiry', 'parallel', 'preservation']) await db.prepare(`INSERT INTO dataset_files
+  for (const id of ['race', 'revisions', 'expiry', 'parallel', 'preservation', 'takeover', 'keep-mine']) await db.prepare(`INSERT INTO dataset_files
     (id, dataset_id, external_key, image_drive_file_id, prediction_drive_file_id, image_filename, prediction_filename)
     VALUES (?, 'dataset', ?, 'image', 'mask', 'image.png', 'mask.png')`).run(id, id);
 }, 30_000);
@@ -33,7 +33,7 @@ describe('exclusive edit locks and revisions', () => {
     expect(JSON.parse(String(version?.segmentation_json))).toMatchObject(segmentation);
     expect(JSON.parse(String(version?.breakpoints_json))).toEqual(breakpoints);
   });
-  it('allows one simultaneous writer, denies another account and another session of the same account', async () => {
+  it('allows one simultaneous writer and denies another account', async () => {
     const results = await Promise.all([acquireLock('race', 'a'), acquireLock('race', 'b')]);
     expect(results.filter((result) => result && !result.denied)).toHaveLength(1);
     const index = results.findIndex((result) => result && !result.denied);
@@ -41,11 +41,64 @@ describe('exclusive edit locks and revisions', () => {
     const other = index === 0 ? 'b' : 'a';
     const lock = results[index]!;
     if (lock.denied) throw Error('Expected lock');
-    expect(await acquireLock('race', owner)).toMatchObject({ denied: true });
-    expect(await acquireLock('race', owner, lock.lockToken)).toMatchObject({ denied: false, lockToken: lock.lockToken });
+    expect(await acquireLock('race', other)).toMatchObject({ denied: true });
+    expect(await acquireLock('race', owner, lock.lockToken)).toMatchObject({ denied: false, lockToken: lock.lockToken, takenOver: false });
     expect(await heartbeat('race', lock.lockToken, other)).toBeNull();
     expect(await saveDraft('race', other, lock.lockToken, 0, { humanAction: 'ACCEPTED' }, {})).toBe('LOCK_LOST');
     expect(await releaseLock('race', 'invalid')).toBe(false);
+  });
+
+  // Người dùng xác nhận 2026-11-07: cùng tài khoản mở ở tab/thiết bị/origin khác (localhost vs Vercel) vẫn được sửa.
+  // Phiên mới nhận khóa, phiên cũ mất token nên lưu nhận LOCK_LOST và phải tự chọn giữa hai bản.
+  it('lets another session of the same account take over, and the old session can no longer write', async () => {
+    const first = await acquireLock('takeover', 'a');
+    if (!first || first.denied) throw Error('Expected lock');
+    expect(await saveDraft('takeover', 'a', first.lockToken, 0, { humanAction: 'ACCEPTED' }, {})).toMatchObject({ revision: 1 });
+
+    const second = await acquireLock('takeover', 'a');
+    if (!second || second.denied) throw Error('Expected same-account takeover');
+    expect(second).toMatchObject({ takenOver: true, baseRevision: 1 });
+    expect(second.lockToken).not.toBe(first.lockToken);
+
+    expect(await heartbeat('takeover', first.lockToken, 'a')).toBeNull();
+    expect(await saveDraft('takeover', 'a', first.lockToken, 1, { humanAction: 'MODIFIED' }, {})).toBe('LOCK_LOST');
+    expect(await submitDone('takeover', 'a', first.lockToken, 1, {}, {})).toBe('LOCK_LOST');
+    expect(await heartbeat('takeover', second.lockToken, 'a')).not.toBeNull();
+    expect(await acquireLock('takeover', 'b')).toMatchObject({ denied: true, lockedBy: { userId: 'a' } });
+
+    const db = await getDb();
+    const sessions = await db.prepare<{ id: string; close_reason: string | null }>(
+      "SELECT id, close_reason FROM annotation_sessions WHERE dataset_file_id = 'takeover' ORDER BY opened_at",
+    ).all();
+    expect(sessions.find((session) => session.id === first.sessionId)?.close_reason).toBe('TAKEN_OVER');
+    expect(sessions.find((session) => session.id === second.sessionId)?.close_reason).toBeNull();
+  });
+
+  it('keeps the other session version in history when the user keeps their own copy after a conflict', async () => {
+    const tabA = await acquireLock('keep-mine', 'a');
+    if (!tabA || tabA.denied) throw Error('Expected lock');
+    const original = { humanAction: 'MODIFIED', marker: 'A1' };
+    expect(await saveDraft('keep-mine', 'a', tabA.lockToken, 0, original, {})).toMatchObject({ revision: 1, versionNumber: 1 });
+
+    const tabB = await acquireLock('keep-mine', 'a');
+    if (!tabB || tabB.denied) throw Error('Expected lock');
+    const fromB = { humanAction: 'MODIFIED', marker: 'B' };
+    // Lưu tiếp của cùng người, cùng dữ liệu gốc: gộp vào version đang có như trước.
+    expect(await saveDraft('keep-mine', 'a', tabB.lockToken, 1, fromB, {})).toMatchObject({ revision: 2, versionNumber: 1 });
+
+    // Tab A chọn "giữ bản của tôi": lấy lại khóa rồi lưu với newVersion, bản của tab B phải còn trong lịch sử.
+    const retake = await acquireLock('keep-mine', 'a');
+    if (!retake || retake.denied) throw Error('Expected lock');
+    const fromA = { humanAction: 'MODIFIED', marker: 'A2' };
+    expect(await saveDraft('keep-mine', 'a', retake.lockToken, retake.baseRevision, fromA, {}, { newVersion: true }))
+      .toMatchObject({ revision: 3, versionNumber: 2 });
+
+    const db = await getDb();
+    const versions = await db.prepare<{ version_number: number; segmentation_json: string }>(
+      "SELECT version_number, segmentation_json FROM annotation_versions WHERE dataset_file_id = 'keep-mine' ORDER BY version_number",
+    ).all();
+    expect(versions.map((version) => [version.version_number, JSON.parse(version.segmentation_json).marker])).toEqual([[1, 'B'], [2, 'A2']]);
+    expect(await getAnnotation('keep-mine')).toMatchObject({ revision: 3, segmentation: { marker: 'A2' } });
   });
 
   it('preserves wart and legacy points, rejects stale revisions, and releases only on successful Done', async () => {

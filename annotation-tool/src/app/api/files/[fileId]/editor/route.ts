@@ -91,6 +91,7 @@ export async function GET(
     ...(prelabelOperations ? { prelabelOperations } : {}),
     readOnly: !isOwner,
     lockedBy: owner?.display_name,
+    lockedBySelf: isLocked && !isOwner && file.lock_user_id === user.userId,
     lock: isOwner ? {
       sessionId: file.lock_session_id,
       lockToken: '', // Never expose — client already has it from /lock

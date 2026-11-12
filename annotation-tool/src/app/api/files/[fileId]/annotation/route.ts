@@ -71,7 +71,8 @@ export async function PATCH(
     }
   }
 
-  const result = await saveDraft(fileId, user.userId, token, baseRevision, segmentation, breakpoints);
+  const result = await saveDraft(fileId, user.userId, token, baseRevision, segmentation, breakpoints,
+    { newVersion: body.newVersion === true });
 
   if (!result) {
     return NextResponse.json({ code: 'FILE_NOT_FOUND', message: 'File not found' }, { status: 404 });

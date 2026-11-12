@@ -21,6 +21,28 @@ Mẫu một mục:
 
 ---
 
+## 2026-11-07 — Cùng tài khoản sửa được ở mọi phiên; xung đột lưu hiện hai bản (ảnh + mask) để chọn
+
+- **Bối cảnh (người dùng báo):** editor02 sửa ở localhost rồi mở Vercel cùng Chrome profile vẫn chỉ xem. `/api/health` cho thấy localhost (`.env.local`) và Vercel trùng `fingerprints.database` và `blobStore`, nên bản lưu ở localhost đã vào DB production. Nguyên nhân chỉ xem: token khóa nằm trong `sessionStorage` theo origin, tab localhost còn mở vẫn gửi heartbeat giữ khóa, và server từ chối phiên khác của cùng tài khoản khi thiếu token.
+- **Người dùng xác nhận:** “AI CÙNG TÀI KHOẢN ĐỀU CÓ THỂ CHỈNH SỬA (NẾU LÚC LƯU CÓ VERSION TỒN TẠI KHÁC NHAU SHOW 2 VERSION ĐÓ CHO HỌ CHỌN (SHOW HÌNH VÀ MASK)”. Đây là đổi mô hình khóa cũ (“một phiên khác không được thay live lock, kể cả cùng tài khoản”).
+- **Thay đổi:**
+  - `lock-service.acquireLock`: phiên khác của cùng tài khoản nhận khóa mới. Session cũ đóng với `TAKEN_OVER`, kết quả có `takenOver`; tài khoản khác vẫn `FILE_LOCKED`.
+  - `annotation-service.saveDraft` và route `annotation`: thêm tùy chọn `newVersion`, buộc tạo version riêng.
+  - Route `editor`: trả thêm `lockedBySelf`.
+  - `editor-workspace`:
+    - hộp xung đột đặt hai bản cạnh nhau (component mới `version-compare.tsx`, hàm `lib/polygon-svg.ts`), với hai lựa chọn “Dùng bản máy chủ” và “Giữ bản của tôi và lưu”;
+    - mất khóa mà không có thay đổi chưa gửi thì chuyển sang chỉ xem, có nút “Sửa tại đây”;
+    - hiện thông báo khi vừa nhận khóa từ phiên khác.
+  - Dashboard và sidebar: file do chính mình mở ở phiên khác hiện “Sửa tại đây” / “Bạn đang mở ở phiên khác” thay vì “Chỉ xem”.
+- **Kiến trúc/ảnh hưởng:** không đổi schema. Type thêm 3 trường tùy chọn (`LockAcquireResponse.takenOver`, `EditorBootstrap.lockedBySelf`, `SaveDraftRequest.newVersion`). Lưu thường vẫn gộp “Bản lưu” liên tiếp của cùng người như trước. Tài khoản khác, phân công nhóm, Done, version ADMIN, import (409 khi đang có khóa) và Drive không đổi.
+- **Test đổi theo hành vi đã xác nhận:** trong `lock-service.test.ts`, test “denies … another session of the same account” đổi thành “denies another account”. Thêm test nhận khóa cùng tài khoản: phiên cũ nhận `LOCK_LOST` ở heartbeat, lưu và Done; session `TAKEN_OVER`. Thêm test “giữ bản của tôi”: bản của phiên kia còn trong lịch sử version. Thêm `polygon-svg.test.ts`.
+- **Đã kiểm chứng:** `npm run typecheck`, `npm run lint` sạch; `npm test` 276 test / 30 file; `npm run build` qua.
+- **Chưa kiểm chứng:**
+  - Chưa thao tác thật trên trình duyệt: hộp chọn hai bản, nút “Sửa tại đây”, hai tab cùng tài khoản. Canvas editor không đổi nên không chạy `canvas-browser-check`.
+  - Chưa deploy, nên Vercel production vẫn chạy mô hình khóa cũ.
+  - Chưa đọc DB production để xác minh vì sao ADMIN không thấy trạng thái đổi: truy vấn chỉ đọc bị chặn, chờ người dùng cho phép.
+- **Tài liệu đã cập nhật:** ARCHITECTURE (yêu cầu đã chốt #8, bảng API, Khóa và conflict, Việc còn lại), EDITOR_PIPELINE, AGENT_GUIDE, ENGINEERING_POLICY (baseline), `../CLAUDE.md` (baseline).
+
 ## 2026-11-07 — Auto-fill theo Connected Components Envelope & Outermost Boundary, bảo toàn diện tích và cấu trúc Ring
 
 - **Người dùng xác nhận (2026-11-07):**
