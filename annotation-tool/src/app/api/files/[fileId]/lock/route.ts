@@ -6,6 +6,7 @@ import { FILE_ACCESS_DENIED_MESSAGE, FILE_ACCESS_SQL } from '@/lib/access-servic
 
 /**
  * POST /api/files/[fileId]/lock — Acquire lock (spec 03 §3)
+ * Cùng tài khoản ở phiên khác nhận lại khóa (`takenOver`); tài khoản khác nhận FILE_LOCKED.
  * Chỉ người được giao nhóm của ảnh (hoặc ADMIN) mới nhận khóa sửa. Heartbeat, lưu và Hoàn tất
  * không kiểm tra lại phân công để bỏ giao giữa chừng không làm mất bản đang sửa.
  */
@@ -45,6 +46,7 @@ export async function POST(
     lockToken: result.lockToken,
     expiresAt: result.expiresAt,
     baseRevision: result.baseRevision,
+    takenOver: result.takenOver,
   });
 }
 

@@ -138,6 +138,8 @@ export interface LockAcquireResponse {
   lockToken: string;
   expiresAt: string;
   baseRevision: number;
+  /** true khi khóa vừa được lấy từ một phiên khác của chính tài khoản này (tab/thiết bị khác). */
+  takenOver?: boolean;
 }
 
 export interface HeartbeatResponse {
@@ -151,6 +153,8 @@ export interface EditorBootstrap {
   prelabelOperations?: MaskOperation[];
   readOnly: boolean;
   lockedBy?: string;
+  /** Khóa thuộc chính tài khoản đang xem nhưng ở phiên khác: có thể nhận lại quyền sửa. */
+  lockedBySelf?: boolean;
   lock: { sessionId: string; lockToken: string; expiresAt: string } | null;
 }
 
@@ -158,6 +162,8 @@ export interface SaveDraftRequest {
   baseRevision: number;
   segmentation: { wartPoints?: BreakpointAnnotation; humanAction: HumanAction; maskUploadRef?: string; maskOperations?: MaskOperation[] };
   breakpoints: BreakpointAnnotation;
+  /** Ghi thành version mới, không gộp vào version mới nhất (giữ bản của mình sau xung đột). */
+  newVersion?: boolean;
 }
 
 export interface SaveDraftResponse {

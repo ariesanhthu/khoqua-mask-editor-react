@@ -21,11 +21,14 @@ async function recordVersion(
   bpJson: string,
   now: string,
   label: string,
+  newVersion = false,
 ): Promise<number> {
   const assetJson = JSON.stringify({ image: file.image_drive_file_id, prediction: file.prediction_drive_file_id, width: file.width, height: file.height });
   const latest = await tx.prepare(`SELECT id, version_number, version_label, created_by, segmentation_json
     FROM annotation_versions WHERE dataset_file_id = ? ORDER BY version_number DESC LIMIT 1`).get(file.id);
-  const continuing = Boolean(latest && previousSegmentationJson !== undefined
+  // newVersion: người dùng vừa chọn giữ bản của mình thay cho bản mà phiên khác đã lưu. Bản kia phải còn
+  // trong lịch sử, nên không gộp vào version mới nhất dù cùng tài khoản.
+  const continuing = Boolean(!newVersion && latest && previousSegmentationJson !== undefined
     && latest.version_label === SAVE_VERSION_LABEL && latest.created_by === userId
     && latest.segmentation_json === previousSegmentationJson);
   if (continuing) {
@@ -50,6 +53,7 @@ export async function saveDraft(
   baseRevision: number,
   segmentation: Record<string, unknown>,
   breakpoints: Record<string, unknown>,
+  options: { newVersion?: boolean } = {},
 ): Promise<SaveResult | ConflictResult | null | 'LOCK_LOST'> {
   const db = await getDb();
   return db.transaction(async (tx) => {
@@ -78,7 +82,7 @@ export async function saveDraft(
         status = 'DRAFT', segmentation_json = EXCLUDED.segmentation_json,
         breakpoints_json = EXCLUDED.breakpoints_json, last_edited_by = EXCLUDED.last_edited_by,
         updated_at = EXCLUDED.updated_at`).run(fileId, newRevision, segJson, bpJson, userId, now);
-    const versionNumber = await recordVersion(tx, file, current?.segmentation_json, userId, baseRevision, segJson, bpJson, now, SAVE_VERSION_LABEL);
+    const versionNumber = await recordVersion(tx, file, current?.segmentation_json, userId, baseRevision, segJson, bpJson, now, SAVE_VERSION_LABEL, Boolean(options.newVersion));
     await tx.prepare(`UPDATE dataset_files SET latest_revision = ?, latest_version_number = ?, annotation_state = 'DRAFT', updated_at = ? WHERE id = ?`)
       .run(newRevision, Math.max(versionNumber, Number(file.latest_version_number)), now, fileId);
     await tx.prepare('UPDATE annotation_sessions SET last_activity_at = ? WHERE id = ?')

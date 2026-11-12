@@ -29,7 +29,7 @@ Các lệnh trên không thay thế kiểm thử tương tác, race condition tr
 5. Lưu nháp local mỗi **30 giây**. Không tự gửi annotation hoặc mask lên server theo timer.
 6. Khi đổi tab/file, bấm Lưu, xác nhận thao tác cần lưu hoặc Hoàn tất: gửi lên server. Không báo thành công nếu server từ chối.
 7. Drive chỉ ghi khi người dùng bấm **Cập nhật Drive ở Home**. Lưu server và lưu Drive là hai hành động riêng.
-8. Một file chỉ có một phiên giữ khóa chỉnh sửa hợp lệ. Backend phải từ chối writer khác và revision cũ; UI phải chặn cả chuột, nút và phím tắt khi chỉ xem/mất khóa.
+8. Một file chỉ có một phiên giữ khóa chỉnh sửa hợp lệ. Backend phải từ chối writer khác và revision cũ; UI phải chặn cả chuột, nút và phím tắt khi chỉ xem/mất khóa. *Người dùng xác nhận 2026-11-07:* cùng một tài khoản ở tab/thiết bị/origin khác (ví dụ localhost và Vercel) vẫn được sửa: phiên mở sau nhận khóa, phiên cũ mất quyền ghi; nếu lúc lưu có hai bản khác nhau thì hiện cả hai (ảnh + mask) để người dùng chọn.
 9. *(Người dùng xác nhận 2026-10-25)* Admin giao việc **theo nhóm ảnh**; người dùng chỉ thấy nhóm/ảnh được giao. Khi admin tải cả thư mục khổ qua lên, mỗi thư mục con (mỗi giống) tự thành một nhóm. Người gán nhãn xem theo nhóm, bấm nhóm thì thấy danh sách ảnh cần làm.
 10. *(Người dùng xác nhận 2026-10-25)* Tải lên hỗ trợ **COCO 1.0**; định dạng manifest đang có **giữ nguyên, là mặc định**, không được xóa.
 11. *(Người dùng xác nhận 2026-10-25)* Lần này chỉ trình bày lại UX **trang chính (Home)**, giữ design; **không sửa trang editor gán nhãn**. (Áp dụng cho đợt Home đó; yêu cầu 12 sau đó mở lại phạm vi editor.)
@@ -117,12 +117,12 @@ Timer heartbeat 30 giây và polling danh sách 8 giây chỉ giữ khóa/đọc
 | `PUT /api/projects/:projectId/groups/:groupId/assignees` | ADMIN thay danh sách người được giao (`{ userIds }`) |
 | `POST /api/projects/:projectId/groups/auto` | ADMIN xếp ảnh chưa phân nhóm theo tiền tố tên ảnh |
 | `POST /api/projects/:projectId/import` | ADMIN nhập một ảnh (multipart: `meta`, `image`, `prediction?`, `prelabel?`); nhập lại giữ annotation |
-| `POST /api/files/:fileId/lock` | Xin khóa; token đang sở hữu có thể dùng lại; phiên khác nhận `FILE_LOCKED` (423); ảnh ngoài nhóm được giao nhận `FORBIDDEN` (403) |
+| `POST /api/files/:fileId/lock` | Xin khóa; token đang sở hữu có thể dùng lại; phiên khác của **cùng tài khoản** nhận khóa mới (`takenOver: true`, phiên cũ đóng với `TAKEN_OVER`); tài khoản khác nhận `FILE_LOCKED` (423); ảnh ngoài nhóm được giao nhận `FORBIDDEN` (403) |
 | `POST /api/files/:fileId/lock/heartbeat` | Gia hạn TTL nếu user + token hợp lệ |
 | `DELETE /api/files/:fileId/lock` | Nhả đúng khóa đang giữ |
-| `GET /api/files/:fileId/editor` | Bootstrap cho cả editor và viewer; `readOnly`, `lockedBy`, `lock: null` nếu không sở hữu token; 403 nếu ảnh ngoài nhóm được giao |
+| `GET /api/files/:fileId/editor` | Bootstrap cho cả editor và viewer; `readOnly`, `lockedBy`, `lockedBySelf` (khóa thuộc phiên khác của chính tài khoản), `lock: null` nếu không sở hữu token; 403 nếu ảnh ngoài nhóm được giao |
 | `POST /api/files/:fileId/mask` | Upload PNG với khóa hợp lệ |
-| `PATCH /api/files/:fileId/annotation` | Lưu draft, tăng revision, kiểm tra lock/revision trong transaction |
+| `PATCH /api/files/:fileId/annotation` | Lưu draft, tăng revision, kiểm tra lock/revision trong transaction; `newVersion: true` (tùy chọn) buộc tạo version riêng thay vì gộp vào “Bản lưu” mới nhất của cùng người |
 | `POST /api/files/:fileId/done` | Validate nhiệm vụ, tạo version, tăng revision, nhả khóa |
 | `POST /api/projects/:projectId/export` | Ghi dữ liệu đã lưu server lên Drive; chỉ gọi từ nút Home |
 | `GET /api/projects/:projectId/export` | Tải ZIP, không ghi Drive |
@@ -178,11 +178,15 @@ Annotation cũ không có `wartPoints` mở ra với nhiệm vụ u vấu chưa 
 
 - TTL mặc định 300 giây, cấu hình bằng `LOCK_TTL_SECONDS`; workspace heartbeat mỗi 30 giây.
 - Acquire khóa và lưu annotation cùng khóa row `dataset_files` trước, rồi row `file_locks` trong transaction.
-- Một phiên khác không được thay live lock, kể cả cùng tài khoản nếu không có token đang sở hữu.
+- Tài khoản khác không được thay live lock. Từ 2026-11-07 (người dùng xác nhận) phiên khác của **cùng tài khoản** được nhận khóa dù không có token cũ: `acquireLock` xóa khóa cũ, đóng session cũ với `close_reason = 'TAKEN_OVER'` và trả `takenOver: true`. Phiên cũ mất token nên heartbeat/lưu/Hoàn tất nhận `LOCK_LOST`; không có ghi đè ngầm.
+- Phiên cũ mất khóa khi heartbeat: không có thay đổi chưa gửi thì chuyển sang chỉ xem (nút “Sửa tại đây” chạy lại bootstrap để nhận lại khóa); có thay đổi chưa gửi thì mở hộp chọn bản.
 - Save/Done kiểm tra user, token hash, thời gian hết hạn và `baseRevision`; stale writer nhận `LOCK_LOST` hoặc `REVISION_CONFLICT`.
 - Bootstrap cho phép viewer đọc annotation nhưng không cấp token.
 - Workspace/Canvas đã có disabled controls, pointer/keyboard/imperative guards; cần E2E để xác minh đủ mọi đường tương tác.
-- Conflict UI giữ nháp, cho tải JSON local, xem bản local hoặc bỏ local để tải bản server. Đã bỏ đường tự lấy revision mới rồi ghi đè local thành một Done version.
+- Conflict UI (2026-11-07) đặt hai bản cạnh nhau: ảnh gốc + mask (polygon tô theo label, hoặc mask PNG khi không có polygon) của bản máy chủ và bản trên thiết bị, kèm revision/thời điểm/số polygon/label. Người dùng chọn:
+  - **Dùng bản máy chủ**: xin lại khóa (cùng tài khoản), nạp bản máy chủ, xóa nháp local (có nút tải nháp về trước).
+  - **Giữ bản của tôi và lưu**: xin lại khóa; tài khoản khác đang giữ thì dừng và báo, không ghi. Nhận được khóa thì lưu bản local trên revision mới nhất với `newVersion: true`, nên bản của phiên kia vẫn còn trong lịch sử version.
+  - Vẫn có thu nhỏ để xem bản của mình trên canvas và tải JSON nháp. Đây là lựa chọn tường minh của người dùng, không phải tự giải quyết conflict; đường tự lấy revision mới rồi ghi đè local thành Done version vẫn bị bỏ.
 - Không thêm tính năng force unlock hoặc tự giải quyết conflict bằng cách ghi đè.
 
 ## Google Drive: phát hiện thực tế
@@ -234,7 +238,7 @@ Chưa thực hiện vì tool browser trả `No browser is available`. Cần trì
 
 Các điểm sau được ghi nhận để agent tiếp tục; **chưa sửa/xác minh xong**, không trình bày như đã được bảo đảm:
 
-- Token client hiện nằm trong `Map` bộ nhớ. Hard reload có thể mất token trong khi live lock vẫn tồn tại, khiến cùng tài khoản vào chỉ xem đến khi TTL hết. Thiết kế resume phiên không được cho phiên khác chiếm khóa.
+- Token client nằm trong `Map` bộ nhớ + `sessionStorage` (sống qua F5 của cùng tab). Từ 2026-11-07, tab/thiết bị/origin khác của cùng tài khoản nhận lại khóa nên không còn kẹt chỉ xem tới khi TTL hết (lỗi gặp thật: editor02 sửa ở localhost dùng chung DB production, tab localhost còn mở giữ khóa bằng heartbeat, tab Vercel bị chỉ xem). Chưa kiểm thử hộp chọn bản/“Sửa tại đây” trên trình duyệt thật.
 - `syncNow` gộp promise đang chạy, nhưng trả thành công của batch hiện tại. Cần test thay đổi mới phát sinh sát lúc save/chuyển file; bảo đảm flush đến snapshot cuối trước khi nhả khóa.
 - Khóa UI đang dựa vào `readOnly`/`status`. `onOffline` đổi status thành OFFLINE; cần giữ chặn chỉnh sửa khi đã conflict/mất khóa, kể cả khi network events đổi status. Backend hiện vẫn kiểm tra khóa trên mỗi lần lưu.
 - SPA Back/Forward hoặc unmount ngoài `navigateTo` chưa có kiểm thử flush/release. Pagehide/unload không bảo đảm async IndexedDB/upload hoàn tất.

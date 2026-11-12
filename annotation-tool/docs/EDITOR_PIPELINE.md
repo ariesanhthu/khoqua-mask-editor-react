@@ -81,6 +81,7 @@ Khóa bằng `polygon-geometry.test.ts` (describe “findAutoAnchorPath” và �
 - Không gọi `fit()` do đổi tool hoặc selection.
 - Không ghi server trong pointer-move hoặc theo timer annotation; commit snapshot và lưu server là hai bước khác nhau.
 - Không xóa draft IndexedDB khi save lỗi, mất lock hoặc revision conflict.
+- Xung đột lưu (người dùng xác nhận 2026-11-07): luôn hiện hai bản (ảnh + mask) để người dùng chọn. “Giữ bản của tôi” chỉ ghi sau khi xin lại được khóa và lưu với `newVersion: true` (bản kia còn trong lịch sử). Không tự chọn thay người dùng.
 - Không để client giữ OAuth token Drive; mọi sync/export dùng credential server.
 - Không đổi hợp đồng vẽ polygon ở trên (undo từng điểm) khi refactor canvas; chạy `polygon-draft.test.ts` và kịch bản trình duyệt.
 - Render: không vẽ lại ảnh gốc cho thay đổi nội dung; không `getImageData` trên lớp hiển thị; raster nhị phân và raster của worker phải đúng từng pixel với `rasterizePolygons`. Danh sách đầy đủ: [EDITOR_RENDERING.md](EDITOR_RENDERING.md) §6.
