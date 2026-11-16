@@ -180,14 +180,25 @@ describe('applyPolygonPaint — đường cắt 2 điểm trong chế độ tr�
     expect('error' in through && /lỗ/.test(through.error)).toBe(true);
   });
 
-  it('đường qua nhiều mask: lấy mask duy nhất đang chọn, không chọn thì báo để chọn', () => {
-    const scene = [rectangle('A', 0, 0, 100, 100), rectangle('B', 0, 120, 100, 220)];
-    const noneSelected = applyPolygonPaint(scene, ring([[50, -10], [50, 230]]), 'subtract', options());
-    expect('error' in noneSelected && /nhiều polygon/.test(noneSelected.error)).toBe(true);
-    const picked = ok(applyPolygonPaint(scene, ring([[50, -10], [50, 230]]), 'subtract', options(['B'])));
-    expect(picked.polygons).toHaveLength(3);
-    expect(picked.polygons[0].id).toBe('A');
-    expect(picked.polygons.filter((piece) => piece.label === 'B')).toHaveLength(2);
+  it('đường qua nhiều mask: lấy mask đang chọn, không chọn thì mask mà đường nằm trong nhiều nhất', () => {
+    const scene = [rectangle('A', 0, 0, 100, 100), rectangle('B', 0, 120, 100, 320)];
+    const dominant = ok(applyPolygonPaint(scene, ring([[50, -10], [50, 330]]), 'subtract', options()));
+    expect(dominant.polygons[0]).toBe(scene[0]);
+    expect(dominant.polygons.filter((piece) => piece.label === 'B')).toHaveLength(2);
+    const picked = ok(applyPolygonPaint(scene, ring([[50, -10], [50, 330]]), 'subtract', options(['A'])));
+    expect(picked.polygons.at(-1)).toBe(scene[1]);
+    expect(picked.polygons.filter((piece) => piece.label === 'A')).toHaveLength(2);
+  });
+
+  it('đường chưa chia được mask: trả NGUYÊN mảng polygon (không ID mới) kèm đường chờ; đường nối tiếp mới tách', () => {
+    const scene = [rectangle('A', 0, 0, 100, 100)];
+    const waiting = ok(applyPolygonPaint(scene, ring([[50, 0], [50, 60]]), 'subtract', options()));
+    expect(waiting.polygons).toBe(scene);
+    expect(waiting.resultIds).toEqual([]);
+    expect(waiting.pendingCuts?.get('A')).toHaveLength(1);
+    const done = ok(applyPolygonPaint(scene, ring([[50, 60], [100, 60]]), 'subtract', { ...options(), pendingCuts: waiting.pendingCuts }));
+    expect(done.polygons).toHaveLength(2);
+    expect(done.polygons.filter((piece) => piece.id === 'A')).toHaveLength(1);
   });
 
   it('đường không xuyên qua mask nào thì báo lỗi và không đổi gì', () => {
@@ -204,5 +215,38 @@ describe('applyPolygonPaint — đường cắt 2 điểm trong chế độ tr�
   it('chế độ nối (+) với 2 điểm vẫn là lỗi polygon quá nhỏ (không cắt)', () => {
     const result = applyPolygonPaint([rectangle('A', 0, 0, 100, 100)], ring([[50, -10], [50, 110]]), 'add', options());
     expect('error' in result).toBe(true);
+  });
+});
+
+/**
+ * Lỗi "không hoàn tất được polygon ở chế độ trừ" trên dữ liệu thật (2026-11-16): ≈26 % polygon prelabel vector hóa
+ * tự chạm tại một đỉnh; trước đây chỉ cần MỘT mask như vậy nằm gần vùng vẽ là cả thao tác bị từ chối ("Biên mask …
+ * không hợp lệ") — đo 52 % lần trừ trên drive/prelabel-production. Nay dùng hình học đã sửa (maskClipGeometry).
+ */
+describe('applyPolygonPaint — mask tự chạm không còn chặn thao tác (2026-11-16)', () => {
+  // Nơ bướm thắt tại (50,50): một vòng tự chạm, polygonGeometry trả null.
+  const pinched = polygon('P', [[0, 0], [50, 50], [100, 0], [100, 100], [50, 50], [0, 100]]);
+
+  it('trừ một mask hợp lệ nằm cạnh mask tự chạm vẫn áp dụng được, mask tự chạm giữ nguyên', () => {
+    const neighbour = rectangle('N', 100, 0, 200, 100);
+    const result = ok(applyPolygonPaint([pinched, neighbour], ring([[150, -10], [210, -10], [210, 50], [150, 50]]), 'subtract', options()));
+    expect(result.polygons[0]).toBe(pinched);
+    expect(area(result.polygons[1])).toBeCloseTo(10000 - 2500, 6);
+  });
+
+  it('trừ chính mask tự chạm: chỉ phần chồng bị xóa, phần còn lại được bảo toàn', () => {
+    const result = ok(applyPolygonPaint([pinched], ring([[60, 60], [110, 60], [110, 110], [60, 110]]), 'subtract', options()));
+    const remaining = result.polygons.reduce((sum, item) => sum + area(item), 0);
+    // Nơ bướm = hai tam giác 2500; ô trừ chồng lên tam giác phải 40×40 − góc ngoài tam giác.
+    expect(remaining).toBeLessThan(5000);
+    expect(remaining).toBeGreaterThan(5000 - 1600 - 1);
+    expect(new Set(result.polygons.map((item) => item.id)).size).toBe(result.polygons.length);
+  });
+
+  it('nối (+) cạnh mask tự chạm cũng không còn bị chặn', () => {
+    const neighbour = rectangle('N', 100, 0, 200, 100);
+    const result = ok(applyPolygonPaint([pinched, neighbour], ring([[200, 20], [240, 20], [240, 80], [200, 80]]), 'add', options()));
+    expect(result.polygons[0]).toBe(pinched);
+    expect(area(result.polygons[1])).toBeCloseTo(10000 + 2400, 6);
   });
 });

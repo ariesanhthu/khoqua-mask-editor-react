@@ -8,6 +8,7 @@ import {
   autoGroupProject,
   disconnectGoogleDrive,
   exportProject,
+  getCompletedProjectExport,
   getFiles,
   getGoogleDriveConnectionStatus,
   getGroups,
@@ -543,6 +544,20 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
               setDriveUrl(result.driveFolderUrl);
             })}>{projectAction === 'drive' ? 'Đang cập nhật…' : 'Cập nhật Drive'}</button>
             <a className="button ghost download-button" href={projectExportDownloadUrl(projectId)} download>Tải ZIP về máy</a>
+            <button className="button ghost download-button" type="button" disabled={projectAction !== ''}
+              title="Chỉ ảnh đã hoàn tất trong các nhóm có quyền xem: ảnh gốc, polygon và COCO JSON"
+              onClick={() => void runProjectAction('completed', async () => {
+                const { blob, filename } = await getCompletedProjectExport(projectId);
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+                setProjectMessage('Đã tạo ZIP ảnh hoàn tất: ảnh gốc, polygon và COCO JSON.');
+              })}>{projectAction === 'completed' ? 'Đang tạo ZIP…' : 'Tải ảnh hoàn tất'}</button>
           </div>
         </section>
       ) : null}

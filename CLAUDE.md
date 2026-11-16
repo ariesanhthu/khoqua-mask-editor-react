@@ -44,7 +44,7 @@ Docs are written in Vietnamese. Reply in the language the user writes in; keep c
 | `node scripts/canvas-browser-check.mjs http://localhost:3217` | Headless-Chrome check of canvas interactions on the synthetic `/canvas-browser-check` page (start an isolated dev server first; see the script header) |
 
 The 4 gates (typecheck, test, lint, build) must pass before any deploy; CI runs test → typecheck → build.
-Baseline on 2026-11-16 (magnet toggle covers all auto-snapping at 6 px, Shift inserts boundary points without finalizing, windowed completion model for real prelabels, on `dev`): typecheck clean, lint clean, build ok, 330 tests in 34 files pass, `canvas-browser-check` 73/73 (2-point line cut in Paint (−); left-sidebar minimap with pan; brightness/unsharp display adjustments with reset). A regression from this baseline is yours to fix or report.
+Baseline on 2026-11-17 (completed-only Home export added; existing Trim/Line Split kept): typecheck clean, lint clean, build ok, 359 tests in 36 files pass, `canvas-browser-check` 76/76 (Paint (−) works next to self-touching masks; 2-point line split with pending cuts in `mask-cut.ts`; left-sidebar minimap; brightness/unsharp display adjustments). Completed ZIP browser flow passed on isolated synthetic data for ADMIN/ANNOTATOR/REVIEWER. A regression from this baseline is yours to fix or report.
 
 ## Non-negotiable rules (summary — full text in ENGINEERING_POLICY.md)
 
@@ -57,5 +57,7 @@ Baseline on 2026-11-16 (magnet toggle covers all auto-snapping at 6 px, Shift in
 7. **Git/deploy only on request.** Do not commit, push, deploy or run Vercel/Cloudflare mutations unless asked. Never `--no-verify`, never force-push, never revert `drive/`.
 
 ## Cloudflare MCP
+
+Home export 2026-11-16: gói riêng `/api/projects/:projectId/export/completed` cho mọi vai trò, chỉ annotation hiện tại DONE trong quyền nhóm, ảnh gốc + COCO + polygon JSON. ZIP đầy đủ/Drive giữ hành vi cũ. Không vector hóa/lấy polygon lỗi thời khi tải. Xem `GROUND_TRUTH_EXPORT.md`.
 
 `.mcp.json` registers `cloudflare-api` (`https://mcp.cloudflare.com/mcp`) and `cloudflare-docs` (`https://docs.mcp.cloudflare.com/mcp`). Authenticate with `/mcp` (OAuth); never put API tokens in the file. Usage rules: `annotation-tool/docs/AGENT_GUIDE.md` § Cloudflare MCP. Production app is on Vercel; object storage is moving to Cloudflare R2 (`annotation-tool/docs/CLOUDFLARE_R2_STORAGE.md`, code ready, not yet switched on). A parallel Cloudflare Containers deployment is prepared in `cloudflare/` (see `annotation-tool/docs/CLOUDFLARE_DEPLOY.md`) but **not deployed**: it needs the Workers Paid plan and Docker. Any Cloudflare write (deploy, secrets, DNS, R2) needs the user's explicit request. The Cloudflare token lives in the gitignored root `.env`; never print or copy it.

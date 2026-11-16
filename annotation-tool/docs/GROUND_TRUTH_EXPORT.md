@@ -1,5 +1,13 @@
 # Fetch ground truth from the database
 
+## Gói ảnh hoàn tất ở Home (2026-11-16)
+
+Yêu cầu người dùng: nút cạnh ZIP hiện có, dùng cho mọi vai trò, chỉ tải ảnh hoàn tất kèm polygon COCO JSON và ảnh gốc. Endpoint riêng `GET /api/projects/:projectId/export/completed`; dùng `annotations.status = 'DONE'` của bản hiện tại, không lấy bản lịch sử mới nhất thay thế. Quyền đọc nhóm lấy từ DB như danh sách ảnh. Giữ nguyên export ZIP đầy đủ và đồng bộ Drive (DRAFT/DONE).
+
+Gói mới gồm `coco.json`, `images/*` nguyên byte và `polygons/*.json` giữ đầy đủ vector gốc; không tạo PNG/SVG/preview/audit/version. COCO dùng `cocoInstance`/`rasterizePolygons` hiện có để giữ lỗ, vùng nhỏ và instance chồng lấn. Chỉ đọc polygon set cuối cùng; dữ liệu raster/reset cũ thiếu polygon hiện hành báo lỗi có tên ảnh, không tự vector hóa hoặc lấy polygon lỗi thời. Không có ảnh DONE trả thông báo rõ; lỗi tải ảnh/kích thước/trùng tên phải hủy cả gói, không trả ZIP thiếu dữ liệu.
+
+Phân tích ảnh hưởng trước khi code: service/route mới, thêm hàm tải binary ở `api-client.ts` và nút ở `dashboard.tsx`; kiểm các consumer của client (dashboard/editor/admin/login), export-service/Drive/version, COCO import/export và quyền nhóm. Không đổi schema, DTO lưu, IndexedDB, khóa, canvas, dependency hoặc định dạng ZIP cũ. Test service/route bằng PGlite memory + mock asset; test client lỗi HTTP/offline; chạy đủ bốn cổng và canvas check cho thay đổi Trim đã có trước khi release.
+
 ## Approved consistent export (2026-10-04)
 
 The user selected `native-canvas-separated.png` for `8582_01`: white native Canvas evenodd fills, followed by all original closed outlines drawn black at **2 image pixels**, then thresholded at 128. Do not substitute the older fill-only union when producing this approved variant.

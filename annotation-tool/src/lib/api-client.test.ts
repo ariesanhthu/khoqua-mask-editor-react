@@ -197,3 +197,28 @@ describe('lock token persistence', () => {
     expect(calls.at(-1)?.token).toBe('token-2');
   });
 });
+
+describe('completed project downloads', () => {
+  it('fetches the ZIP with the encoded project id and keeps binary data and filename', async () => {
+    const client = await loadClient();
+    const blob = new Blob(['zip-bytes'], { type: 'application/zip' });
+    const fetcher = vi.fn(async () => new Response(blob, { headers: { 'Content-Disposition': 'attachment; filename="test-completed.zip"' } }));
+    vi.stubGlobal('fetch', fetcher);
+    const result = await client.getCompletedProjectExport('project /1');
+    expect(fetcher).toHaveBeenCalledWith('/api/projects/project%20%2F1/export/completed', { credentials: 'same-origin' });
+    expect(await result.blob.text()).toBe('zip-bytes');
+    expect(result.filename).toBe('test-completed.zip');
+    expect(client.projectExportDownloadUrl('project /1')).toBe('/api/projects/project%20%2F1/export');
+  });
+
+  it('reports server errors, platform failures and offline errors without downloading JSON as ZIP', async () => {
+    const client = await loadClient();
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(Response.json({ code: 'UNKNOWN', message: 'Chưa có ảnh đã hoàn tất' }, { status: 502 }))
+      .mockResolvedValueOnce(new Response('Bad Gateway', { status: 504 }))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch')));
+    await expect(client.getCompletedProjectExport('p')).rejects.toMatchObject({ message: 'Chưa có ảnh đã hoàn tất' });
+    await expect(client.getCompletedProjectExport('p')).rejects.toMatchObject({ message: expect.stringContaining('504') });
+    await expect(client.getCompletedProjectExport('p')).rejects.toThrow('Failed to fetch');
+  });
+});

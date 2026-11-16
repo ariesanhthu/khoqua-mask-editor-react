@@ -7,8 +7,8 @@ import {
   indexSourceVertices,
   intersectionGeometries,
   multiPolygonArea,
+  maskClipGeometry,
   normalizeRing,
-  polygonGeometry,
   polygonRings,
   projectOntoSegment,
   restoreSourceVertices,
@@ -23,7 +23,7 @@ import {
   type GeometryRing,
 } from './geometry-primitives';
 import { TOUCH_TOLERANCE } from './mask-anchor';
-import { resolvePolygonCut } from './polygon-geometry';
+import { applyLineCut, type CutSegment, type PendingCuts } from './mask-cut';
 
 /**
  * Paint (công cụ B) nối (+) / trừ (−) bằng polygon — người dùng xác nhận 2026-11-12. Thay cho tô pixel rồi vector
@@ -44,9 +44,15 @@ export interface PaintOptions {
   /** Nhãn/meta cho mask mới khi polygon (+) không chạm mask nào. */
   newRegion: { label: string; meta?: AnnotationPolygonMeta };
   bounds: { width: number; height: number };
+  /** Đường cắt chờ của phiên (chỉ dùng cho đường cắt 2 điểm ở chế độ trừ), xem mask-cut.ts. */
+  pendingCuts?: PendingCuts;
+  /** Dung sai "gần" theo px ảnh cho đầu mút đường cắt (canvas truyền theo zoom). */
+  tolerance?: number;
 }
 
-export type PaintResult = { polygons: AnnotationPolygon[]; resultIds: string[]; message: string } | { error: string };
+export type PaintResult =
+  | { polygons: AnnotationPolygon[]; resultIds: string[]; message: string; pendingCuts?: Map<string, CutSegment[]> }
+  | { error: string };
 
 const AREA_EPSILON = 0.01;
 
@@ -55,7 +61,8 @@ type Point = { x: number; y: number };
 interface Candidate {
   index: number;
   polygon: AnnotationPolygon;
-  geometry: GeometryPolygon;
+  /** Hình học clipping (đã sửa nếu mask tự chạm/tự cắt, xem maskClipGeometry). */
+  geometry: GeometryMultiPolygon;
   overlap: number;
   touches: boolean;
 }
@@ -80,10 +87,6 @@ function boundariesWithin(ring: GeometryRing, polygon: AnnotationPolygon, tolera
     }
   }
   return false;
-}
-
-function polygonGeometryArea(geometry: GeometryPolygon): number {
-  return geometry.reduce((sum, ring, index) => sum + (index === 0 ? 1 : -1) * Math.abs(ringArea(ring)), 0);
 }
 
 /** Tách kết quả clipping thành các polygon (vòng ngoài + lỗ), gắn lại đỉnh gốc từ `sources`. */
@@ -152,8 +155,11 @@ export function applyPolygonPaint(
   for (let index = 0; index < polygons.length; index += 1) {
     const polygon = polygons[index];
     if (polygon.nodes.length < 3 || !boundsOverlap(cachedPolygonBounds(polygon), drawnBounds)) continue;
-    const geometry = polygonGeometry(polygon);
-    if (!geometry) return { error: `Biên mask ${polygon.label} không hợp lệ. Hãy chỉnh lại biên trước khi nối/trừ.` };
+    // Mask tự chạm/tự cắt (≈26 % polygon prelabel thật) dùng hình học đã sửa thay vì chặn cả thao tác: trước
+    // 2026-11-16 một mask như vậy nằm gần vùng vẽ là Paint báo "biên không hợp lệ" và bản nháp không bao giờ áp
+    // dụng được (đo: 52 % lần trừ trên drive/prelabel-production bị từ chối). Mask không có diện tích thì bỏ qua.
+    const geometry = maskClipGeometry(polygon);
+    if (!geometry) continue;
     const overlapGeometry = clip(() => intersectionGeometries(drawn, geometry));
     if (!overlapGeometry) return { error: 'Không xử lý được polygon này. Hãy vẽ lại đơn giản hơn.' };
     const overlap = multiPolygonArea(overlapGeometry);
@@ -166,21 +172,16 @@ export function applyPolygonPaint(
 }
 
 /**
- * Tách mask bằng đường 2 điểm trong Paint (−). Dùng chung lõi với công cụ cắt (`resolvePolygonCut`): đường phải
- * đi qua biên đúng 2 lần; qua nhiều mask thì ưu tiên mask duy nhất đang chọn, không thì báo để người dùng chọn.
+ * Đường cắt 2 điểm trong Paint (−): giao cho `mask-cut.applyLineCut` (đồ thị đường cắt + đường chờ). Đường chưa
+ * chia được mask trả về NGUYÊN mảng polygon (không ID mới) kèm bản đồ đường chờ mới.
  */
 function cutWithLine(polygons: AnnotationPolygon[], line: Point[], options: PaintOptions): PaintResult {
-  const cutPath: PolygonNode[] = line.map((point) => ({ id: createId(), x: point.x, y: point.y }));
-  let outcome = resolvePolygonCut(polygons, cutPath);
-  if (outcome.error && options.selectedIds?.size === 1) {
-    const [selectedId] = options.selectedIds;
-    const manual = resolvePolygonCut(polygons, cutPath, selectedId);
-    if (!manual.error) outcome = manual;
-  }
-  if (outcome.error || !outcome.polygons) return { error: outcome.error ?? 'Không tách được mask bằng đường này.' };
-  const pieces = outcome.polygons;
-  const next = polygons.flatMap((polygon) => (polygon.id === outcome.targetId ? pieces : [polygon]));
-  return { polygons: next, resultIds: pieces.map((piece) => piece.id), message: 'Đã tách mask thành 2 phần tại đường cắt.' };
+  const outcome = applyLineCut(polygons, { a: line[0], b: line[1] }, {
+    selectedIds: options.selectedIds, pending: options.pendingCuts, tolerance: options.tolerance,
+  });
+  if (outcome.kind === 'error') return { error: outcome.error };
+  if (outcome.kind === 'pending') return { polygons, resultIds: [], message: outcome.message, pendingCuts: outcome.pending };
+  return { polygons: outcome.polygons, resultIds: outcome.resultIds, message: outcome.message, pendingCuts: outcome.pending };
 }
 
 function subtract(polygons: AnnotationPolygon[], drawn: GeometryMultiPolygon, drawnNodes: PolygonNode[], nearby: Candidate[]): PaintResult {
@@ -227,13 +228,13 @@ function add(
   const candidates = nearby.filter((item) => !item.polygon.meta?.locked && item.touches);
   const byOverlap = (a: Candidate, b: Candidate) => (Math.abs(b.overlap - a.overlap) > AREA_EPSILON
     ? b.overlap - a.overlap
-    : polygonGeometryArea(b.geometry) - polygonGeometryArea(a.geometry));
+    : multiPolygonArea(b.geometry) - multiPolygonArea(a.geometry));
   const selected = candidates.filter((item) => options.selectedIds?.has(item.polygon.id)).sort(byOverlap);
   const target = selected[0] ?? [...candidates].sort(byOverlap)[0];
 
   const subject = target ? snapRingTo(drawnRing, target.polygon) : drawnRing;
   const drawn = clip(() => intersectionGeometries([subject], imageRect));
-  const others = nearby.filter((item) => item !== target).map((item) => [item.geometry] as GeometryMultiPolygon);
+  const others = nearby.filter((item) => item !== target).map((item) => item.geometry);
   const piece = drawn && (others.length ? clip(() => differenceGeometries(drawn, unionClipInputs(others))) : drawn);
   if (!piece) return { error: 'Không xử lý được polygon này. Hãy vẽ lại đơn giản hơn.' };
   const sources = [drawnNodes, ...nearby.flatMap((item) => polygonRings(item.polygon))];
@@ -249,9 +250,9 @@ function add(
     return { polygons: [...polygons, ...created], resultIds: created.map((item) => item.id), message: `Đã tạo mask ${options.newRegion.label}.` };
   }
 
-  const merged = clip(() => unionClipInputs([[target.geometry], piece]));
+  const merged = clip(() => unionClipInputs([target.geometry, piece]));
   if (!merged) return { error: 'Không xử lý được polygon này. Hãy vẽ lại đơn giản hơn.' };
-  if (multiPolygonArea(merged) - polygonGeometryArea(target.geometry) < AREA_EPSILON) {
+  if (multiPolygonArea(merged) - multiPolygonArea(target.geometry) < AREA_EPSILON) {
     return { error: `Vùng vẽ đã nằm trong mask ${target.polygon.label}, không có gì để nối.` };
   }
   let shapes;

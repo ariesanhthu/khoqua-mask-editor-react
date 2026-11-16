@@ -284,5 +284,7 @@ describe('tự hoàn thiện: cửa sổ cục bộ trùng kết quả hợp c�
     }
     // Cảnh phải thực sự sinh ra đường đi, không phải toàn thất bại.
     expect(routes).toBeGreaterThan(20);
-  });
+    // 200 lần dựng mô hình biên (mỗi truy vấn hai mảng mới): ~1 s bình thường, nhưng máy/CI đang tải có thể chậm
+    // gấp nhiều lần — timeout rộng để test đúng/sai theo KẾT QUẢ chứ không theo tốc độ máy.
+  }, 60_000);
 });

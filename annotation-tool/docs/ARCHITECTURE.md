@@ -59,6 +59,8 @@ Các lệnh trên không thay thế kiểm thử tương tác, race condition tr
 
     Chi tiết: [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) “Hợp đồng Paint (công cụ B)”.
 
+18. *(Người dùng xác nhận 2026-11-16)* Thêm nút tải **chỉ ảnh đã hoàn tất**, cạnh nút tải ZIP ở Home, cho mọi vai trò. Gói gồm ảnh gốc và polygon/COCO JSON. Không thực hiện lại phần Trim đã có; kiểm tra phụ thuộc, cập nhật rule/context, chạy test rồi deploy `master`. Áp dụng quyền nhóm hiện có cho gói mới (ADMIN mọi nhóm; người khác các nhóm được giao).
+
 ## Stack và phạm vi
 
 Project root: `SAM/khoqua-mask-editor-react/khoqua-mask-editor-react/annotation-tool`.
@@ -110,6 +112,7 @@ Timer heartbeat 30 giây và polling danh sách 8 giây chỉ giữ khóa/đọc
 | `src/components/editor-workspace.tsx` | Bootstrap, recovery local, quản lý tab/file, save gate, heartbeat, conflict UI, sidebar |
 | `src/components/editor-canvas.tsx` | Bộ điều khiển tương tác: polygon/node, point, selection, undo/redo, zoom/pan, render/export canvas; có prop `readOnly`. Bốn lớp canvas có cờ bẩn riêng, image pyramid, dirty rectangle, gợi ý neo ([EDITOR_RENDERING.md](EDITOR_RENDERING.md)). Chỉ gọi các hàm hình học thuần bên dưới rồi `commitPolygons` |
 | `src/components/paint-mode-icon.tsx` | Icon chế độ Paint (+/−) dùng chung cho thanh công cụ, thanh chế độ và trang kiểm tra |
+| `src/lib/mask-cut.ts` | Đường cắt 2 điểm của Paint (−) (2026-11-16): đồ thị đường cắt + đường chờ, chỉ tách/cấp ID khi mask thực sự phân tách; dùng lõi `splitPolygonWithCut` |
 | `src/components/canvas-minimap.tsx` | Minimap sidebar trái (2026-11-16): ảnh thu nhỏ + khung đỏ vùng đang nhìn, kéo để pan (`panTo`), thanh thu-phóng riêng |
 | `src/lib/polygon-draft.ts` | Lịch sử điểm của polygon đang vẽ (P và Paint): undo/redo từng điểm, xóa điểm, bỏ đỉnh trùng double-click |
 | `src/lib/geometry-primitives.ts` | Hình học cấp thấp dùng chung (chuyển nguyên văn từ `polygon-geometry.ts` 2026-11-12): kiểu, `normalizeRing`, bọc `polygon-clipping`, `polygonGeometry`, `restoreSourceVertices`; tăng tốc bằng lưới cho ring lớn |
@@ -129,6 +132,7 @@ Timer heartbeat 30 giây và polling danh sách 8 giây chỉ giữ khóa/đọc
 | `src/lib/storage.ts` | PNG validation/normalization, lưu/đọc mask (qua `object-store.ts`) |
 | `src/lib/object-store.ts` | Lưu đối tượng: Cloudflare R2 (`STORAGE_BACKEND=r2`), Vercel Blob (mặc định), đĩa cục bộ; xem [CLOUDFLARE_R2_STORAGE.md](CLOUDFLARE_R2_STORAGE.md) |
 | `src/lib/export-service.ts` | Xuất cả DRAFT/DONE, render polygon cũ, JSONL/ZIP, hash và upsert Drive |
+| `src/lib/completed-export-service.ts` | Gói riêng ảnh hoàn tất: DONE hiện tại + quyền nhóm từ DB, ảnh gốc + polygon JSON + COCO; dùng chung rasterizer/COCO, không ghi dữ liệu |
 | `src/lib/drive-service.ts` | Đọc nguồn, manifest, asset đa loại và thao tác Drive |
 | `src/lib/google-oauth.ts` | OAuth config, refresh token mã hóa, access token ở server |
 | `src/lib/db.ts` | Adapter Postgres/PGlite, schema, bootstrap admin |
@@ -154,6 +158,7 @@ Timer heartbeat 30 giây và polling danh sách 8 giây chỉ giữ khóa/đọc
 | `POST /api/files/:fileId/done` | Validate nhiệm vụ, tạo version, tăng revision, nhả khóa |
 | `POST /api/projects/:projectId/export` | Ghi dữ liệu đã lưu server lên Drive; chỉ gọi từ nút Home |
 | `GET /api/projects/:projectId/export` | Tải ZIP, không ghi Drive |
+| `GET /api/projects/:projectId/export/completed` | Gói ảnh gốc + COCO + polygon JSON, chỉ annotation hiện tại `DONE` và trong quyền nhóm; mọi vai trò đăng nhập; không ghi Drive |
 | `POST /api/projects/:projectId/sync-drive` | Nhập/cập nhật chỉ mục từ nguồn, khác với export annotation |
 | `GET /api/google/diagnostics` | Chẩn đoán quyền thư mục; hiện chọn project đầu tiên, chưa nhận project đang chọn |
 

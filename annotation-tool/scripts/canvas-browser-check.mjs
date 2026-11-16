@@ -342,6 +342,22 @@ try {
   check('Paint (−) with a 2-point line splits the mask at the cut', field(s.status, 'masks') === '7' && r1Pieces === 2, `${s.status} | pieces=${r1Pieces} | ${s.message}`);
   await ctrl('z'); await sleep(300);
   check('one undo restores the line-split mask', (await evaluate(masksOf)) === 6);
+  // Rule 3 (spec 2026-11-16): đường cắt từ biên vào GIỮA mask r2 chưa chia được mask → không mask/ID mới, đường
+  // được giữ chờ; đường thứ hai nối từ đầu đường chờ ra biên bên kia mới tách r2 làm hai.
+  const doubleClickImage = async (x, y) => { const p = (await imageToScreen(800, 500))(x, y); await click(p.x, p.y, { clickCount: 1 }); await click(p.x, p.y, { clickCount: 2 }); await sleep(400); };
+  for (const [x, y] of [[545, 150], [575, 150]]) await clickImage(x, y);
+  await doubleClickImage(575, 150);
+  s = await state();
+  check('a cut that ends inside the mask stays pending: no new mask, no new ID',
+    field(s.status, 'masks') === '6' && (await polygonsNow()).filter((p) => p.label === 'r2').length === 1 && /đường chờ/.test(s.message), `${s.status} | ${s.message}`);
+  for (const [x, y] of [[575, 150], [605, 150]]) await clickImage(x, y);
+  await doubleClickImage(605, 150);
+  s = await state();
+  const r2Split = (await polygonsNow()).filter((p) => p.label === 'r2');
+  check('a second cut joining the pending one separates the mask: two masks, distinct IDs, original ID kept by one',
+    field(s.status, 'masks') === '7' && r2Split.length === 2 && r2Split[0].id !== r2Split[1].id && r2Split.some((p) => p.id === '1'), `${s.status} | ${JSON.stringify(r2Split)} | ${s.message}`);
+  await ctrl('z'); await sleep(300);
+  check('undo restores the mask split by combined cuts', (await evaluate(masksOf)) === 6);
   await clickSelector('button[data-tool=select]'); await sleep(300);
   await clickButtonText('Check PNG'); await sleep(500);
   s = await state();

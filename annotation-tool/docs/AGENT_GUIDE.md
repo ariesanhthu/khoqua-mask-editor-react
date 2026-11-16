@@ -137,6 +137,7 @@ Nguồn: [Cloudflare MCP servers](https://developers.cloudflare.com/agents/model
 - Timer 30 giây chỉ ghi IndexedDB; heartbeat 30s và polling 8s không phải đồng bộ annotation.
 - `snapshot.breakpoints` trong workspace mang point **u vấu**; dữ liệu breakpoint legacy nằm ở `legacyBreakpointsRef`/`annotation.breakpoints`. Không đổi tên, không trộn.
 - Export lọc DRAFT *và* DONE (bug cũ chỉ lấy DONE khiến Drive trống).
+- Ngoại lệ được yêu cầu 2026-11-16: **gói riêng ảnh hoàn tất** (`/export/completed`) chỉ lấy annotation hiện tại DONE và áp dụng `FILE_ACCESS_SQL`; không đổi bộ lọc ZIP đầy đủ/Drive. Gói mới không vector hóa raster/reset cũ; thiếu vector phải báo rõ.
 - Annotation chồng lấn/lỗ/vùng 1px phải giữ nguyên; không simplify hay antialias khi rasterize (tâm pixel, evenodd).
 - Đổi tool/selection không được gọi `fit()` hay reset zoom.
 - `/api/health` chỉ kiểm cờ cấu hình, có thể 503 khi cố ý chạy PGlite/filesystem; không đủ kết luận DB hỏng.

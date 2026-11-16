@@ -6,6 +6,8 @@ Kiến trúc và backlog: [ARCHITECTURE.md](ARCHITECTURE.md). Bản cập nhật
 
 ## Pipeline dữ liệu
 
+Home (2026-11-16): nút **Tải ảnh hoàn tất** cạnh **Tải ZIP về máy**, mọi vai trò đều dùng được. Server chọn annotation hiện tại `DONE` trong các nhóm có quyền xem, không dựa vào bộ lọc/phân trang Home hoặc version lịch sử. Gói nhẹ có `images/` (nguyên byte ảnh gốc), `coco.json` (RLE độc lập như ZIP hiện có, giữ lỗ/chồng lấn) và `polygons/*.json` (nodes/holes/ID/label/meta nguyên vẹn). Không đọc prediction/raster để tự tạo polygon; ảnh hoàn tất cũ chưa có polygon hiện hành phải báo rõ thay vì xuất annotation rỗng sai. `POLYGON_SET` rỗng đã lưu là hợp lệ. Nút báo tiến trình/lỗi tại Home; không ghi DB/Blob/Drive, không đổi nút ZIP đầy đủ hoặc save/lock.
+
 1. API editor trả ảnh, prediction mask, revision và annotation hiện tại.
 2. Trình duyệt tải đồng thời các asset theo URL có phiên bản crop. Annotation đã lưu được đọc nguyên vẹn; không tự vector hóa lại khi mở hoặc tải ZIP.
 3. `EditorCanvas` giữ zoom, pan, polygon, node và selection trong `ref`; pointer-move chỉ vẽ lại canvas qua `requestAnimationFrame`. Bốn lớp canvas (từ 2026-11-12; bỏ lớp nét brush và vòng cọ), mỗi lớp có cờ bẩn riêng (chi tiết và số đo: [EDITOR_RENDERING.md](EDITOR_RENDERING.md)): `stage` (ảnh gốc, chỉ vẽ lại khi đổi view/kích thước; thu nhỏ thì lấy từ image pyramid), `raster-mask-layer`, `vector-layer` (kéo node chỉ thay dirty rectangle qua back buffer; gợi ý neo), `draft-layer` (polygon đang vẽ P/Paint + khung chọn + đường tự hoàn thiện). Polygon bất biến giữ cache Path2D/bounds/LOD; chỉ hiện node của polygon đã chọn (handle vẽ gộp thành 2 path). Lớp tô polygon dùng `fill(Path2D)` có khử răng cưa; raster nhị phân cho export chỉ dựng lại khi cần (`ensureMaskRaster`, chỉ trong hình chữ nhật pixel của polygon).
@@ -119,12 +121,14 @@ Chưa thử thao tác tay trên thiết bị thật; số đo dữ liệu thật
 - **(−) trừ**:
   - Trừ khỏi mọi mask không khóa mà polygon chồng lên. Ở giữa thì thành lỗ.
   - Cắt đôi thì mảnh lớn giữ id, mảnh còn lại là mask riêng cùng nhãn. Trừ hết thì xóa mask.
-  - **Đường cắt 2 điểm (người dùng xác nhận 2026-11-16)**: bản nháp có ĐÚNG 2 điểm thì Enter/nhấp đúp/nút Áp dụng
-    TÁCH mask mà đường xuyên qua làm hai mảnh cùng nhãn, mỗi mảnh nhận thêm điểm tại hai giao với biên (hai điểm
-    chấm thường được neo sẵn lên biên). Dùng chung lõi với công cụ cắt (`resolvePolygonCut`): đường phải qua biên
-    đúng 2 lần; qua nhiều mask thì lấy mask duy nhất đang chọn, không thì báo chọn; mask khóa không bị tách.
-    Lỗ đi theo mảnh chứa nó, đường cắt chạm lỗ thì từ chối và gợi ý vẽ polygon trừ kín (sửa chung
-    `splitPolygonWithCut` 2026-11-16 — trước đó cả công cụ cắt cũng làm rơi lỗ im lặng).
+  - Mask tự chạm/tự cắt (≈26 % polygon prelabel vector hóa) gần vùng vẽ **không còn chặn thao tác**: Paint dùng hình học đã sửa (`maskClipGeometry`). Trước 2026-11-16 chỉ cần một mask như vậy nằm gần là báo "Biên mask … không hợp lệ" và bản nháp không bao giờ áp dụng được (đo: 52 % lần trừ trên dữ liệu thật bị từ chối — đây là lỗi "không hoàn tất được polygon ở chế độ trừ").
+  - **Đường cắt 2 điểm = TÁCH mask (spec người dùng 2026-11-16, code `src/lib/mask-cut.ts`)**: bản nháp có ĐÚNG 2 điểm thì áp dụng (nhấp đúp lên điểm / Enter / nút) không trừ diện tích mà chia mask:
+    - Hai đầu trên biên (neo sẵn, hoặc lệch trong dung sai thì được đưa về biên): mask thành hai mask độc lập, **không khe hở** — đường cắt là biên chung, mỗi mảnh có đỉnh riêng cùng tọa độ tại hai giao điểm; tổng diện tích giữ nguyên.
+    - Đường qua mask lõm cắt biên 4, 6… lần chia thành 3, 4… mask trong một lần.
+    - **Chỉ cấp ID mới khi mask thực sự bị chia** (theo cấu trúc liên thông, không theo số đường cắt): đường kết thúc giữa mask không tạo mask/ID mới mà thành **đường chờ** (nét đỏ đứt, giữ trong phiên). Mỗi đường mới được đánh giá cùng toàn bộ đường chờ trên một đồ thị (đỉnh = giao với biên, giao giữa các đường, đầu mút; cạnh = đoạn trong mask): có đường đi nối hai đỉnh biên khác nhau thì tách dọc đường đó, lặp lại; phần đường thừa tiếp tục chờ trên mảnh chứa nó. Esc khi không có bản nháp bỏ các đường chờ.
+    - **ID**: mảnh lớn nhất giữ id gốc, các mảnh khác nhận id mới (cơ chế `createId` sẵn có); nhãn/meta giữ nguyên (quyết định của agent theo rule 2026-11-12 "mảnh tách cùng nhãn" — nếu cần nhãn mới cho mảnh tách thì đổi một dòng).
+    - Mask đích: mask đang chọn trong số bị cắt; không chọn thì mask mà đường nằm trong nhiều nhất (quyết định của agent — prelabel thật là mosaic chồng mép, báo "nhiều mask" như công cụ cắt sẽ chặn gần như mọi lần). Mask khác giữ nguyên tham chiếu; mask khóa không bị tách.
+    - Giới hạn (báo rõ, không làm tạm): đường chờ **không được lưu** (mô hình polygon không biểu diễn được khe rộng 0) và không vào undo; đường cắt chạm **lỗ** của mask bị từ chối (lõi `splitPolygonWithCut` chưa tách qua vòng lỗ; lỗ đi theo mảnh chứa nó khi đường không chạm lỗ).
   - Không chồng mask nào: báo, giữ bản nháp. Lỗi clipping: báo, không đổi gì.
 - **Phím** (ở mọi công cụ trong bước Vùng chọn, như B/E): `=` / `+` / B → Paint (+); `-` / E → Paint (−).
 - **Icon**: thanh chế độ có icon riêng (`paint-mode-icon.tsx`: đa giác + dấu ＋/−) kèm phím ngay trên nút. Nút Paint trên thanh công cụ đổi icon theo chế độ. Bản nháp (−) màu đỏ.

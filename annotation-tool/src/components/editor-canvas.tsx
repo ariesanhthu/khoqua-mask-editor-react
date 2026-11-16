@@ -24,6 +24,7 @@ import { labelColor } from '@/lib/label-colors';
 import { nextLabel, semanticForLabelKind, type PolygonLabelKind } from '@/lib/polygon-labels';
 import { clipPolygonDifference, clonePolygons, computeSmoothNodeDisplacements, createCirclePolygon, createRectanglePolygon, drawSmoothClosedPath, explainAutoAnchorPath, findEnclosedPocketAtPoint, getSmoothSegmentControlPoints, insertNodeAtEdge, mergePolygonsIntoSingle, nearestMagnetVertex, pointInMask, polygonRings, resolvePolygonCut, type AutoAnchorResult } from '@/lib/polygon-geometry';
 import { applyAnchor, findAnchorTarget, type AnchorTarget, type CompletionFailure } from '@/lib/mask-anchor';
+import type { CutSegment } from '@/lib/mask-cut';
 import { planNodeAnchorDrag, type NodeAnchorPlan } from '@/lib/node-anchor';
 import { applyPolygonPaint, type PaintMode } from '@/lib/polygon-paint';
 import { PolygonDraft } from '@/lib/polygon-draft';
@@ -408,6 +409,12 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
    * không — khi đó `retouches` mới bằng 1. Trước đây chặn theo 600 ms nên nhấp đúp lên điểm vừa vẽ không ăn.
    */
   const lastAddedDraftPointRef = useRef<{ id: string; time: number; retouches: number } | null>(null);
+  /**
+   * Đường cắt CHỜ của Paint (−), theo id mask (spec người dùng 2026-11-16, Rule 3): đường 2 điểm chưa chia được mask
+   * không tạo ID mới mà được giữ ở đây; mỗi đường mới được đánh giá cùng toàn bộ đường chờ (mask-cut.ts). Chỉ sống
+   * trong phiên chỉnh sửa — mô hình polygon không lưu được khe hở rộng 0; Esc (khi không có bản nháp) bỏ hết.
+   */
+  const pendingCutsRef = useRef<Map<string, CutSegment[]>>(new Map());
   const magnetRef = useRef(magnet);
   // Điểm của mask khác mà node đang kéo đã dính vào (magnet), vẽ vòng chỉ báo trên lớp draft.
   const magnetTargetRef = useRef<ImagePoint | null>(null);
@@ -592,7 +599,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (!layer || !context) return;
     const draft = draftRef.current.nodes;
     const marquee = marqueeRef.current;
-    if (!draft.length && !marquee && !magnetTargetRef.current && !nodeAnchorPreviewRef.current && !anchorHoverRef.current && !enclosedPocketHoverRef.current && !snapTargetRef.current && !cutPathRef.current.length && !['rectangle', 'circle'].includes(pointerRef.current?.mode ?? '')) {
+    if (!draft.length && !marquee && !pendingCutsRef.current.size && !magnetTargetRef.current && !nodeAnchorPreviewRef.current && !anchorHoverRef.current && !enclosedPocketHoverRef.current && !snapTargetRef.current && !cutPathRef.current.length && !['rectangle', 'circle'].includes(pointerRef.current?.mode ?? '')) {
       // Nothing to show: clear once, then skip until something is drawn again.
       if (draftLayerDrawnRef.current) { context.setTransform(1, 0, 0, 1, 0, 0); context.clearRect(0, 0, layer.width, layer.height); }
       draftLayerDrawnRef.current = false;
@@ -921,6 +928,24 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         context.fillText(text, bx + 4 / view.scale, by - 4 / view.scale);
       }
       context.restore();
+    }
+
+    // Đường cắt chờ của Paint (−): nét đỏ đứt trên mask còn tồn tại (mask đã mất thì đường của nó không vẽ).
+    if (pendingCutsRef.current.size) {
+      const alive = new Set(polygonsRef.current.map((polygon) => polygon.id));
+      context.beginPath();
+      for (const [polygonId, segments] of pendingCutsRef.current) {
+        if (!alive.has(polygonId)) continue;
+        for (const segment of segments) {
+          context.moveTo(segment.a.x, segment.a.y);
+          context.lineTo(segment.b.x, segment.b.y);
+        }
+      }
+      context.setLineDash([6 / view.scale, 4 / view.scale]);
+      context.lineWidth = 2 / view.scale;
+      context.strokeStyle = ERASE_COLOR;
+      context.stroke();
+      context.setLineDash([]);
     }
 
     const magnetTarget = magnetTargetRef.current;
@@ -1981,6 +2006,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       selectedIds: selectedPolygonIdsRef.current,
       newRegion: { label: nextLabel(polygonsRef.current, 'wart'), meta: { semantic: 'wart_flesh', source: 'human' } },
       bounds: { width, height },
+      pendingCuts: pendingCutsRef.current,
+      tolerance: 14 / viewRef.current.scale,
     });
     if ('error' in result) {
       onMessage(result.error);
@@ -1992,6 +2019,13 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     snapTargetRef.current = null;
     hoveredNodeRef.current = null;
     polygonHoverRef.current = null;
+    if (result.pendingCuts) pendingCutsRef.current = result.pendingCuts;
+    // Đường cắt chưa chia được mask: polygon không đổi (không ID mới, không bước history), chỉ giữ đường chờ.
+    if (result.polygons === polygonsRef.current) {
+      onMessage(result.message);
+      render();
+      return true;
+    }
     selectedNodeIdsRef.current.clear();
     selectedPolygonIdsRef.current = new Set(result.resultIds);
     if (!commitPolygons(result.polygons)) return false;
@@ -3241,6 +3275,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         event.preventDefault();
         completePolygon();
       } else if (event.key === 'Escape') {
+        if (!draftRef.current.nodes.length && pendingCutsRef.current.size) {
+          pendingCutsRef.current = new Map();
+          onMessage('Đã bỏ các đường cắt chờ.');
+        }
         cancelCurrentPath();
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault();
@@ -3252,7 +3290,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [applyCut, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, props.readOnly, redo, selectAllPolygons, tool, undo, updateSelectedPolygonLabel]);
+  }, [applyCut, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, onMessage, props.readOnly, redo, selectAllPolygons, tool, undo, updateSelectedPolygonLabel]);
 
   // Nhấn Shift khi đang vẽ (P/Paint): CHÈN ngay các điểm bám biên vào bản nháp, không hoàn tất mask (người dùng
   // xác nhận 2026-11-16: Shift = tự hoàn thiện đường viền, chỉ nhấp đúp lên điểm mới hoàn tất). Thả Shift giữ

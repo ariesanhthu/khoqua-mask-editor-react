@@ -201,6 +201,16 @@ export function projectExportDownloadUrl(projectId: string) {
   return `/api/projects/${encodeURIComponent(projectId)}/export`;
 }
 
+export async function getCompletedProjectExport(projectId: string): Promise<{ blob: Blob; filename: string }> {
+  const response = await fetch(`${projectExportDownloadUrl(projectId)}/completed`, { credentials: 'same-origin' });
+  if (!response.ok) {
+    const error: ApiError = await response.json().catch(() => ({ code: 'UNKNOWN', message: `Không thể tải ảnh hoàn tất (HTTP ${response.status}).` }));
+    throw error;
+  }
+  const filename = response.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] || 'completed.zip';
+  return { blob: await response.blob(), filename };
+}
+
 export interface GoogleDriveConnectionStatus {
   configured: boolean;
   connected: boolean;

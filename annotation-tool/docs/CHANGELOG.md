@@ -21,6 +21,28 @@ Mẫu một mục:
 
 ---
 
+## 2026-11-17 — Tải riêng ảnh hoàn tất kèm polygon/COCO JSON
+
+- **Người dùng xác nhận (2026-11-16):** nút cạnh Tải ZIP, dùng cho toàn bộ vai trò, chỉ ảnh hoàn tất kèm polygon COCO JSON và ảnh gốc; kiểm tra phụ thuộc/rule/context/test rồi deploy master; không thực hiện lại những phần đã có.
+- **Thay đổi:** nút **Tải ảnh hoàn tất** ở Home có trạng thái đang tạo ZIP và thông báo lỗi. Endpoint riêng `/api/projects/:projectId/export/completed`, service riêng lọc annotation hiện tại DONE trong quyền nhóm (vai trò từ DB), không dùng version lịch sử hay trạng thái/bộ lọc trên trình duyệt. Gói có `coco.json`, ảnh gốc nguyên byte và JSON polygon nguyên nodes/holes/ID/label/meta. Response stream ZIP; kiểm mọi asset trước khi gửi để không xuất gói thiếu dữ liệu.
+- **Tương thích:** ZIP đầy đủ, Drive DRAFT/DONE, lịch sử version, save/lock, IndexedDB, schema và dependency giữ nguyên. Dùng lại `cocoInstance`/`rasterizePolygons`; không tự vector hóa hoặc xuất polygon lỗi thời. Raster/reset cũ chưa có polygon hiện hành báo rõ ảnh cần lưu/Hoàn tất lại; polygon set rỗng đã lưu vẫn hợp lệ.
+- **Đã kiểm chứng trước release:** `npm run typecheck`, `npm test` **359 test / 36 file**, `npm run lint`, `npm run build` qua. 13 test mới: service/route trên PGlite memory + mock asset và client binary/lỗi HTTP/offline. Chrome headless trên DB/filesystem cô lập: cả ADMIN/ANNOTATOR/REVIEWER nhìn thấy nút cạnh ZIP, click tải thật và giải nén đúng DONE/ảnh/vector, lỗi hiện ở Home, nút được mở lại, không có request ghi dữ liệu/Drive hoặc runtime exception; xem ảnh desktop và mobile 390 px. `canvas-browser-check` **76/76** qua cho phần Trim đã tồn tại (giữ nguyên, không làm lại).
+- **Chưa kiểm chứng:** tải gói bằng tài khoản/dữ liệu production thật, tập ảnh lớn và thao tác tay trên thiết bị thật. Bộ kiểm local dùng dữ liệu giả; không đụng annotation/Blob/Drive production. Trạng thái deploy xác nhận riêng qua Vercel sau push master.
+- **Tài liệu:** ARCHITECTURE, EDITOR_PIPELINE, GROUND_TRUTH_EXPORT, AGENT_GUIDE, ENGINEERING_POLICY và CLAUDE.md.
+
+## 2026-11-16 (bổ sung 4) — Chế độ trừ (−): sửa "không hoàn tất được polygon", đường cắt tách mask + đường chờ
+
+- **Người dùng xác nhận (spec "Debug & Improve Polygon Trim Mode" 2026-11-16):** polygon trừ loại phần giao khỏi mask (một phần / thành lỗ / chia nhiều mảnh / xóa hết); đường 2 điểm trên biên chia mask không khe hở; chỉ cấp ID mới khi mask thực sự phân tách (đường chưa kín được giữ chờ, nhiều đường kết hợp mới tách); mảnh lớn nhất giữ ID; mask khác không đổi.
+- **Phase 1 — nguyên nhân "không hoàn tất được polygon ở chế độ trừ":** `applyPolygonPaint` từ chối cả thao tác khi BẤT KỲ mask nào gần vùng vẽ có `polygonGeometry` null (tự chạm/tự cắt, ≈26 % polygon prelabel thật). Đo trên `drive/prelabel-production` (chỉ đọc): **228/440 lần trừ (52 %) bị từ chối** → sau sửa **440/440**. Trang giả lập không lộ lỗi vì toàn mask hợp lệ. Sửa: dùng `maskClipGeometry` (hình học đã sửa), mask không có diện tích thì bỏ qua.
+- **Phase 2:** phép trừ đã hỗ trợ nhiều thành phần/lỗ từ trước; trên dữ liệu thật sau sửa: không mask ngoài vùng nào đổi, không trùng ID, diện tích không tăng.
+- **Phase 3–4 — `src/lib/mask-cut.ts` (mới):** đường cắt 2 điểm đánh giá trên đồ thị cùng các đường chờ; tách lặp theo đường đi nối hai đỉnh biên; mask lõm ra 3+ mảnh; đầu mút được đưa về biên/đường chờ trong dung sai; mảnh lớn nhất giữ id gốc. Dùng lại lõi `splitPolygonWithCut` (export thêm `segmentIntersection`). `polygon-paint` ủy quyền nhánh 2 điểm; canvas giữ `pendingCutsRef` (vẽ nét đỏ đứt, Esc bỏ), đường chờ không tạo bước history. Đo dữ liệu thật: **438/440 đường cắt tách được** (trước 402), diện tích bảo toàn 100 %, ID gốc luôn được giữ.
+- **Quyết định của agent:** nhãn/meta của mảnh tách giữ nguyên (id mới, nhãn cũ — theo rule 2026-11-12); mask đích khi đường qua nhiều mask = mask đang chọn, không thì mask chứa nhiều đường nhất; mask tự chạm khi bị trừ được tách tại điểm thắt (hai vùng chỉ chạm nhau một điểm vốn không liên thông về diện tích).
+- **Giới hạn báo rõ (ràng buộc 6 của spec):** đường chờ chỉ sống trong phiên (không lưu, không undo) vì mô hình polygon không biểu diễn được khe rộng 0; đường cắt chạm lỗ bị từ chối; công cụ cắt (kéo kéo) giữ hành vi cũ.
+- **Sửa test flaky phát hiện khi chuẩn bị deploy:** mốc 2 giây cứng trong `geometry-primitives.test.ts` → đo tỉ lệ 2 000/20 000 đỉnh; property test cửa sổ có timeout 60 s. Test `api-client` (gzip 20 000 node, có sẵn) vẫn có thể quá 20 s khi máy quá tải — không thuộc thay đổi này.
+- **Đã kiểm chứng:** 4 cổng xanh — **346 test / 35 file** (12 test `mask-cut`, 5 test mới trong `polygon-paint`); build qua; `canvas-browser-check` **76/76** (3 kiểm mới: đường dở giữ chờ không tạo mask, đường thứ hai nối vào mới tách và một mảnh giữ id gốc, undo).
+- **Chưa kiểm chứng:** thao tác tay trên editor thật với dữ liệu thật; lưu + tải lại sau khi tách (định dạng lưu không đổi — mảnh tách là polygon thường — nhưng chưa chạy qua DB).
+- **Tài liệu:** EDITOR_PIPELINE (Hợp đồng Paint, mục (−)), ARCHITECTURE (bảng file), baseline.
+
 ## 2026-11-16 (bổ sung 3) — Sidebar trái: minimap + công cụ hiển thị ảnh (độ sáng, làm rõ biên, đặt lại)
 
 - **Người dùng xác nhận (hỏi–đáp 2026-11-16):**

@@ -587,7 +587,8 @@ export function computeSmoothNodeDisplacements(
   });
 }
 
-function segmentIntersection(
+/** Giao của cạnh a→b với đoạn cắt c→d: `edgeT` trên cạnh, `cutT` trên đoạn cắt (dùng chung với mask-cut.ts). */
+export function segmentIntersection(
   a: Pick<PolygonNode, 'x' | 'y'>,
   b: Pick<PolygonNode, 'x' | 'y'>,
   c: Pick<PolygonNode, 'x' | 'y'>,
