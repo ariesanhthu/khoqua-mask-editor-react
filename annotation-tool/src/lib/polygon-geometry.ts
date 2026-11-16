@@ -1,19 +1,23 @@
 import type { AnnotationPolygon, AnnotationPolygonMeta, PolygonNode } from '@/types';
 import polygonClipping from 'polygon-clipping';
+import {
+  EPSILON, GEOMETRY_EPSILON, boundsOverlap, cachedPolygonBounds, closestPointOnPolygon, closestPointOnSegment,
+  createId, differenceGeometries, geometryComponents, intersectionGeometries, normalizeRing, pathDistanceToDraft,
+  pointInPolygon, pointOnSegment, polygonArea, polygonGeometry, polygonRings, ringArea, ringBounds,
+  segmentsIntersect, unionClipInputs, unionGeometries,
+  type GeometryMultiPolygon, type GeometryPoint, type GeometryPolygon, type GeometryRing,
+} from './geometry-primitives';
+import { findCompletionRoute, type AnchorTarget, type CompletionFailure } from './mask-anchor';
 
-const EPSILON = 1e-6;
-const GEOMETRY_EPSILON = 1e-6;
+// Tên public cũ, nay nằm trong geometry-primitives.ts (2026-11-12): giữ nguyên API cho canvas/test.
+export { closestPointOnPolygon, closestPointOnSegment, pathDistanceToDraft, pointInMask, pointInPolygon, polygonArea, polygonRings } from './geometry-primitives';
+
 const MIN_BRIDGE_WIDTH = 2;
 const MAX_BRIDGE_WIDTH = 8;
-const MIN_REGION_AREA = 1e-6;
 const BRUSH_UNION_CHUNK = 8;
 const BRUSH_MIN_SPACING = 0.1;
 const BRUSH_MAX_SAMPLES = 400;
 
-type GeometryPoint = [number, number];
-type GeometryRing = GeometryPoint[];
-type GeometryPolygon = GeometryRing[];
-type GeometryMultiPolygon = GeometryPolygon[];
 
 export interface MergePolygonsResult {
   polygon?: AnnotationPolygon;
@@ -34,86 +38,7 @@ export interface SplitPolygonResult {
   error?: string;
 }
 
-const createId = () => crypto.randomUUID();
 const distance = (a: Pick<PolygonNode, 'x' | 'y'>, b: Pick<PolygonNode, 'x' | 'y'>) => Math.hypot(a.x - b.x, a.y - b.y);
-
-const pointsEqual = (a: GeometryPoint, b: GeometryPoint) => Math.hypot(a[0] - b[0], a[1] - b[1]) <= GEOMETRY_EPSILON;
-
-function ringArea(ring: GeometryRing): number {
-  let area = 0;
-  for (let index = 0; index < ring.length; index += 1) {
-    const current = ring[index];
-    const next = ring[(index + 1) % ring.length];
-    area += current[0] * next[1] - next[0] * current[1];
-  }
-  return area / 2;
-}
-
-function orientation(a: GeometryPoint, b: GeometryPoint, c: GeometryPoint): number {
-  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-}
-
-function pointOnSegment(point: GeometryPoint, start: GeometryPoint, end: GeometryPoint): boolean {
-  return Math.abs(orientation(start, end, point)) <= GEOMETRY_EPSILON
-    && point[0] >= Math.min(start[0], end[0]) - GEOMETRY_EPSILON
-    && point[0] <= Math.max(start[0], end[0]) + GEOMETRY_EPSILON
-    && point[1] >= Math.min(start[1], end[1]) - GEOMETRY_EPSILON
-    && point[1] <= Math.max(start[1], end[1]) + GEOMETRY_EPSILON;
-}
-
-function segmentsIntersect(a: GeometryPoint, b: GeometryPoint, c: GeometryPoint, d: GeometryPoint): boolean {
-  const abC = orientation(a, b, c);
-  const abD = orientation(a, b, d);
-  const cdA = orientation(c, d, a);
-  const cdB = orientation(c, d, b);
-  if (((abC > GEOMETRY_EPSILON && abD < -GEOMETRY_EPSILON) || (abC < -GEOMETRY_EPSILON && abD > GEOMETRY_EPSILON))
-    && ((cdA > GEOMETRY_EPSILON && cdB < -GEOMETRY_EPSILON) || (cdA < -GEOMETRY_EPSILON && cdB > GEOMETRY_EPSILON))) return true;
-  return (Math.abs(abC) <= GEOMETRY_EPSILON && pointOnSegment(c, a, b))
-    || (Math.abs(abD) <= GEOMETRY_EPSILON && pointOnSegment(d, a, b))
-    || (Math.abs(cdA) <= GEOMETRY_EPSILON && pointOnSegment(a, c, d))
-    || (Math.abs(cdB) <= GEOMETRY_EPSILON && pointOnSegment(b, c, d));
-}
-
-function ringSelfIntersects(ring: GeometryRing): boolean {
-  for (let first = 0; first < ring.length; first += 1) {
-    const firstNext = (first + 1) % ring.length;
-    for (let second = first + 1; second < ring.length; second += 1) {
-      const secondNext = (second + 1) % ring.length;
-      if (first === second || firstNext === second || secondNext === first) continue;
-      if (segmentsIntersect(ring[first], ring[firstNext], ring[second], ring[secondNext])) return true;
-    }
-  }
-  return false;
-}
-
-function normalizeRing(nodes: Array<Pick<PolygonNode, 'x' | 'y'> | GeometryPoint>): GeometryRing | null {
-  const coordinates = nodes.map((node): GeometryPoint => Array.isArray(node) ? [node[0], node[1]] : [node.x, node.y]);
-  if (coordinates.length < 3 || coordinates.some(([x, y]) => !Number.isFinite(x) || !Number.isFinite(y))) return null;
-  let ring: GeometryRing = coordinates;
-  if (ring.length > 1 && pointsEqual(ring[0], ring[ring.length - 1])) ring = ring.slice(0, -1);
-  ring = ring.filter((point, index) => index === 0 || !pointsEqual(point, ring[index - 1]));
-  if (ring.length > 1 && pointsEqual(ring[0], ring[ring.length - 1])) ring.pop();
-
-  let changed = true;
-  while (changed && ring.length >= 3) {
-    changed = false;
-    ring = ring.filter((current, index) => {
-      const previous = ring[(index - 1 + ring.length) % ring.length];
-      const next = ring[(index + 1) % ring.length];
-      const base = Math.hypot(next[0] - previous[0], next[1] - previous[1]);
-      const collinear = Math.abs(orientation(previous, current, next)) <= GEOMETRY_EPSILON * Math.max(1, base);
-      const between = (current[0] - previous[0]) * (current[0] - next[0])
-        + (current[1] - previous[1]) * (current[1] - next[1]) <= GEOMETRY_EPSILON;
-      if (pointsEqual(previous, current) || (collinear && between)) {
-        changed = true;
-        return false;
-      }
-      return true;
-    });
-  }
-  if (ring.length < 3 || Math.abs(ringArea(ring)) <= GEOMETRY_EPSILON || ringSelfIntersects(ring)) return null;
-  return ring;
-}
 
 function convexHull(points: GeometryRing): GeometryRing {
   const unique = [...new Map(points
@@ -216,28 +141,6 @@ function createBridge(pointA: { x: number; y: number }, pointB: { x: number; y: 
     [endX - normalX, endY - normalY],
     [startX - normalX, startY - normalY],
   ]];
-}
-
-function unionGeometries(geometries: GeometryPolygon[]): GeometryMultiPolygon {
-  const union = polygonClipping.union as unknown as (...items: GeometryPolygon[]) => GeometryMultiPolygon;
-  return union(...geometries);
-}
-
-type ClipInput = GeometryPolygon | GeometryMultiPolygon;
-
-function differenceGeometries(subject: ClipInput, clip: ClipInput): GeometryMultiPolygon {
-  const difference = polygonClipping.difference as unknown as (first: ClipInput, ...rest: ClipInput[]) => GeometryMultiPolygon;
-  return difference(subject, clip);
-}
-
-function unionClipInputs(items: ClipInput[]): GeometryMultiPolygon {
-  const union = polygonClipping.union as unknown as (first: ClipInput, ...rest: ClipInput[]) => GeometryMultiPolygon;
-  return union(items[0], ...items.slice(1));
-}
-
-function intersectionGeometries(subject: ClipInput, clip: ClipInput): GeometryMultiPolygon {
-  const intersection = polygonClipping.intersection as unknown as (first: ClipInput, ...rest: ClipInput[]) => GeometryMultiPolygon;
-  return intersection(subject, clip);
 }
 
 export function mergePolygonsIntoSingle(polygons: AnnotationPolygon[]): MergePolygonsResult {
@@ -684,28 +587,6 @@ export function computeSmoothNodeDisplacements(
   });
 }
 
-export function polygonArea(nodes: Array<Pick<PolygonNode, 'x' | 'y'>>): number {
-  let area = 0;
-  for (let index = 0; index < nodes.length; index += 1) {
-    const current = nodes[index];
-    const next = nodes[(index + 1) % nodes.length];
-    area += current.x * next.y - next.x * current.y;
-  }
-  return area / 2;
-}
-
-export function pointInPolygon(point: Pick<PolygonNode, 'x' | 'y'>, nodes: PolygonNode[]): boolean {
-  let inside = false;
-  for (let index = 0, previous = nodes.length - 1; index < nodes.length; previous = index, index += 1) {
-    const a = nodes[index];
-    const b = nodes[previous];
-    const crosses = (a.y > point.y) !== (b.y > point.y)
-      && point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y || EPSILON) + a.x;
-    if (crosses) inside = !inside;
-  }
-  return inside;
-}
-
 function segmentIntersection(
   a: Pick<PolygonNode, 'x' | 'y'>,
   b: Pick<PolygonNode, 'x' | 'y'>,
@@ -796,10 +677,28 @@ export function splitPolygonWithCut(polygon: AnnotationPolygon, cutPath: Polygon
     return { error: 'Đường cắt tạo ra một vùng quá nhỏ hoặc không hợp lệ.' };
   }
 
+  // Lỗ đi theo mảnh chứa nó (2026-11-16; trước đây bị bỏ rơi im lặng). Đường cắt chạm một lỗ thì từ chối:
+  // tách một vòng có lỗ ở giữa cần phép hình học khác (Paint (−) polygon kín vẫn làm được việc đó).
+  const firstHoles: PolygonNode[][] = [];
+  const secondHoles: PolygonNode[][] = [];
+  for (const hole of polygon.holes ?? []) {
+    for (let index = 0; index < hole.length; index += 1) {
+      const start = hole[index];
+      const end = hole[(index + 1) % hole.length];
+      for (let segment = 0; segment < cutPath.length - 1; segment += 1) {
+        if (segmentIntersection(start, end, cutPath[segment], cutPath[segment + 1])) {
+          return { error: 'Đường cắt đi qua một lỗ của mask. Hãy cắt tránh lỗ, hoặc vẽ polygon trừ (−) kín.' };
+        }
+      }
+    }
+    const copy = hole.map((node) => ({ ...node, id: createId() }));
+    if (pointInPolygon(hole[0], firstNodes)) firstHoles.push(copy); else secondHoles.push(copy);
+  }
+
   return {
     polygons: [
-      { id: createId(), label: polygon.label, nodes: firstNodes, meta: { ...polygon.meta, source: 'human' } },
-      { id: createId(), label: polygon.label, nodes: secondNodes, meta: { ...polygon.meta, source: 'human' } },
+      { id: createId(), label: polygon.label, nodes: firstNodes, ...(firstHoles.length ? { holes: firstHoles } : {}), meta: { ...polygon.meta, source: 'human' } },
+      { id: createId(), label: polygon.label, nodes: secondNodes, ...(secondHoles.length ? { holes: secondHoles } : {}), meta: { ...polygon.meta, source: 'human' } },
     ],
   };
 }
@@ -817,14 +716,20 @@ export function resolvePolygonCut(
     return { ...splitPolygonWithCut(target, cutPath), targetId: target.id };
   }
   let candidate: (SplitPolygonResult & { targetId: string }) | undefined;
+  // Đường có chạm một polygon nhưng bị từ chối (qua lỗ, vùng quá nhỏ, cùng một cạnh…): giữ lý do đó thay vì
+  // câu "chưa nhận diện được" chung chung (2026-11-16, khi đường cắt 2 điểm dùng cả trong Paint (−)).
+  let blockedReason: string | undefined;
   for (const polygon of polygons) {
     if (polygon.meta?.locked) continue;
     const result = splitPolygonWithCut(polygon, cutPath);
-    if (!result.polygons) continue;
+    if (!result.polygons) {
+      if (result.error && !result.error.includes('(hiện có 0)')) blockedReason ??= result.error;
+      continue;
+    }
     if (candidate) return { error: 'Đường cắt đi qua nhiều polygon. Chuột phải chọn một polygon, rồi nhấn Enter để cắt.' };
     candidate = { ...result, targetId: polygon.id };
   }
-  return candidate ?? { error: 'Chưa nhận diện được polygon để tách. Kéo qua hai biên hoặc chuột phải chọn polygon, rồi nhấn Enter.' };
+  return candidate ?? { error: blockedReason ?? 'Chưa nhận diện được polygon để tách. Kéo qua hai biên hoặc chuột phải chọn polygon, rồi nhấn Enter.' };
 }
 
 // ─── Brush (bút vẽ / tẩy) ───────────────────────────────
@@ -861,52 +766,6 @@ const BRUSH_ATTEMPTS: BrushAttempt[] = [
   { phase: 0.43, grid: 1 / 16, segments: 12 },
   { phase: 0.07, grid: 0, segments: 20 },
 ];
-
-type GeometryBounds = { left: number; right: number; top: number; bottom: number };
-
-function ringBounds(ring: GeometryRing): GeometryBounds {
-  return ring.reduce<GeometryBounds>((result, [x, y]) => ({
-    left: Math.min(result.left, x),
-    right: Math.max(result.right, x),
-    top: Math.min(result.top, y),
-    bottom: Math.max(result.bottom, y),
-  }), { left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity });
-}
-
-function boundsOverlap(a: GeometryBounds, b: GeometryBounds): boolean {
-  return a.right >= b.left && a.left <= b.right && a.bottom >= b.top && a.top <= b.bottom;
-}
-
-/** Validate every brush boundary without replacing the shape with a convex hull. */
-const geometryCache = new WeakMap<AnnotationPolygon, GeometryPolygon | null>();
-const geometryBoundsCache = new WeakMap<AnnotationPolygon, GeometryBounds>();
-function cachedPolygonBounds(polygon: AnnotationPolygon): GeometryBounds {
-  const cached = geometryBoundsCache.get(polygon);
-  if (cached) return cached;
-  const bounds = ringBounds(polygon.nodes.map((node) => [node.x, node.y]));
-  geometryBoundsCache.set(polygon, bounds);
-  return bounds;
-}
-function polygonGeometry(polygon: AnnotationPolygon): GeometryPolygon | null {
-  if (geometryCache.has(polygon)) return geometryCache.get(polygon)!;
-  const rings = polygonRings(polygon).map((nodes) => normalizeRing(nodes));
-  const geometry = rings.some((ring) => !ring) ? null : rings as GeometryPolygon;
-  geometryCache.set(polygon, geometry);
-  return geometry;
-}
-
-export function polygonRings(polygon: AnnotationPolygon): PolygonNode[][] {
-  return [polygon.nodes, ...(polygon.holes ?? [])];
-}
-
-export function pointInMask(point: Pick<PolygonNode, 'x' | 'y'>, polygon: AnnotationPolygon): boolean {
-  return pointInPolygon(point, polygon.nodes)
-    && !(polygon.holes ?? []).some((ring) => pointInPolygon(point, ring));
-}
-
-function ringToNodes(ring: GeometryRing): PolygonNode[] {
-  return ring.map(([x, y]) => ({ id: createId(), x, y }));
-}
 
 /** Hợp theo từng cụm nhỏ rồi hợp tiếp các cụm: nhanh hơn nhiều lần một lời gọi phẳng. */
 function chunkedUnion(pieces: GeometryMultiPolygon[]): GeometryMultiPolygon {
@@ -994,17 +853,6 @@ function brushStrokeGeometry(
   ]]);
 }
 
-// Preserve both the outer boundary and every unpainted inner boundary.
-function brushComponents(components: GeometryMultiPolygon) {
-  return components.flatMap((component) => {
-    const rings = component.map((ring) => normalizeRing(ring));
-    if (rings.some((ring) => !ring)) throw new Error('Invalid clipping result');
-    const [outer, ...holes] = rings as GeometryRing[];
-    if (Math.abs(ringArea(outer)) < MIN_REGION_AREA) return [];
-    return [{ nodes: ringToNodes(outer), ...(holes.length ? { holes: holes.map(ringToNodes) } : {}) }];
-  });
-}
-
 function resolveBrushStroke(
   polygons: AnnotationPolygon[],
   geometries: Array<GeometryPolygon | null>,
@@ -1018,7 +866,7 @@ function resolveBrushStroke(
     const resultIds: string[] = [];
     const next = polygons.flatMap((polygon, index) => {
       if (!directlyTouched[index]) return [polygon];
-      return brushComponents(differenceGeometries(geometries[index]!, stroke)).map((shape) => {
+      return geometryComponents(differenceGeometries(geometries[index]!, stroke)).map((shape) => {
         const created = { ...shape, id: createId(), label: polygon.label, meta: { ...polygon.meta, source: 'human' as const } };
         resultIds.push(created.id);
         return created;
@@ -1056,7 +904,7 @@ function resolveBrushStroke(
     : newRegion;
   // Exact local union, including all inner rings. No hull, bridge or hole filling.
   const geometry = chunkedUnion([stroke, ...affectedIndexes.map((index) => [geometries[index]!])]);
-  const created = brushComponents(geometry).map((shape): AnnotationPolygon => ({
+  const created = geometryComponents(geometry).map((shape): AnnotationPolygon => ({
     ...shape, id: createId(), label: template.label, meta: { ...template.meta, source: 'human' },
   }));
   if (!created.length) return { error: 'Nét vẽ quá nhỏ để tạo vùng mới.' };
@@ -1122,29 +970,6 @@ export function applyBrushStroke(
     }
   }
   return { error: 'Không xử lý được nét vẽ này. Hãy vẽ lại một nét ngắn hơn.' };
-}
-
-export function closestPointOnSegment(
-  point: { x: number; y: number },
-  start: { x: number; y: number },
-  end: { x: number; y: number },
-): { point: { x: number; y: number }; distance: number; projection: number } {
-  const segmentX = end.x - start.x;
-  const segmentY = end.y - start.y;
-  const lengthSquared = segmentX * segmentX + segmentY * segmentY;
-  if (lengthSquared <= 1e-12) {
-    return { point: { ...start }, distance: Math.hypot(point.x - start.x, point.y - start.y), projection: 0 };
-  }
-  const projection = Math.max(0, Math.min(1, ((point.x - start.x) * segmentX + (point.y - start.y) * segmentY) / lengthSquared));
-  const projectedPoint = {
-    x: Math.round((start.x + projection * segmentX) * 10) / 10,
-    y: Math.round((start.y + projection * segmentY) * 10) / 10,
-  };
-  return {
-    point: projectedPoint,
-    distance: Math.hypot(point.x - projectedPoint.x, point.y - projectedPoint.y),
-    projection,
-  };
 }
 
 export interface SnapTarget {
@@ -1356,55 +1181,6 @@ export function getSharedBoundaryAutofillPath(
   return lenForward <= lenBackward ? pathForward : pathBackward;
 }
 
-/**
- * Calculates the average distance from sample points along a candidate boundary path to draftNodes.
- * Used to select the closest boundary ("biên gần nhất") to the user's drawing.
- */
-export function pathDistanceToDraft(
-  path: Array<{ x: number; y: number }>,
-  startPoint: { x: number; y: number },
-  endPoint: { x: number; y: number },
-  draftNodes: Array<{ x: number; y: number }>,
-): number {
-  if (!draftNodes || draftNodes.length < 2) return 0;
-
-  const candidateNodes = [endPoint, ...path, startPoint];
-  const samplePoints: Array<{ x: number; y: number }> = [];
-
-  for (const p of path) {
-    samplePoints.push(p);
-  }
-
-  for (let i = 0; i < candidateNodes.length - 1; i += 1) {
-    const a = candidateNodes[i];
-    const b = candidateNodes[i + 1];
-    const segLen = Math.hypot(b.x - a.x, b.y - a.y);
-    samplePoints.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
-    if (segLen > 15) {
-      samplePoints.push({ x: a.x + 0.25 * (b.x - a.x), y: a.y + 0.25 * (b.y - a.y) });
-      samplePoints.push({ x: a.x + 0.75 * (b.x - a.x), y: a.y + 0.75 * (b.y - a.y) });
-    }
-  }
-
-  if (samplePoints.length === 0) return 0;
-
-  let totalDist = 0;
-  for (const pt of samplePoints) {
-    let minDistToDraft = Infinity;
-    for (let j = 0; j < draftNodes.length - 1; j += 1) {
-      const d1 = draftNodes[j];
-      const d2 = draftNodes[j + 1];
-      const d = closestPointOnSegment(pt, d1, d2).distance;
-      if (d < minDistToDraft) {
-        minDistToDraft = d;
-      }
-    }
-    totalDist += minDistToDraft;
-  }
-
-  return totalDist / samplePoints.length;
-}
-
 export function polygonDistanceToDraft(
   polygon: AnnotationPolygon,
   draftNodes: Array<{ x: number; y: number }>,
@@ -1536,27 +1312,6 @@ export function getConnectedPolygonCluster(
   }
 
   return allPolygons.filter((p) => visited.has(p.id));
-}
-
-export function closestPointOnPolygon(
-  polygon: AnnotationPolygon,
-  point: { x: number; y: number },
-): { point: { x: number; y: number }; edgeIndex: number; distance: number } {
-  let minD = Infinity;
-  let bestPoint = point;
-  let bestEdge = 0;
-  const n = polygon.nodes.length;
-  for (let i = 0; i < n; i += 1) {
-    const a = polygon.nodes[i];
-    const b = polygon.nodes[(i + 1) % n];
-    const cand = closestPointOnSegment(point, a, b);
-    if (cand.distance < minD) {
-      minD = cand.distance;
-      bestPoint = cand.point;
-      bestEdge = i;
-    }
-  }
-  return { point: bestPoint, edgeIndex: bestEdge, distance: minD };
 }
 
 export interface ExactUnionResult {
@@ -1835,13 +1590,11 @@ export function getCachedCollectivePolygon(polygons: AnnotationPolygon[]): Annot
   return null;
 }
 
-// ── Tự nối biên (auto anchor, giữ Shift khi vẽ polygon) ─────────────────────────────────────────────
-// Người dùng xác nhận 2026-11-07:
-// Dựa trên các mask có sẵn merge lại thành mask chung theo thành phần đồ thị liên thông (Connected Components)
-// để chỉ có 1 biên bao quanh tổng quát (outer boundary envelope).
-// Auto-fill bám tới phần biên ngoài cùng của mask chung đó.
-// Bảo toàn diện tích tuyệt đối (S_merged = S(A U B) = S_A + S_B - S_AB), không thêm diện tích, không bắc cầu qua khoảng trống.
-// Trong trường hợp các mask tạo thành Ring (có khoảng trống ở giữa), bảo toàn toàn bộ lỗ hổng ring, không auto-fill nội dung bên trong.
+// ── Tự hoàn thiện (giữ Shift khi vẽ polygon) ────────────────────────────────────────────────────────
+// Lõi nằm ở mask-anchor.ts (findCompletionRoute, người dùng xác nhận sửa 2026-11-12, giữ hướng gộp ảo
+// 2026-11-07): nhóm mask liền nhau theo ngưỡng cố định TOUCH_TOLERANCE (không theo zoom), đi trên vòng biên tự
+// do chứa điểm xuất phát (vòng ngoài hoặc khoảng trống bị bao kín), đích phải nằm trên mask dưới con trỏ, cache
+// theo mảng polygon. Hai hàm dưới đây chỉ là adapter giữ chữ ký cũ cho canvas và test.
 
 type FlatPoint = { x: number; y: number };
 
@@ -1849,12 +1602,18 @@ function finiteDraft(draftNodes: Array<{ x: number; y: number }>): FlatPoint[] {
   return draftNodes.filter((node) => Number.isFinite(node.x) && Number.isFinite(node.y)).map((node) => ({ x: node.x, y: node.y }));
 }
 
+function distanceToPolyline(point: FlatPoint, line: FlatPoint[]): number {
+  let best = Infinity;
+  for (let index = 0; index < line.length - 1; index += 1) {
+    best = Math.min(best, closestPointOnSegment(point, line[index], line[index + 1]).distance);
+  }
+  return best;
+}
+
 /**
- * Tự nối biên qua nhiều mask (findMultiPolygonAutofillPath):
- * Dựa trên các mask có sẵn, gộp (merge) lại thành mask chung theo thành phần liên thông
- * (kề nhau thì merge, tách rời nhau thì KHÔNG merge), tạo 1 biên bao quanh tổng quát.
- * Auto-fill bám theo biên ngoài cùng của mask chung đó.
- * Bảo toàn diện tích tuyệt đối: không tạo bridge, không xóa lỗ rỗng, diện tích trước và sau bằng nhau.
+ * Tự hoàn thiện khi khép polygon (bản 2026-10-30, nay chỉ test dùng): đường dọc biên tự do từ `endPoint` (điểm nháp
+ * cuối) về `startPoint` (điểm nháp đầu). Giữ luật chống đi vòng xa của 02d5c16: điểm nào của đường cách bản nháp
+ * quá xa (> max(3·tolerance, 50, 1.5·kích thước bản nháp) và > 100 px) thì bỏ cả đường.
  */
 export function findMultiPolygonAutofillPath(
   allPolygons: AnnotationPolygon[],
@@ -1863,106 +1622,28 @@ export function findMultiPolygonAutofillPath(
   draftNodes: Array<{ x: number; y: number }>,
   tolerance = 14,
 ): MultiPolygonAutofillResult | null {
-  if (!allPolygons || allPolygons.length === 0) return null;
+  if (!allPolygons?.length) return null;
   if (Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y) < 1.0) return null;
+  const draft = finiteDraft(draftNodes);
+  const result = findCompletionRoute({
+    polygons: allPolygons, from: endPoint, cursor: startPoint, tolerance, context: draft, closeTo: startPoint,
+  });
+  if ('failure' in result || !result.route.closesToStart) return null;
+  const { nodes, ownerIds } = result.route;
 
-  const startSnap = findBestSnapTarget(allPolygons, startPoint, tolerance, draftNodes);
-  const endSnap = findBestSnapTarget(allPolygons, endPoint, tolerance, draftNodes);
-  if (!startSnap || !endSnap) return null;
-
-  // Trường hợp cùng 1 polygon
-  if (startSnap.polygonId === endSnap.polygonId) {
-    const cluster = getConnectedPolygonCluster(allPolygons, [startSnap.polygonId], tolerance);
-    if (cluster.length > 1) {
-      const collective = getCollectiveBoundaryEnvelope(cluster);
-      if (collective) {
-        const dStart = closestPointOnPolygon(collective, startSnap.point).distance;
-        const dEnd = closestPointOnPolygon(collective, endSnap.point).distance;
-        if (dStart > tolerance || dEnd > tolerance) {
-          // Điểm nằm trên đường nối nội bộ (seam) giữa 2 mask, không có biên tự do
-          return null;
-        }
-      }
-    }
-
-    const singlePath = getSharedBoundaryAutofillPath(
-      startSnap.polygon,
-      startSnap.point,
-      endSnap.point,
-      draftNodes,
-    );
-    if (singlePath && singlePath.length >= 0) {
-      const enriched = enrichPathWithOriginalNodes([endSnap.point, ...singlePath, startSnap.point], [startSnap.polygon]);
-      return {
-        nodes: enriched.slice(1, -1),
-        targetPolygons: [startSnap.polygon],
-      };
-    }
-    return null;
+  if (draft.length >= 2) {
+    const xs = draft.map((point) => point.x);
+    const ys = draft.map((point) => point.y);
+    const extent = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    const maxAllowed = Math.max(tolerance * 3, 50, extent * 1.5);
+    if (nodes.some((node) => { const away = distanceToPolyline(node, draft); return away > maxAllowed && away > 100; })) return null;
   }
-
-  // Trường hợp nhiều polygon: chỉ merge nếu các mask kế nhau (cùng thành phần liên thông)
-  const chainIds = findTouchingChain(allPolygons, startSnap.polygonId, endSnap.polygonId, tolerance, draftNodes);
-  if (!chainIds || chainIds.length < 2) {
-    // Tách rời nhau: tuyệt đối không merge
-    return null;
-  }
-
-  const chainPolygons = chainIds
-    .map((id) => allPolygons.find((p) => p.id === id))
-    .filter((p): p is AnnotationPolygon => Boolean(p));
-
-  // Kiểm tra không đi đường vòng quá xa bản nháp
-  if (draftNodes && draftNodes.length >= 2) {
-    let draftLeft = Infinity, draftTop = Infinity, draftRight = -Infinity, draftBottom = -Infinity;
-    for (const p of draftNodes) {
-      draftLeft = Math.min(draftLeft, p.x);
-      draftTop = Math.min(draftTop, p.y);
-      draftRight = Math.max(draftRight, p.x);
-      draftBottom = Math.max(draftBottom, p.y);
-    }
-    const draftExtent = Math.hypot(draftRight - draftLeft, draftBottom - draftTop);
-    const maxAllowedDist = Math.max(tolerance * 3, 50, draftExtent * 1.5);
-    for (const poly of chainPolygons) {
-      const d = polygonDistanceToDraft(poly, draftNodes);
-      if (d > maxAllowedDist && d > 100) {
-        return null; // Bỏ đường vòng xa
-      }
-    }
-  }
-
-  // Gộp các mask liên thông thành 1 mask chung (Outermost boundary envelope)
-  const collectivePoly = getCollectiveBoundaryEnvelope(chainPolygons);
-  if (!collectivePoly) return null;
-
-  const closestToOuterStart = closestPointOnPolygon(collectivePoly, startSnap.point);
-  const closestToOuterEnd = closestPointOnPolygon(collectivePoly, endSnap.point);
-  if (closestToOuterStart.distance > tolerance || closestToOuterEnd.distance > tolerance) {
-    // Nằm trong seam nội bộ hoặc trong lỗ hổng đã bị loại bỏ khỏi biên ngoài
-    return null;
-  }
-
-  const autofillNodes = getSharedBoundaryAutofillPath(
-    collectivePoly,
-    closestToOuterStart.point,
-    closestToOuterEnd.point,
-    draftNodes,
-  );
-  if (!autofillNodes) return null;
-
-  const waypoints = [closestToOuterEnd.point, ...autofillNodes, closestToOuterStart.point];
-  const enrichedNodes = enrichPathWithOriginalNodes(waypoints, chainPolygons);
-  const finalNodes = enrichedNodes.slice(1, -1);
-
-  const ring = [...draftNodes, ...finalNodes];
-  if (ring.length >= 3) {
-    const area = polygonArea(ring);
-    if (Math.abs(area) < 1) return null;
-  }
-
+  const ring = [...draft, ...nodes];
+  if (ring.length >= 3 && Math.abs(polygonArea(ring)) < 1) return null;
+  const byId = new Map(allPolygons.map((polygon) => [polygon.id, polygon]));
   return {
-    nodes: finalNodes,
-    targetPolygons: chainPolygons,
+    nodes: nodes.map((node) => ({ id: node.id, x: node.x, y: node.y, isAnchor: true })),
+    targetPolygons: ownerIds.map((id) => byId.get(id)!).filter(Boolean),
   };
 }
 
@@ -1973,15 +1654,13 @@ export interface AutoAnchorResult {
   target: { x: number; y: number; polygonId: string };
   /** Đích trùng điểm đầu của bản nháp: đường đã khép polygon theo biên (vẫn chưa hoàn tất). */
   closesToStart: boolean;
+  /** Điểm neo đích đầy đủ (vòng/cạnh) để `applyAnchor` chèn đỉnh vào mask đích. */
+  anchor?: AnchorTarget;
 }
 
 /**
- * Auto anchor khi vẽ polygon (Shift):
- * Dựa trên các mask có sẵn, gộp các mask liên thông kề nhau thành mask chung để có 1 biên bao quanh tổng quát.
- * Sau đó auto-fill bám tới biên ngoài cùng của mask.
- * Nếu tách rời nhau thì không merge.
- * Giữ nguyên lỗ rỗng (nếu có dạng Ring), không auto-fill nội dung bên trong của mask.
- * Diện tích trước và sau khi gộp bằng nhau chuẩn xác.
+ * Tự hoàn thiện khi vẽ (Shift, người dùng xác nhận 2026-11-06, lõi sửa 2026-11-12): từ điểm vừa chấm tới điểm biên
+ * tự do gần con trỏ nhất của mask dưới con trỏ; con trỏ gần điểm đầu thì khép về đúng điểm đầu (chưa hoàn tất).
  */
 export function findAutoAnchorPath(
   allPolygons: AnnotationPolygon[],
@@ -1989,78 +1668,35 @@ export function findAutoAnchorPath(
   draftNodes: Array<{ x: number; y: number }>,
   tolerance = 14,
 ): AutoAnchorResult | null {
+  return explainAutoAnchorPath(allPolygons, cursor, draftNodes, tolerance).result;
+}
+
+/** Như findAutoAnchorPath nhưng kèm lý do khi không có đường (để canvas báo đúng nguyên nhân). */
+export function explainAutoAnchorPath(
+  allPolygons: AnnotationPolygon[],
+  cursor: { x: number; y: number },
+  draftNodes: Array<{ x: number; y: number }>,
+  tolerance = 14,
+): { result: AutoAnchorResult | null; failure?: CompletionFailure } {
   const draft = finiteDraft(draftNodes);
-  if (!allPolygons?.length || !draft.length) return null;
-
-  const last = draft[draft.length - 1];
-  const start = draft[0];
-
-  const lastSnap = findBestSnapTarget(allPolygons, last, Math.max(tolerance, 6), draft);
-  if (!lastSnap) return null;
-
-  let targetPoly: AnnotationPolygon | null = null;
-  for (let i = allPolygons.length - 1; i >= 0; i -= 1) {
-    const p = allPolygons[i];
-    if (pointInMask(cursor, p)) {
-      targetPoly = p;
-      break;
-    }
-  }
-  if (!targetPoly) {
-    const cursorSnap = findBestSnapTarget(allPolygons, cursor, tolerance, draft);
-    targetPoly = cursorSnap?.polygon ?? null;
-  }
-  if (!targetPoly) return null;
-
-  const startSnap = draft.length >= 2 ? findBestSnapTarget(allPolygons, start, tolerance, draft) : null;
-  const closesToStart = Boolean(startSnap && Math.hypot(cursor.x - start.x, cursor.y - start.y) <= tolerance);
-
-  const destinationId = closesToStart ? startSnap!.polygonId : targetPoly.id;
-
-  // Tìm chuỗi các mask tiếp xúc liên thông
-  let chainPolygons: AnnotationPolygon[];
-  if (lastSnap.polygonId === destinationId) {
-    chainPolygons = [lastSnap.polygon];
-  } else {
-    const chainIds = findTouchingChain(allPolygons, lastSnap.polygonId, destinationId, tolerance, draft);
-    if (!chainIds) {
-      // Tách rời nhau: không merge
-      return null;
-    }
-    chainPolygons = chainIds
-      .map((id) => allPolygons.find((p) => p.id === id))
-      .filter((p): p is AnnotationPolygon => Boolean(p));
-  }
-
-  // Gộp thành 1 biên bao ngoài tổng quát duy nhất
-  const collectivePoly = getCollectiveBoundaryEnvelope(chainPolygons);
-  if (!collectivePoly) return null;
-
-  const pFrom = closestPointOnPolygon(collectivePoly, last).point;
-  const pTo = closesToStart ? start : closestPointOnPolygon(collectivePoly, cursor).point;
-
-  if (Math.hypot(pTo.x - pFrom.x, pTo.y - pFrom.y) < 0.5) return null;
-
-  // Điểm bắt đầu phải nằm sát biên ngoài của cụm
-  if (Math.hypot(pFrom.x - last.x, pFrom.y - last.y) > tolerance) {
-    return null;
-  }
-
-  // Tìm đường đi bám biên ngoài từ pFrom tới pTo
-  const rawPath = getSharedBoundaryAutofillPath(collectivePoly, pTo, pFrom, draft);
-  if (!rawPath) return null;
-
-  const waypoints = [pFrom, ...rawPath, pTo];
-  const enriched = enrichPathWithOriginalNodes(waypoints, chainPolygons);
-  const nodes = enriched.slice(1, -1);
-
-  const target = { x: closesToStart ? start.x : pTo.x, y: closesToStart ? start.y : pTo.y };
-  const finalNodes = closesToStart ? nodes : [...nodes, { id: createId(), ...target, isAnchor: true }];
-
+  if (!allPolygons?.length || !draft.length) return { result: null, failure: 'NO_TARGET' };
+  const outcome = findCompletionRoute({
+    polygons: allPolygons,
+    from: draft[draft.length - 1],
+    cursor,
+    tolerance,
+    context: draft,
+    closeTo: draft.length >= 2 ? draft[0] : undefined,
+  });
+  if ('failure' in outcome) return { result: null, failure: outcome.failure };
+  const { nodes, target, closesToStart } = outcome.route;
   return {
-    nodes: finalNodes.map((n) => ({ id: n.id, x: Math.round(n.x * 1000) / 1000, y: Math.round(n.y * 1000) / 1000, isAnchor: true })),
-    target: { ...target, polygonId: targetPoly.id },
-    closesToStart,
+    result: {
+      nodes: nodes.map((node) => ({ id: node.id, x: node.x, y: node.y, isAnchor: true })),
+      target: { x: target.point.x, y: target.point.y, polygonId: target.polygonId },
+      closesToStart,
+      ...(closesToStart ? {} : { anchor: target }),
+    },
   };
 }
 

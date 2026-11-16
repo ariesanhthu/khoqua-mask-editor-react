@@ -1,6 +1,6 @@
 # Render editor: thuật toán tối ưu và số đo
 
-Cập nhật: 2026-10-25. Trạng thái: đã code, có unit test và kiểm tra tự động trên Chrome headless (trang dữ liệu giả `/canvas-browser-check`); **chưa thử trên thiết bị thật, dữ liệu thật, Safari/Firefox; chưa commit**; đã deploy Vercel 2026-10-25 (deployment `bitter-melon-annotation-q3f7ls3bn`, từ working tree, chưa commit).
+Cập nhật: 2026-11-12 — Paint (B) sửa thẳng trên polygon, bỏ lớp nét brush/vòng cọ và việc vector hóa sau khi tô; thêm gợi ý neo trên lớp `vectors` (§4.2, §4.8, §5b). Phần còn lại ghi theo đợt tối ưu 2026-10-25. Trạng thái đợt 2026-10-25: đã code, có unit test và kiểm tra tự động trên Chrome headless (trang dữ liệu giả `/canvas-browser-check`); **chưa thử trên thiết bị thật, dữ liệu thật, Safari/Firefox; chưa commit**; đã deploy Vercel 2026-10-25 (deployment `bitter-melon-annotation-q3f7ls3bn`, từ working tree, chưa commit).
 
 Đọc cùng [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) (hợp đồng thao tác) và [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -22,24 +22,30 @@ flowchart TB
     S[stage: nền + ảnh gốc]
     M[raster-mask-layer: tô mask]
     V[vector-layer: viền, label, node]
-    D[draft-layer: polygon đang vẽ + khung chọn]
-    I[brush-interaction-layer: nét đang kéo]
-    C[brush-cursor-layer: vòng cọ]
+    D[draft-layer: polygon đang vẽ P/Paint, khung chọn, đường tự hoàn thiện]
   end
   P[Photo pyramid ½, ¼…] --> S
   T[tint: mask tô màu, kích thước ảnh] --> M
   R[maskRef: raster nhị phân, CPU] --> W[brush-worker: MaskVectorizer]
-  W -->|polygon đóng gói typed array| V
+  W -->|polygon đóng gói typed array, chỉ cho mask CHỈ CÓ RASTER| V
 ```
+
+Từ 2026-11-12 không còn `brush-interaction-layer` / `brush-cursor-layer`: Paint vẽ polygon trên lớp `draft` như công cụ P. `maskRef` chỉ còn dùng để xuất PNG (dựng lười từ polygon) và để chuyển một lần mask chỉ có raster (mask dự đoán, Khôi phục mask ban đầu, annotation brush cũ) sang polygon.
+
+**Hiển thị ảnh để xem dễ hơn (2026-11-16, người dùng xác nhận; chỉ đổi hiển thị, mask/export giữ nguyên):**
+
+- **Độ sáng**: CSS `filter: brightness(x)` đặt trên RIÊNG phần tử canvas `stage` — composite trên GPU, không vẽ lại pixel nào, các lớp mask/viền/điểm không đổi màu.
+- **Làm rõ biên**: unsharp mask `out = ảnh + strength × (ảnh − blur 2 px)` tính MỘT LẦN trên ảnh nguồn khi đổi giá trị (debounce 200 ms; ~60 ms với ảnh 2 Mpx, một vòng `Uint8ClampedArray`, blur bằng `ctx.filter` tăng tốc GPU). Kết quả thay nguồn vẽ của `stage` và pyramid (`enhancedPhotoRef`), nên pan/zoom sau đó không tốn thêm gì — đây là lý do không dùng SVG `feConvolveMatrix` theo frame. `strength = 0` trả về ảnh gốc và dựng lại pyramid gốc.
+- **Minimap** (`canvas-minimap.tsx`, sidebar trái): hiển thị bằng chính `<img>` ảnh gốc (trình duyệt cache, scale GPU) + khung đỏ từ `onViewChange` của canvas (gọi trong `renderView`/`fit`); bấm/kéo gọi `EditorCanvasHandle.panTo`. Không canvas phụ, không vẽ lại theo frame.
 
 Mỗi lớp có cờ bẩn riêng trong `dirtyRef` và chỉ vẽ lại khi nội dung của chính nó đổi:
 
 | Lớp | Vẽ lại khi | Không vẽ lại khi |
 | --- | --- | --- |
-| `stage` (ảnh) | đổi view (zoom/pan), đổi kích thước, mất GPU context | chọn, kéo node, chấm điểm, nét brush, vector hóa |
-| `draft` | chấm/gỡ điểm, di chuột xem trước cạnh, kéo khung chọn, đổi view | mọi thứ khác |
-| `mask` | đổi mask (`maskRect` = chỉ vùng nét brush), zoom settle | kéo node, chấm điểm |
-| `vectors` | đổi polygon/chọn (`vectorsRect` = chỉ vùng kéo node), zoom settle, đổi độ mờ hoặc chế độ màu theo label (2026-11-05) | nét brush |
+| `stage` (ảnh) | đổi view (zoom/pan), đổi kích thước, mất GPU context | chọn, kéo node, chấm điểm, áp dụng Paint, vector hóa |
+| `draft` | chấm/gỡ điểm, di chuột xem trước cạnh/điểm neo, Shift xem trước tự hoàn thiện, kéo khung chọn, đổi view, đổi +/− của Paint | mọi thứ khác |
+| `mask` | đổi mask (polygon commit), zoom settle | kéo node, chấm điểm |
+| `vectors` | đổi polygon/chọn (`vectorsRect` = chỉ vùng kéo node), zoom settle, đổi độ mờ hoặc chế độ màu theo label (2026-11-05), đổi tool, bắt đầu/kết thúc kéo node (gợi ý neo, 2026-11-12) | di chuột |
 
 Thanh cuộn (2026-11-05) là hai `div` HTML trên `.canvas-viewport`, cập nhật mỗi khi lớp `stage` vẽ lại (mọi thay đổi view); kéo thumb chỉ đổi `viewRef` rồi `renderView()` như pan. Vòng chỉ báo magnet vẽ trên lớp `draft`.
 
@@ -54,12 +60,12 @@ Thanh cuộn (2026-11-05) là hai `div` HTML trên `.canvas-viewport`, cập nh�
 - Chỉ vẽ phần ảnh trong viewport, `image.decode()` trước khi vẽ khung đầu (giải mã ngoài main thread).
 - **Tỉ lệ pixel thích ứng thiết bị** (`renderPixelRatio`): tối đa 1.5×; máy báo `navigator.deviceMemory` < 4 GB vẽ 1× (6 lớp toàn màn hình được xóa/ghép mỗi khung).
 
-### 4.2 Vẽ / tẩy brush
+### 4.2 Paint (từ 2026-11-12; thay cho vẽ / tẩy brush)
 
-- Nét đang kéo vẽ trên lớp tương tác, gom sự kiện `getCoalescedEvents` theo `requestAnimationFrame` (đã có).
-- Commit nét chỉ đổi vùng bounds của nét trên mask/tint và chỉ vẽ lại vùng đó của lớp mask (đã có). **Không còn vẽ lại ảnh gốc** sau mỗi nét.
-- Khôi phục vùng polygon khóa (copy từ `lockedMask`) **bỏ qua khi không có polygon nào khóa** (trước đây luôn copy một vùng trong suốt).
-- **Worker khởi tạo từ polygon** (`INIT_POLYGONS`): khi raster được dựng từ `POLYGON_SET`, worker nhận hình học polygon đóng gói (vài typed array) và tự rasterize cùng quy tắc tâm pixel, thay cho `getImageData` toàn ảnh + chuyển 15–48 MB trên main thread ngay sau nét đầu tiên. Raster mode (không có polygon) vẫn dùng `INIT_MASK` như cũ. Kiểm chứng: cùng chuỗi nét trên cảnh 600 polygon cho đúng **510** thành phần trước và sau thay đổi.
+- Người dùng xác nhận 2026-11-12: Paint vẽ polygon như P rồi **nối (+) / trừ (−)** bằng phép boolean polygon (`src/lib/polygon-paint.ts`), không tô pixel, không vector hóa lại khi rời Paint. Mask khác không bao giờ bị gộp (bản brush cũ dò lại thành phần liên thông nên các mask chạm nhau "dính" thành một; kịch bản cũ ghi nhận 600 → 510 thành phần).
+- Commit là một `commitPolygons` như mọi thao tác polygon: dựng lại tint từ polygon, một bước history (`HistoryEntry` chỉ còn kiểu `polygons`, bỏ ảnh chụp pixel trước/sau và ngân sách 96 MB).
+- Kết quả clipping được gắn lại đỉnh gốc bằng `restoreSourceVertices` (`geometry-primitives.ts`): cạnh nối hai đỉnh gốc liền nhau bỏ qua tra cứu, chỉ cạnh mới tra lưới đỉnh; chỉ mục dựng một lần cho mọi vòng. `ringSelfIntersects` dùng lưới cho ring > 64 đỉnh (cùng kết quả với vòng O(n²), có test so 120 ring ngẫu nhiên). Hai sửa này đưa Paint (−) trên mask raster lớn (`?spiky=1`) từ long task 41 s xuống ~1.5 s (4× CPU).
+- Đã xóa: lớp nét đang kéo/vòng cọ, `commitBrushStroke`, worker `INIT_POLYGONS`/`PUT_PATCH`/`APPLY_STROKE`, mask bảo vệ pixel khóa (`lockedMask`). *Lịch sử 2026-10-25 (không còn áp dụng):* worker khởi tạo từ polygon, commit nét theo bounds, bỏ copy `lockedMask` khi không có polygon khóa.
 
 ### 4.3 Chỉnh node / segment (Select)
 
@@ -69,17 +75,19 @@ Thanh cuộn (2026-11-05) là hai `div` HTML trên `.canvas-viewport`, cập nh�
 
 ### 4.4 Tải ảnh
 
-- File có `POLYGON_SET` là thao tác cuối: polygon chính là mask, nên **không tải, không giải mã, không chuẩn hóa mask đã lưu** (trước đây chuẩn hóa rồi ghi đè ngay). Raster nhị phân dựng lười từ polygon khi cần (brush/export).
+- File có `POLYGON_SET` là thao tác cuối: polygon chính là mask, nên **không tải, không giải mã, không chuẩn hóa mask đã lưu** (trước đây chuẩn hóa rồi ghi đè ngay). Raster nhị phân dựng lười từ polygon khi cần (export).
 - Mask dự đoán chỉ được **chuẩn hóa khi bấm Khôi phục/Giữ mask gợi ý** (`ensurePrediction`), không còn chuẩn hóa mỗi lần mở.
 - Chuẩn hóa mask (khi cần) xử lý từng word 32-bit (`normalizeMaskRgba`), kết quả bằng hệt vòng lặp từng byte cũ (có test).
 - Sửa lỗi kèm theo: `POLYGON_SET` rỗng trước đây để raster dự đoán/đã lưu trong bộ nhớ dù màn hình không hiện mask, nên nét brush đầu tiên “làm sống lại” vùng dự đoán. Nay raster luôn khớp polygon (rỗng).
 
-### 4.5 Chuyển polygon → brush
+### 4.5 Dựng raster nhị phân từ polygon (export)
 
-- Raster nhị phân dựng **chỉ trong hình chữ nhật pixel của polygon** (`polygonPixelRect`), ghi thẳng từng đoạn quét vào word 32-bit (`forEachPolygonSpan`), chỉ xóa các dải ngoài hình chữ nhật. Bỏ vòng lặp chuyển đổi từng pixel và ImageData toàn ảnh.
-- Việc dựng chạy lúc main thread rảnh ngay sau khi đổi công cụ (thanh công cụ phản hồi trước); nét bắt đầu sớm hơn thì dựng đồng bộ như cũ.
+- Raster nhị phân dựng **chỉ trong hình chữ nhật pixel của polygon** (`polygonPixelRect`), ghi thẳng từng đoạn quét vào word 32-bit (`forEachPolygonSpan`), chỉ xóa các dải ngoài hình chữ nhật. Bỏ vòng lặp chuyển đổi từng pixel và ImageData toàn ảnh. Từ 2026-11-12 chỉ chạy khi xuất PNG (Paint không cần raster nên không còn dựng lúc đổi sang Paint).
 
-### 4.6 Chuyển brush → polygon (vector hóa)
+### 4.6 Chuyển mask chỉ có raster → polygon (vector hóa một lần)
+
+Từ 2026-11-12 chỉ dùng cho mask chưa có polygon (mask dự đoán PNG, "Khôi phục mask ban đầu", annotation cũ lưu bằng nét brush) khi vào công cụ polygon/Paint; không còn chạy sau khi tô.
+
 
 - Kết quả worker gửi **đóng gói typed array có transfer** (`polygon-pack.ts`): tọa độ + cấu trúc ring, id node dựng lại theo quy tắc `${polygonId}-${outer|holeN}-${i}` của vectorizer (id bất thường thì gửi kèm). JSON lưu ra giống từng byte (có test). Trước đây structured clone hàng trăm nghìn object node tốn ~366 ms main thread (4×).
 - Gán lại id/label/meta cũ theo IoU bounding box dùng **lưới đều** thay cho quét O(n²); duyệt ứng viên theo thứ tự gốc nên kết quả giống hệt bản quét toàn bộ (có test so sánh).
@@ -89,7 +97,16 @@ Thanh cuộn (2026-11-05) là hai `div` HTML trên `.canvas-viewport`, cập nh�
 ### 4.7 Vẽ polygon (công cụ P)
 
 - Polygon đang vẽ và khung chọn nằm ở lớp `draft` riêng: di chuột xem trước cạnh không vẽ lại ảnh gốc.
-- Lịch sử điểm tách thành `PolygonDraft` (`src/lib/polygon-draft.ts`) giữ **nguyên hành vi cũ**: mỗi lần chấm/xóa điểm là một bước; Ctrl+Z gỡ đúng điểm vừa chấm; Ctrl+Y/Ctrl+Shift+Z chấm lại; gỡ hết điểm thì undo tiếp chuyển sang lịch sử chung; double-click bỏ đỉnh trùng; chuột phải xóa điểm và hoàn tác được. Khóa bằng `polygon-draft.test.ts` và kịch bản trình duyệt.
+- Lịch sử điểm tách thành `PolygonDraft` (`src/lib/polygon-draft.ts`) giữ **nguyên hành vi cũ**: mỗi lần chấm/xóa điểm là một bước; Ctrl+Z gỡ đúng điểm vừa chấm; Ctrl+Y/Ctrl+Shift+Z chấm lại; gỡ hết điểm thì undo tiếp chuyển sang lịch sử chung; double-click bỏ đỉnh trùng; chuột phải xóa điểm và hoàn tác được. Khóa bằng `polygon-draft.test.ts` và kịch bản trình duyệt. Paint (2026-11-12) dùng chung bản nháp và cùng hợp đồng này.
+
+### 4.8 Gợi ý neo (2026-11-12)
+
+- Người dùng yêu cầu 2026-11-12: ở P/Paint, và khi đang kéo node trong Select, các đỉnh của polygon khác trong khung nhìn hiện chấm rỗng 2 px (nền trắng, viền màu label; mask khóa viền xám) để biết đưa chuột tới đâu.
+- Vẽ trên lớp `vectors` cùng vòng lặp với viền, gom theo màu vào một `Path2D`, khử trùng bằng lưới 8 px màn hình (helper `addGridDots`, dùng chung với handle của polygon đang chọn). Bỏ qua polygon có hộp bao trên màn hình < 24 px. Chỉ vẽ lại khi lớp `vectors` vốn đã vẽ lại (đổi view, polygon, tool, bắt đầu/kết thúc kéo), **không theo từng lần rê chuột**; dirty rectangle khi kéo node vẽ chấm theo cùng quy tắc (kiểm tra "dirty-rectangle redraw equals a full redraw" vẫn qua).
+
+### 4.9 Tự hoàn thiện (Shift) — lõi `mask-anchor.ts` (2026-11-12)
+
+- Mô hình biên (lưới đoạn + lưới đỉnh, đồ thị chạm theo nhu cầu, vòng hợp của từng nhóm) cache theo danh tính mảng polygon; rê chuột/kéo node trên cùng mảng chỉ chiếu điểm lên vòng và chọn chiều (2 phép `polygon-clipping` intersection).
 
 ## 5. Kết quả đo (4× CPU, cảnh 600 polygon trừ khi ghi khác)
 
@@ -105,14 +122,28 @@ Thanh cuộn (2026-11-05) là hai `div` HTML trên `.canvas-viewport`, cập nh�
 
 CPU profile bước Brush → Select: giải tuần tự hóa kết quả worker 366 → 22 ms; ghép id theo IoU ~105 → ~14 ms; `polygonBounds` 88 → 33 ms; LOD (`segmentDistance` + `simplifyClosed`) 158 → ~95 ms.
 
-Hạn chế của số đo: long task lúc tải ở bản cũ không đo được (cửa sổ đo sai trước khi sửa script), nên dùng CPU profile; số đo của Chrome headless render phần mềm, chưa phải thiết bị thật.
+Hạn chế của số đo: long task lúc tải ở bản cũ không đo được (cửa sổ đo sai trước khi sửa script), nên dùng CPU profile; số đo của Chrome headless render phần mềm, chưa phải thiết bị thật. Các dòng "Brush" ở bảng trên là lịch sử 2026-10-25; brush raster đã bị thay bằng Paint polygon ngày 2026-11-12.
+
+## 5b. Kết quả đo 2026-11-12 (4× CPU, dev server cô lập, `canvas-browser-check` 55/55)
+
+| Bước | Số đo |
+| --- | --- |
+| Lõi tự hoàn thiện trên 600 mask (`__benchAutoComplete`): dựng mô hình biên lần đầu | 188–284 ms |
+| … mỗi lần rê Shift khi cache đã ấm | 2.9–6.7 ms |
+| … mỗi lần kéo node + Shift | 1.7–2.7 ms |
+| Polygon → Paint (đổi tool, 600 mask) | 0 long task |
+| Paint (+) polygon qua 3 mask rồi Enter (600 mask) | long task lớn nhất 90–151 ms |
+| Paint → Select (600 mask) | 0 long task (không còn vector hóa; bản brush cũ 223–308 ms) |
+| Paint (−) trên mask raster lớn vừa vector hóa (`?spiky=1`) | long task lớn nhất ~1.5 s (trước khi tối ưu `restoreSourceVertices`/`ringSelfIntersects`: 41 s) |
 
 ## 6. Invariant khi sửa render
 
-- Không vẽ lại `stage` cho thay đổi nội dung (chọn, kéo node, chấm điểm, nét brush); thứ gì cần cập nhật theo nội dung phải nằm ở lớp khác (ví dụ lớp `draft`).
+- Không vẽ lại `stage` cho thay đổi nội dung (chọn, kéo node, chấm điểm, áp dụng Paint); thứ gì cần cập nhật theo nội dung phải nằm ở lớp khác (ví dụ lớp `draft`).
 - Partial redraw (mask/vector) chỉ hợp lệ khi lớp đang thẳng hàng với view hiện tại; ngược lại vẽ toàn bộ.
 - Raster nhị phân phải đúng từng pixel với `rasterizePolygons` (tâm pixel, evenodd, không antialias). `forEachPolygonSpan`/`polygonPixelRect` có test đối chiếu với bản rasterizer trước đây.
-- Worker và main thread phải giữ cùng raster: `INIT_POLYGONS` dùng đúng tập polygon `drawable` của `ensureMaskRaster`; sau đó mọi nét gửi `PUT_PATCH`.
+- Worker chỉ nhận `INIT_MASK` (toàn bộ raster, chỉ khi mask chưa có polygon) và `VECTORIZE`. Không gửi vùng pixel thay đổi: Paint không ghi pixel (2026-11-12).
+- Gợi ý neo không được vẽ theo từng lần rê chuột; chỉ đi theo các lần vẽ lại sẵn có của lớp `vectors`.
+- Hàm hình học chạy trên ring lớn không được O(n²) không giới hạn (mask raster vừa vector hóa có hàng chục nghìn đỉnh): dùng lưới như `ringSelfIntersects`/`restoreSourceVertices`/mô hình biên của `mask-anchor.ts`.
 - LOD và pyramid chỉ dùng để hiển thị.
 - Không đọc ngược (`getImageData`) các lớp hiển thị: Chrome sẽ chuyển canvas đó sang raster CPU và vẽ chậm hẳn. Chỉ `maskRef` (tạo với `willReadFrequently`) được đọc.
 
@@ -123,7 +154,7 @@ Hạn chế của số đo: long task lúc tải ở bản cũ không đo đư�
 | Render toàn bộ trong worker (`transferControlToOffscreen`) hoặc WebGL | Viết lại editor (bị cấm); hit-test/sự kiện phải đồng bộ qua worker |
 | Gộp mọi polygon vào một `Path2D` để tô một lần | evenodd giữa các polygon chồng nhau sẽ khoét lỗ sai |
 | Vẽ mask polygon từ tint khi zoom ≤ 1 | Cần thêm một canvas cỡ ảnh (tốn bộ nhớ thiết bị yếu) hoặc lệch so với polygon đã làm mịn |
-| Giữ đỉnh gốc của polygon không bị nét brush chạm | Hiện lần brush đầu dò lại mọi polygon từ raster (hành vi có sẵn); đổi là đổi hành vi, cần người dùng quyết định |
+| Giữ đỉnh gốc của polygon không bị nét brush chạm | Đã giải quyết 2026-11-12 theo quyết định của người dùng: Paint sửa trên polygon, không dò lại raster |
 | Giảm ngân sách bộ nhớ undo trên máy yếu | Đổi số bước undo nhìn thấy được |
 | Dirty rect bằng `clip()` | Antialias ở mép clip lệch so với vẽ toàn bộ (đo trên raster CPU: ~300 pixel lệch nhẹ mỗi khung kéo) |
 
@@ -132,4 +163,5 @@ Hạn chế của số đo: long task lúc tải ở bản cũ không đo đư�
 - Thiết bị thật (điện thoại, tablet, laptop yếu, GPU bị chặn), ảnh thật 12 MP với ~1600 polygon, production build.
 - Safari (không có `requestIdleCallback`: dùng `setTimeout`), Firefox; `navigator.deviceMemory` chỉ có trên Chromium.
 - Mất GPU context thật (dựng lại pyramid) và bộ nhớ của pyramid (~⅓ ảnh gốc).
-- Polygon → Brush trên ảnh đầy polygon vẫn ~200 ms (4×) cho rasterize; có thể chuyển hẳn sang worker nếu cần.
+- Paint (−) trên mask raster lớn vừa vector hóa vẫn ~1.5 s (4×), phần lớn là vẽ native Path2D/tint của polygon hàng chục nghìn đỉnh; chưa đo trên thiết bị thật.
+- Gợi ý neo và kéo + Shift chưa thử trên thiết bị thật/dữ liệu thật (chỉ trang dữ liệu giả).

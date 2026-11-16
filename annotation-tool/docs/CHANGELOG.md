@@ -21,6 +21,145 @@ Mẫu một mục:
 
 ---
 
+## 2026-11-16 (bổ sung 3) — Sidebar trái: minimap + công cụ hiển thị ảnh (độ sáng, làm rõ biên, đặt lại)
+
+- **Người dùng xác nhận (hỏi–đáp 2026-11-16):**
+  - Sidebar trái thêm **minimap**: góc nhìn canvas thu nhỏ, khung đỏ là vùng đang nhìn, **kéo/bấm để pan** canvas chính, thanh trượt chỉnh thu-phóng của riêng minimap.
+  - Bỏ chữ "Dự án chú thích / Bộ dữ liệu hiện tại" và nút "Hàng đợi tệp"; **giữ icon folder nhỏ** để quay lại danh sách; list tệp thu gọn.
+  - Nút Lớp phủ / Magnet / độ mờ chuyển từ nổi trên canvas vào **dưới minimap**.
+  - Thanh chỉnh **độ sáng** + **làm rõ biên (unsharp mask)** + nút **"Đặt lại ảnh gốc"**; chỉ đổi hiển thị, chọn thuật toán không gây lag.
+- **Thay đổi:**
+  - `editor-canvas.tsx`: props `brightness` (CSS filter GPU trên riêng lớp stage), `edgeStrength` (unsharp mask `ảnh + k×(ảnh − blur 2 px)`, tính MỘT LẦN khi đổi, debounce 200 ms, thay nguồn stage + pyramid), `onViewChange` (gọi trong `renderView`/`fit`), handle `panTo(x, y)`. Đổi file giữ thiết lập (áp lại sau khi ảnh tải).
+  - `canvas-minimap.tsx` (mới): hiển thị bằng `<img>` ảnh gốc + khung đỏ, không canvas phụ, không vẽ theo frame.
+  - `editor-workspace.tsx`: sidebar mới; `globals.css`: bỏ các rule nút nổi (`.overlay-controls`), thêm khối sidebar; list tệp gọn hơn.
+- **Kiến trúc/ảnh hưởng:** không đổi schema/API/lưu/export; mask và PNG xuất ra không bị ảnh hưởng bởi chỉnh hiển thị. Trên màn hình hẹp (media ẩn sidebar) các nút Lớp phủ/Magnet không còn hiện — trước chúng nổi trên canvas; chưa xử lý, báo rõ.
+- **Đã kiểm chứng:** 4 cổng xanh (330 test / 34 file; build qua); `canvas-browser-check` **73/73** trên cảnh mới `?photo=1` (ảnh hai nửa xám): độ sáng 60 % làm tối lớp ảnh, đặt lại trả đúng pixel gốc, unsharp overshoot đúng hai phía ranh còn vùng phẳng giữ nguyên, polygon không bị đụng, minimap thu khung khi zoom và bấm minimap pan canvas mà zoom giữ nguyên.
+- **Chưa kiểm chứng:** editor thật (đăng nhập + DB), ảnh khổ qua thật (unsharp trên ảnh 12 Mpx ước ~0.5 s mỗi lần chỉnh — một lần, có debounce), mobile.
+- **Tài liệu:** EDITOR_RENDERING §3, ARCHITECTURE (bảng file), baseline ENGINEERING_POLICY + `../CLAUDE.md`.
+
+## 2026-11-16 (bổ sung 2) — Nhấp đúp lên BẤT KỲ điểm nào hoàn tất polygon (gỡ kẹt đường cắt 2 điểm)
+
+- **Người dùng xác nhận:** đường cắt 2 điểm "vẫn không hoạt động" vì chỉ hoàn tất được khi nhấp đúp vào điểm chấm từ trước (thực tế là điểm bắt đầu); yêu cầu nhấp đúp vào bất kỳ điểm nào cũng hoàn tất, rồi từ hình đó mới chạy tách/trừ mask.
+- **Nguyên nhân:** guard "điểm vừa chấm" theo ngưỡng 600 ms (2026-11-06, để nhấp đúp ở chỗ trống không tự hoàn tất) chặn luôn nhấp đúp lên điểm vừa vẽ xong — với đường cắt 2 điểm thì điểm cuối luôn "vừa vẽ", nên chuột không áp dụng được (chỉ Enter/nút chạy).
+- **Thay đổi (`editor-canvas.tsx`):** thay ngưỡng thời gian bằng đếm số lần nhấp trúng lại điểm vừa thêm (`retouches`): cú nhấp đúp ở chỗ trống tự tạo điểm rồi trúng lại đúng một lần → không hoàn tất; nhấp đúp lên điểm có sẵn (kể cả vừa chấm xong) đi qua ≥ 2 lần trúng → hoàn tất. Chấm điểm thứ 2 ở Paint (−) hiện gợi ý cách áp dụng đường cắt. Không thêm module vẽ riêng: bản nháp dùng chung P/Paint giữ nguyên, chỉ rule hoàn tất sai.
+- **Đã kiểm chứng:** 4 cổng xanh (330 test / 34 file, build qua); `canvas-browser-check` **65/65** — kiểm đường cắt đổi sang áp dụng bằng nhấp đúp lên chính điểm vừa chấm; "double-click on empty space never finalizes" và "double-click on a point finishes along the free boundary" (điểm chấm từ trước) vẫn qua nguyên.
+- **Chưa kiểm chứng:** thao tác tay trên editor thật.
+- **Tài liệu:** EDITOR_PIPELINE (Hợp đồng vẽ polygon).
+
+## 2026-11-16 (bổ sung) — Paint (−): đường cắt 2 điểm tách mask
+
+- **Người dùng xác nhận:** trong Paint (−), chấm đúng 2 điểm thành một đường xuyên qua mask (hai điểm trên biên nhờ neo) rồi áp dụng thì mask được TÁCH làm hai tại đường đó, mỗi mảnh nhận thêm điểm tại hai giao với biên.
+- **Thay đổi:** `applyPolygonPaint` nhánh `subtract` + 2 điểm → `cutWithLine`, dùng chung lõi công cụ cắt (`resolvePolygonCut`); qua nhiều mask thì ưu tiên mask duy nhất đang chọn, không thì báo chọn. `completePolygon` cho hoàn tất 2 điểm ở Paint (−) (Enter/nhấp đúp/nút). Gợi ý panel ghi rõ.
+- **Sửa chung (quyết định của agent):** `splitPolygonWithCut` trước nay làm rơi **lỗ** im lặng (cả ở công cụ cắt): nay lỗ đi theo mảnh chứa nó, đường cắt chạm lỗ thì từ chối với lý do rõ; `resolvePolygonCut` giữ lý do từ chối cụ thể thay vì câu "chưa nhận diện được" chung.
+- **Đã kiểm chứng:** 4 cổng xanh — **330 test / 34 file** (7 test đường cắt: xuyên qua, điểm trên biên, lỗ theo mảnh/chạm lỗ từ chối, nhiều mask + selection, không xuyên, mask khóa, chế độ + không cắt); build qua; `canvas-browser-check` **65/65** (thêm 2 kiểm: tách bằng 2 điểm, undo khôi phục).
+- **Chưa kiểm chứng:** thao tác tay trên editor thật. Còn mở: render tăng dần cho Paint.
+- **Tài liệu:** EDITOR_PIPELINE (Hợp đồng Paint, mục (−)), baseline ENGINEERING_POLICY + `../CLAUDE.md`.
+
+## 2026-11-16 — Nút magnet tắt mọi hít tự động, Shift = chèn điểm (không hoàn tất), tự hoàn thiện chạy được trên dữ liệu thật
+
+- **Người dùng xác nhận:**
+  - **Magnet:** nút nam châm từng chỉ tắt magnet khi kéo node nên bị báo "KHÔNG TẮT ĐƯỢC" (chấm điểm bằng P/Paint vẫn hít vào biên). Chốt qua hỏi–đáp: nút tắt **mọi hít tự động** — magnet kéo node + neo khi chấm điểm + vòng chỉ báo khi rê; giữ Shift và công cụ Neo (A) vẫn hít vì là thao tác chủ động. Magnet "hơi mạnh": bán kính 10 → **6 px màn hình** (`MAGNET_RADIUS`).
+  - **Shift khi đang vẽ (spec người dùng gửi 2026-11-16):** `Shift = tự hoàn thiện đường viền`, `nhấp đúp lên điểm = hoàn tất` — hai việc độc lập. Nhấn phím Shift CHÈN ngay các điểm bám biên vào bản nháp (trước đây chỉ xem trước, thả Shift là mất nên bị coi là "không hoạt động"); không hoàn tất, không khóa chỉnh sửa; thả Shift giữ điểm; nhấn lại không tạo điểm trùng; nhấp đúp vùng trống không hoàn tất; `blur` dọn xem trước.
+  - **Tự hoàn thiện "đè Shift bị treo" trên dữ liệu thật:** sửa bằng cửa sổ cục bộ (xem dưới).
+- **Thay đổi:**
+  - `editor-canvas.tsx`: cổng chung `autoSnapTarget` (mọi hít tự động đi qua cờ magnet); `MAGNET_RADIUS = 6`; `insertAutoComplete` dùng chung cho Shift + nhấp và **nhấn phím Shift** (keydown chèn, keyup chỉ dọn xem trước, window `blur` dọn xem trước); thất bại khi nhấn phím thì im lặng (`quiet`) để không spam thông báo khi nhấn lại tại chỗ.
+  - `src/lib/mask-anchor.ts`: mô hình biên theo **cửa sổ cục bộ** (lề 64 px, lưới 128 px) — chỉ hợp các mask của nhóm giao cửa sổ; cạnh chạm mask nhóm ngoài cửa sổ bị chặn; phần chồng đo trên hợp con cache theo hộp bao ứng viên; kết quả chỉ được nhận khi chắc chắn trùng kết quả cả nhóm, không thì nới một lần rồi dùng cả nhóm; thêm cờ `exhaustive` (chỉ test dùng); `topmostMaskAt` lọc trước theo hộp bao.
+  - `src/lib/geometry-primitives.ts`: `maskClipGeometry` — mask tự chạm/tự cắt (≈26 % polygon prelabel vector hóa, đo trên `drive/prelabel-production`, chỉ đọc) được sửa qua một lần union luật non-zero để vẫn neo/đi biên được.
+- **Quyết định của agent:** hai lớp bảo vệ cửa sổ (cạnh chặn + kiểm tra mask thiếu theo hộp bao) dự phòng lẫn nhau: tắt một lớp property test vẫn qua, tắt cả hai thì đổ — chấp nhận vì lớp chặn còn là tối ưu hiệu năng lớn (bỏ nó: rê 5.4 → 350 ms/lần do phải đo phần chồng của chiều đi vòng rất dài). Một phiên bản "đo phần chồng với cả nhóm, bỏ lớp chặn" đã thử và bị loại vì số đo này.
+- **Kiến trúc/ảnh hưởng:** không đổi schema, API, định dạng lưu. Hành vi Shift-xem-trước 2026-11-06 được thay theo spec mới; các adapter/chữ ký cũ giữ nguyên.
+- **Đã kiểm chứng:**
+  - 4 cổng: typecheck, lint sạch; **323 test / 34 file** (thêm property test cửa sổ-vs-cả-nhóm 100 truy vấn, dãy 40 mask, mask tự chạm, DISCONNECTED trong cửa sổ); build qua.
+  - `canvas-browser-check`: **63/63**, 0 lỗi console (thêm 5 kiểm magnet — dính 3 px, 9 px ngoài tầm, tắt magnet khi kéo và khi chấm P, bật lại chèn đỉnh — và 5 kiểm phím Shift: chèn không hoàn tất, nhấn lại không trùng, nhấp đúp vùng trống không hoàn tất, nhấp đúp điểm tự động hoàn tất 3+3 điểm, undo).
+  - Số đo dữ liệu thật (`DC3_01`, 133 mask một nhóm, Node): dựng lần đầu ~345 ms (cũ ~780 ms), rê ~5.4 ms/lần, kéo node + Shift ~62 ms/lần (trước đó treo). Trình duyệt 600 mask 4× CPU: dựng 167 ms, rê 4.6 ms, kéo 2.2 ms.
+- **Chưa kiểm chứng:** thao tác tay trên editor thật (đăng nhập + DB), thiết bị thật; số đo dữ liệu thật chạy bằng Node trên file prelabel. Còn mở từ yêu cầu 2026-11-13: render tăng dần cho Paint (`rebuildPolygonTint` vẫn vẽ lại toàn bộ, long task ~114 ms trên 600 mask) và cắt bằng line 2 điểm trong Paint (−).
+- **Sự cố trong lúc làm:** dev server webpack cô lập phục vụ bundle cũ sau khi thay cả cây `src` (xóa + copy), làm 5 kiểm trình duyệt fail giả; khởi động lại server sạch thì qua. Ghi bẫy vào AGENT_GUIDE §8.
+- **Tài liệu đã cập nhật:** EDITOR_PIPELINE (magnet, Shift, mục 8 cửa sổ cục bộ), AGENT_GUIDE §8, baseline trong ENGINEERING_POLICY và `../CLAUDE.md`.
+
+## 2026-11-13 — Neo + Tự hoàn thiện dùng chung (vẽ và kéo điểm + Shift), Paint thành polygon +/−, bỏ raster trong Paint, gợi ý neo
+
+- **Người dùng xác nhận (hỏi–đáp 2026-11-12):**
+  - **Hai khái niệm.** *Neo* (anchor): con trỏ/điểm đang kéo gần biên mask thì nối vào đúng điểm đó. *Tự hoàn thiện*: polygon tự tạo các điểm dọc biên mask đích.
+  - **Khi vẽ (P/Paint):** tự hoàn thiện vẫn bằng Shift như rule 2026-11-06.
+  - **Select (V), kéo một điểm + Shift:** neo + tự hoàn thiện vào mask đang trỏ; nhả chuột là hoàn tất.
+  - **Lõi tự hoàn thiện:** sửa cả 4 lỗi, giữ hướng gộp ảo 2026-11-07.
+  - **Paint (icon brush, B):** không tô pixel nữa mà vẽ polygon (chấm điểm như P) để nối (+) vào mask nó chạm/chồng (trùng cạnh, trùng điểm) hoặc trừ (−).
+    - Vẫn ở công cụ Paint, không phải chế độ polygon.
+    - Chỉ mask nó chạm bị đổi; mask khác không dính.
+    - Phím `=`/`-` đổi chế độ ở mọi công cụ, giống B/E.
+  - **Bỏ chuyển pixel → polygon trong Paint** (nguyên nhân mask "dính" khi rời Paint). Lưu vẫn như cũ: polygon (COCO) + PNG raster.
+  - **Có icon cho chế độ − / =** để biết đang ở chế độ nào.
+  - **Gợi ý neo:** hiện điểm của các polygon trong khung nhìn để biết chỗ đưa chuột tới.
+- **Kiểm tra lõi tự hoàn thiện (commit `4ec7a7b`):** 4 lỗi, đều được tái hiện bằng test fail trước khi sửa (`mask-anchor.test.ts`).
+  1. Ngưỡng "chạm" phụ thuộc zoom (`max(7/scale, 4)`), nên khi thu nhỏ nối qua khe hở tới ~28 px.
+  2. Đích không được kiểm tra có nằm trên mask dưới con trỏ.
+  3. Chỉ hợp các mask trên chuỗi, nên seam với mask ngoài chuỗi có thể bị đi.
+  4. Không có cache.
+
+  Tài liệu còn mô tả `freeBoundaryRoutes` dù hàm đã bị xóa.
+- **Thay đổi:**
+  - `src/lib/geometry-primitives.ts` (mới): primitive chuyển nguyên văn từ `polygon-geometry.ts` để các module mới dùng chung mà không import vòng; `polygon-geometry` re-export tên cũ.
+    - `ringSelfIntersects` dùng lưới cho ring > 64 đỉnh (cùng kết quả, có test so 120 ring ngẫu nhiên).
+    - `restoreSourceVertices` gắn lại id và đỉnh gốc thẳng hàng cho kết quả clipping.
+  - `src/lib/mask-anchor.ts` (mới):
+    - Neo: `findAnchorTarget`/`applyAnchor`, xét cả biên lỗ.
+    - Tự hoàn thiện: `findCompletionRoute`, gồm nhóm liên thông 2.5 px cố định, vòng hợp cả nhóm, vòng chứa điểm xuất phát, đích trên mask dưới con trỏ, chọn chiều, cache theo mảng polygon.
+    - `findAutoAnchorPath`/`findMultiPolygonAutofillPath` thành adapter giữ chữ ký; thêm `explainAutoAnchorPath` để báo lý do thất bại.
+  - `src/lib/node-anchor.ts` (mới): `planNodeAnchorDrag`.
+  - `src/lib/polygon-paint.ts` (mới): `applyPolygonPaint`.
+  - `editor-canvas.tsx`:
+    - P và Paint dùng chung bản nháp (`isDraftTool`); thêm `commitPaintDraft`; nháp (−) màu đỏ.
+    - Nhấp gần biên và đích của Shift đều dùng `findAnchorTarget`/`applyAnchor`.
+    - Kéo node + Shift qua `updateNodeDrag`, dùng chung cho pointermove và nhấn/nhả Shift.
+    - Gợi ý neo trên lớp `vectors` (`addGridDots`, dùng chung với handle).
+    - Xóa toàn bộ phần tô pixel: lớp nét/vòng cọ, `commitBrushStroke`, history kiểu `brush`, vector hóa nền, mask bảo vệ pixel khóa, `INIT_POLYGONS`/`PUT_PATCH`.
+  - `brush-worker.ts`: chỉ còn `INIT_MASK` + `VECTORIZE`.
+  - `editor-workspace.tsx` + `paint-mode-icon.tsx` (mới):
+    - Thanh ＋ Nối / − Trừ có icon và phím.
+    - Nút Paint đổi icon theo chế độ.
+    - Phím `=`/`+`/B, `-`/E; bỏ cỡ nét và `[`/`]`; localStorage `brush-mode` `'erase'` đọc thành `'subtract'`.
+    - Gợi ý panel và bảng phím tắt mới.
+    - `selectTool('brush')` gọi `beginPolygonEdit`.
+  - `globals.css`: bỏ CSS lớp brush và cỡ nét.
+- **Quyết định của agent (rule không nêu):**
+  - Giữ tool id `brush` và tên `findAutoAnchorPath` để không hỏng localStorage, test, CSS.
+  - Neo xét cả biên lỗ.
+  - Thứ tự chọn chiều: không chồng mask → chồng ít hơn → không tự cắt → gần bản nháp → ngắn hơn.
+  - Paint (+) chỉ chạm một điểm: mảnh mới là polygon riêng cùng nhãn.
+  - Paint áp dụng xong ở lại Paint.
+  - Kéo nhiều node thì Shift không có tác dụng.
+  - Hai lần tối ưu O(n²) → lưới (`ringSelfIntersects`, `restoreSourceVertices`), vì Paint (−) trên mask raster lớn (`?spiky=1`) từng treo 41 s.
+- **Kiến trúc/ảnh hưởng:**
+  - Không đổi schema, `types/index.ts`, API, định dạng lưu/export.
+  - Dữ liệu cũ có `BRUSH_*` vẫn đọc và chuyển một lần như trước.
+  - Mask chỉ có raster (ảnh không prelabel, "Khôi phục mask ban đầu") vẫn chuyển một lần khi vào công cụ polygon/Paint.
+  - Sơ đồ module: [ARCHITECTURE.md](ARCHITECTURE.md) (yêu cầu 16, 17, bảng file).
+- **Test đổi theo hành vi đã xác nhận:**
+  - Trong `canvas-browser-check`, bỏ 3 kiểm tra brush: "brush stroke through center vectorizes on Select (… r3 merged → 6)", "undo after brush restores 6 polygons", "many: strokes merge polygons after vectorize". Hai trong số đó khẳng định đúng hành vi mask "dính" mà người dùng yêu cầu bỏ.
+  - Thay bằng 13 kiểm tra: Paint +/− (icon, trùng cạnh, mask khác giữ id và số node, nháp đỏ, đổi chế độ giữ nháp, lỗ, cắt đôi, undo), kéo + Shift (neo + tự hoàn thiện, undo, không Shift), gợi ý neo, 600 mask không bị gộp.
+  - Mọi test cũ của tự hoàn thiện/autofill trong `polygon-geometry.test.ts` qua nguyên, không sửa test nào.
+- **Đã kiểm chứng:**
+  - `npm run typecheck` và `npm run lint` sạch.
+  - `npm test`: **317 test / 34 file** (từ 280 / 30).
+  - `npm run build` qua.
+  - `node scripts/canvas-browser-check.mjs`: **55/55** trên dev server cô lập (DB/Blob giả), 0 lỗi console.
+  - Số đo (4× CPU):
+    - lõi tự hoàn thiện trên 600 mask: dựng lần đầu 188–284 ms, rê 2.9–6.7 ms, kéo 1.7–2.7 ms;
+    - Paint → Select: 0 long task (bản brush cũ 223–308 ms);
+    - Paint (−) trên mask raster lớn: long task ~1.4–1.6 s.
+- **Chưa kiểm chứng:**
+  - Thao tác tay trên editor thật (cần đăng nhập + DB), ảnh/mask thật, thiết bị thật, Safari/Firefox.
+  - Phím `=`/`-`/B/E nằm trong workspace nên không chạy được trên trang giả.
+  - Chưa commit/deploy.
+- **Sự cố trong lúc làm:** một script cắt dòng khớp nhầm chú thích đầu tiên và xóa ~2.860 dòng của `editor-canvas.tsx`. File được khôi phục từ `HEAD` (lúc bắt đầu task file không có thay đổi chưa commit) rồi áp lại từng sửa đổi bằng Edit. Đã ghi bẫy này vào AGENT_GUIDE §8.
+- **Tài liệu đã cập nhật:**
+  - EDITOR_PIPELINE: Neo và Tự hoàn thiện, Kéo điểm + Shift, Gợi ý neo, Hợp đồng Paint, pipeline bước 3–4, lớp phủ, Select.
+  - EDITOR_RENDERING: §3, §4.2, §4.5–4.9, §5b, §6–8.
+  - ARCHITECTURE: yêu cầu 16–17, bảng file, mục 5.
+  - AGENT_GUIDE: impact map, bẫy §8.
+  - Baseline trong ENGINEERING_POLICY và `../CLAUDE.md`.
+
+---
+
 ## 2026-11-07 — Cùng tài khoản sửa được ở mọi phiên; xung đột lưu hiện hai bản (ảnh + mask) để chọn
 
 - **Bối cảnh (người dùng báo):** editor02 sửa ở localhost rồi mở Vercel cùng Chrome profile vẫn chỉ xem. `/api/health` cho thấy localhost (`.env.local`) và Vercel trùng `fingerprints.database` và `blobStore`, nên bản lưu ở localhost đã vào DB production. Nguyên nhân chỉ xem: token khóa nằm trong `sessionStorage` theo origin, tab localhost còn mở vẫn gửi heartbeat giữ khóa, và server từ chối phiên khác của cùng tài khoản khi thiếu token.
