@@ -37,6 +37,27 @@ Các lệnh trên không thay thế kiểm thử tương tác, race condition tr
 13. *(Người dùng xác nhận 2026-11-05)* Tự nối biên khi vẽ polygon **chỉ nối theo biên, không gộp mask**. Nhấp lên điểm của mask khác khi đang vẽ chỉ là chấm anchor (không hiểu là “điểm kết thúc”), polygon chỉ hoàn tất khi nhấp đúp. **Shift + trỏ vào anchor** hiện xem trước đường nối; đường chỉ đi phần biên chưa có mask khác nối vào; **Shift + chuột trái** để nối đường đó vào polygon đang vẽ mà **không kết thúc**; chỉ nhấp đúp mới hoàn tất (người dùng sửa lại cùng ngày). Chi tiết: [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) mục “Tự nối biên khi vẽ polygon (Shift)”. **Cập nhật 2026-11-06 (người dùng xác nhận qua hỏi–đáp):** giữ Shift + trỏ vào *bên trong* mask kế bên để xem trước; đường chạy **từ điểm vừa chấm** tới điểm biên tự do gần con trỏ nhất; **Shift + chuột trái** chèn các điểm đó, không hoàn tất, không chuyển V; nhấp chuột trái thường chỉ chấm điểm; hoàn tất bằng **nhấp đúp lên một điểm**, Enter hoặc nút (nhấp đơn điểm đầu và nhấp đúp chỗ trống không còn hoàn tất); ngưỡng “dính” giữ ≤ 2.5 px ảnh.
 14. *(Người dùng xác nhận 2026-11-05)* Phần lớp phủ cho phép tô mask **khác màu theo label**: hai mask tách biệt nhưng cùng label (ví dụ cùng `r1`) vẫn cùng màu. Thêm thanh kéo độ mờ ở phần lớp phủ và **độ mờ áp dụng cả lên đường biên** (trước đây chỉ phần tô đậm nhạt, biên giữ nguyên là sai). Chi tiết: [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) mục “Lớp phủ: màu theo label và độ mờ”. **Cập nhật 2026-11-06:** màu theo label là chế độ mặc định và duy nhất (bỏ ô bật/tắt).
 15. *(Người dùng xác nhận 2026-11-05)* Thông báo (toast) của editor chuyển vào sidebar phải thay cho phần gợi ý “Ctrl+Z hoàn tác toàn cục…/Di chuột lên điểm…”. Chế độ chỉnh sửa (V) có **magnet**: node đang kéo dính vào điểm gần đó, nút bật/tắt icon nam châm dưới nút lớp phủ góc trên trái. Thêm **Ctrl + Shift + con lăn** để cuộn và **bật lại thanh cuộn**. Chi tiết: [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) “Hợp đồng thao tác trong Select”.
+16. *(Người dùng xác nhận 2026-11-12)* Hai khái niệm dùng chung: **Neo** và **Tự hoàn thiện**.
+    - **Neo**: con trỏ/điểm đang kéo gần biên mask thì nối vào đúng điểm đó; giữa cạnh thì mask kia được chèn đỉnh.
+    - **Tự hoàn thiện**: từ điểm đã neo, tự tạo các đỉnh thật dọc biên tự do của mask đích tới điểm neo kế tiếp.
+    - Khi vẽ (P/Paint): Shift như rule 2026-11-06.
+    - **Kéo một điểm trong Select + Shift**: neo + tự hoàn thiện; nhả chuột là hoàn tất.
+    - Sửa 4 lỗi của lõi 2026-11-07, giữ hướng gộp ảo:
+      - ngưỡng chạm cố định 2.5 px (không theo zoom);
+      - đích phải nằm trên mask dưới con trỏ;
+      - hợp cả nhóm liên thông nên không đi qua seam;
+      - cache theo mảng polygon.
+    - **Gợi ý neo** (người dùng yêu cầu cùng ngày): hiện đỉnh của polygon khác trong khung nhìn ở P/Paint và khi đang kéo node.
+
+    Chi tiết: [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) “Neo và Tự hoàn thiện”, “Kéo điểm + Shift”, “Gợi ý neo”.
+17. *(Người dùng xác nhận 2026-11-12)* **Paint (B) không tô pixel nữa** mà vẽ polygon (giống P) để **nối (+)** vào mask nó chạm/chồng (trùng cạnh hoặc trùng điểm), hoặc **trừ (−)** khỏi mask.
+    - Vẫn là công cụ/icon Paint, không phải sửa trong chế độ P.
+    - Phím `=` / `-` đổi chế độ ở mọi công cụ; icon riêng cho từng chế độ.
+    - Mask khác không bao giờ bị dính.
+    - Bỏ chuyển pixel → polygon sau khi tô (nguyên nhân “dính”).
+    - Lưu vẫn như cũ: polygon (COCO) + PNG raster.
+
+    Chi tiết: [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) “Hợp đồng Paint (công cụ B)”.
 
 ## Stack và phạm vi
 
@@ -87,9 +108,16 @@ Timer heartbeat 30 giây và polling danh sách 8 giây chỉ giữ khóa/đọc
 | `src/lib/group-service.ts` | Danh sách nhóm + tiến độ, phân công, tự chia nhóm ảnh chưa phân nhóm |
 | `src/lib/dataset-import-service.ts` | Nhập một ảnh: kiểm ảnh/mask/prelabel, ghi object store, upsert ảnh + nhóm trong transaction |
 | `src/components/editor-workspace.tsx` | Bootstrap, recovery local, quản lý tab/file, save gate, heartbeat, conflict UI, sidebar |
-| `src/components/editor-canvas.tsx` | Polygon/node, point, selection, undo/redo, zoom/pan, render/export canvas; có prop `readOnly`. Sáu lớp canvas có cờ bẩn riêng, image pyramid, dirty rectangle ([EDITOR_RENDERING.md](EDITOR_RENDERING.md)) |
-| `src/lib/polygon-draft.ts` | Lịch sử điểm của polygon đang vẽ: undo/redo từng điểm, xóa điểm, bỏ đỉnh trùng double-click |
-| `src/lib/brush-worker.ts`, `src/lib/polygon-pack.ts` | Worker vector hóa mask (`INIT_POLYGONS`/`INIT_MASK`/`PUT_PATCH`/`VECTORIZE`); đóng gói polygon thành typed array để chuyển giữa thread |
+| `src/components/editor-canvas.tsx` | Bộ điều khiển tương tác: polygon/node, point, selection, undo/redo, zoom/pan, render/export canvas; có prop `readOnly`. Bốn lớp canvas có cờ bẩn riêng, image pyramid, dirty rectangle, gợi ý neo ([EDITOR_RENDERING.md](EDITOR_RENDERING.md)). Chỉ gọi các hàm hình học thuần bên dưới rồi `commitPolygons` |
+| `src/components/paint-mode-icon.tsx` | Icon chế độ Paint (+/−) dùng chung cho thanh công cụ, thanh chế độ và trang kiểm tra |
+| `src/components/canvas-minimap.tsx` | Minimap sidebar trái (2026-11-16): ảnh thu nhỏ + khung đỏ vùng đang nhìn, kéo để pan (`panTo`), thanh thu-phóng riêng |
+| `src/lib/polygon-draft.ts` | Lịch sử điểm của polygon đang vẽ (P và Paint): undo/redo từng điểm, xóa điểm, bỏ đỉnh trùng double-click |
+| `src/lib/geometry-primitives.ts` | Hình học cấp thấp dùng chung (chuyển nguyên văn từ `polygon-geometry.ts` 2026-11-12): kiểu, `normalizeRing`, bọc `polygon-clipping`, `polygonGeometry`, `restoreSourceVertices`; tăng tốc bằng lưới cho ring lớn |
+| `src/lib/mask-anchor.ts` | **Neo** (`findAnchorTarget`, `applyAnchor`) và **Tự hoàn thiện** (`findCompletionRoute`): mô hình biên tự do cache theo mảng polygon |
+| `src/lib/node-anchor.ts` | Kéo điểm + Shift trong Select (`planNodeAnchorDrag`) |
+| `src/lib/polygon-paint.ts` | Paint nối (+) / trừ (−) bằng polygon (`applyPolygonPaint`) |
+| `src/lib/polygon-geometry.ts` | Merge, cut, hình chữ nhật/tròn, làm mịn hiển thị, điền vùng kín, magnet; adapter `findAutoAnchorPath`/`findMultiPolygonAutofillPath` sang `mask-anchor.ts` |
+| `src/lib/brush-worker.ts`, `src/lib/polygon-pack.ts` | Worker chuyển một lần mask chỉ có raster sang polygon (`INIT_MASK`/`VECTORIZE`; bỏ `INIT_POLYGONS`/`PUT_PATCH`/`APPLY_STROKE` 2026-11-12); đóng gói polygon thành typed array để chuyển giữa thread |
 | `src/lib/vector-identity.ts` | Bounds polygon (cache) và gán lại id/label sau vector hóa theo IoU, chỉ mục lưới |
 | `src/lib/canvas-view.ts`, `src/lib/mask-pixels.ts` | Zoom quanh con trỏ, tỉ lệ pixel theo thiết bị, image pyramid; raster tâm pixel (`rasterizePolygons`, `forEachPolygonSpan`), vector hóa, làm mịn, LOD, polygon ít điểm cho script nhập (`compactPolygon`) |
 | `src/lib/web-import.ts` | Nhập JSON vào ảnh đang mở: prelabel 1.1 hoặc COCO 1.0 |
@@ -264,7 +292,7 @@ Các điểm sau được ghi nhận để agent tiếp tục; **chưa sửa/xá
 
 - Đã kiểm tra tự động trên Chrome headless với trang dữ liệu giả (`scripts/canvas-browser-check.mjs`: 21 kiểm tra chức năng gồm undo từng điểm polygon, brush, zoom, dirty rectangle trùng pixel với vẽ toàn bộ). **Chưa** thử trên thiết bị thật, ảnh thật ~12 MP/1600 polygon, Safari/Firefox, production build, mất GPU context thật.
 - Nhập COCO 1.0 trong editor dùng ánh xạ danh mục tự động (không có hộp thoại ánh xạ như màn nhập thư mục); chưa thử với file COCO thật từ CVAT trên trình duyệt.
-- Hành vi có sẵn ghi nhận lại (không đổi): lần dùng brush đầu tiên trên file polygon dò lại **mọi** polygon từ raster (đã làm mịn), kể cả polygon nét vẽ không chạm; polygon chạm/chồng nhau gộp thành một. Muốn giữ đỉnh gốc cho polygon không bị chạm cần người dùng quyết định.
+- Hành vi ghi nhận ngày 2026-10-25 (lần dùng brush đầu tiên trên file polygon dò lại **mọi** polygon từ raster; polygon chạm/chồng nhau gộp thành một) **đã được bỏ ngày 2026-11-12** theo quyết định của người dùng: Paint sửa thẳng trên polygon (yêu cầu 17).
 - Chi tiết, số đo và việc còn lại: [EDITOR_RENDERING.md](EDITOR_RENDERING.md) §5, §8.
 
 ### 6. Nhóm ảnh, phân công và nhập thư mục (2026-10-25)

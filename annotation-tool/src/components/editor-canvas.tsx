@@ -22,9 +22,12 @@ import { photoLevelFor, photoPyramidSizes, renderPixelRatio, zoomViewAt } from '
 import { forEachPolygonSpan, normalizeMaskRgba, polygonPixelRect, simplifyRing, smoothPolygon } from '@/lib/mask-pixels';
 import { labelColor } from '@/lib/label-colors';
 import { nextLabel, semanticForLabelKind, type PolygonLabelKind } from '@/lib/polygon-labels';
-import { clipPolygonDifference, clonePolygons, computeSmoothNodeDisplacements, closestPointOnPolygon, createCirclePolygon, createRectanglePolygon, drawSmoothClosedPath, ensurePolygonHasNodeAt, findAutoAnchorPath, findEnclosedPocketAtPoint, findSnapTargetToPolygons, getSmoothSegmentControlPoints, insertNodeAtEdge, mergePolygonsIntoSingle, nearestMagnetVertex, pointInMask, polygonRings, resolvePolygonCut, type AutoAnchorResult, type BrushMode, type SnapTarget } from '@/lib/polygon-geometry';
+import { clipPolygonDifference, clonePolygons, computeSmoothNodeDisplacements, createCirclePolygon, createRectanglePolygon, drawSmoothClosedPath, explainAutoAnchorPath, findEnclosedPocketAtPoint, getSmoothSegmentControlPoints, insertNodeAtEdge, mergePolygonsIntoSingle, nearestMagnetVertex, pointInMask, polygonRings, resolvePolygonCut, type AutoAnchorResult } from '@/lib/polygon-geometry';
+import { applyAnchor, findAnchorTarget, type AnchorTarget, type CompletionFailure } from '@/lib/mask-anchor';
+import { planNodeAnchorDrag, type NodeAnchorPlan } from '@/lib/node-anchor';
+import { applyPolygonPaint, type PaintMode } from '@/lib/polygon-paint';
 import { PolygonDraft } from '@/lib/polygon-draft';
-import { packedTransfer, packGeometry, unpackPolygons } from '@/lib/polygon-pack';
+import { unpackPolygons } from '@/lib/polygon-pack';
 import { polygonBounds, preserveVectorIdentity, type PolygonBounds } from '@/lib/vector-identity';
 import type { MaskWorkerRequest, MaskWorkerResponse } from '@/lib/brush-worker';
 
@@ -65,6 +68,17 @@ export interface EditorCanvasHandle {
   smoothSelectedPolygons(): boolean;
   fit(): void;
   zoomBy(factor: number): void;
+  /** Đưa tâm khung nhìn tới điểm ảnh (x, y), giữ nguyên zoom — minimap ở sidebar dùng (người dùng xác nhận 2026-11-16). */
+  panTo(x: number, y: number): void;
+}
+
+/** Khung nhìn hiện tại cho minimap: `x`, `y`, `scale` như View; kích thước viewport theo px CSS. */
+export interface CanvasViewInfo {
+  x: number;
+  y: number;
+  scale: number;
+  viewportWidth: number;
+  viewportHeight: number;
 }
 
 interface Props {
@@ -79,12 +93,20 @@ interface Props {
   initialBreakpoints: BreakpointAnnotation;
   initialOperations: MaskOperation[];
   tool: EditorTool;
-  brushMode: BrushMode;
-  brushSize: number;
+  /** Paint (công cụ `brush`, phím B): polygon vẽ xong được nối (+) vào hoặc trừ (−) khỏi mask (người dùng xác nhận 2026-11-12). */
+  paintMode: PaintMode;
   maskOpacity: number;
   showMask: boolean;
   /** Select (V): node đang kéo dính vào điểm gần nhất của mask khác (người dùng xác nhận 2026-11-05). */
   magnet?: boolean;
+  /**
+   * Hiển thị ảnh để xem dễ hơn (người dùng xác nhận 2026-11-16) — CHỈ đổi hiển thị, dữ liệu lưu/export giữ nguyên:
+   * `brightness` 1 = gốc (CSS filter trên lớp stage, GPU); `edgeStrength` 0..1 = làm rõ biên bằng unsharp mask,
+   * tính MỘT LẦN trên ảnh nguồn khi đổi giá trị rồi thay nguồn vẽ, không tính lại theo frame nên không lag.
+   */
+  brightness?: number;
+  edgeStrength?: number;
+  onViewChange?(view: CanvasViewInfo): void;
   onChange(snapshot: EditorCanvasSnapshot): void;
   onSelectionChange(polygonIds: string[]): void;
   onHistoryChange?(state: EditorHistoryState): void;
@@ -96,25 +118,35 @@ interface Props {
 
 type View = { scale: number; x: number; y: number };
 type ImagePoint = { x: number; y: number };
-type BrushBounds = PolygonBounds;
 /** What undo/redo restores. `vectorsCurrent`: the polygons describe the mask exactly (no raster needed). */
 type DocumentState = { operations: MaskOperation[]; polygons: AnnotationPolygon[]; vectorsCurrent: boolean };
-/**
- * One linear history for every mask edit. Polygon edits restore their polygons exactly; brush strokes
- * keep the pixels of their rectangle before and after, so undo/redo never re-renders the whole mask.
- */
-type HistoryEntry =
-  | { kind: 'polygons'; before: DocumentState; after: DocumentState }
-  | { kind: 'brush'; before: DocumentState; after: DocumentState; bounds: BrushBounds; beforePixels: ImageData; afterPixels: ImageData };
+/** One linear history for every mask edit; each entry restores its polygons exactly. */
+type HistoryEntry = { kind: 'polygons'; before: DocumentState; after: DocumentState };
 const HISTORY_LIMIT = 100;
-const HISTORY_BYTES = 96 * 1024 * 1024;
-const historyBytes = (entry: HistoryEntry) => entry.kind === 'brush' ? entry.beforePixels.data.byteLength + entry.afterPixels.data.byteLength : 0;
+// Annotation đã lưu bằng nét brush cũ (trước 2026-11-12) vẫn được đọc: raster của nó được chuyển một lần.
 const isBrushOperation = (operation: MaskOperation): operation is BrushOperation => operation.type === 'BRUSH_ADD' || operation.type === 'BRUSH_ERASE';
+/** Công cụ chấm điểm polygon: P vẽ mask mới, Paint (brush) vẽ polygon để nối/trừ (người dùng xác nhận 2026-11-12). */
+const isDraftTool = (tool: EditorTool) => tool === 'polygon' || tool === 'brush';
+/** Gợi ý neo: hiện các đỉnh của polygon có thể neo trong khung nhìn (người dùng yêu cầu 2026-11-12). */
+/** Bán kính magnet khi kéo node (px màn hình). 10 px bị người dùng báo "hơi mạnh" nên giảm còn 6 (2026-11-16). */
+const MAGNET_RADIUS = 6;
+const ANCHOR_HINT_RADIUS = 2;
+const ANCHOR_HINT_MIN_SCREEN_SIZE = 24;
+const COMPLETION_FAILURE_MESSAGES: Record<CompletionFailure, string> = {
+  NO_TARGET: 'Không tự hoàn thiện được: con trỏ phải ở trong hoặc sát biên một mask.',
+  FROM_NOT_ON_FREE_BOUNDARY: 'Không tự hoàn thiện được: điểm vừa chấm phải neo trên biên tự do (chưa dính mask khác) của mask.',
+  DISCONNECTED: 'Không tự hoàn thiện được: hai mask không liền nhau (cách hơn 2.5 px), không nối qua khoảng trống.',
+  TARGET_OFF_RING: 'Không tự hoàn thiện được: mask đang trỏ không có biên tự do chung vòng với điểm vừa chấm.',
+  NO_ROUTE: 'Không tự hoàn thiện được: điểm đích trùng điểm vừa chấm.',
+};
 type Marquee = { start: ImagePoint; end: ImagePoint; additive: boolean };
 type PointerActivity =
   | { id: number; mode: 'pan'; lastClient: ImagePoint }
-  | { id: number; mode: 'brush'; last: ImagePoint; brushMode: BrushMode; radius: number }
-  | { id: number; mode: 'nodes'; start: ImagePoint; original: AnnotationPolygon[]; historyBefore?: AnnotationPolygon[]; nodeIds: Set<string>; polygonIds: Set<string>; moved: boolean; grab?: ImagePoint }
+  | {
+    id: number; mode: 'nodes'; start: ImagePoint; original: AnnotationPolygon[]; historyBefore?: AnnotationPolygon[]; nodeIds: Set<string>; polygonIds: Set<string>; moved: boolean; grab?: ImagePoint;
+    /** Kéo + Shift (Select): polygon khác polygon đang kéo (tính một lần mỗi lần kéo), vị trí con trỏ cuối và kế hoạch neo hiện tại. */
+    others?: AnnotationPolygon[]; lastPoint?: ImagePoint; anchor?: NodeAnchorPlan | null;
+  }
   | { id: number; mode: 'marquee'; start: ImagePoint; additive: boolean; clickPolygonId?: string }
   | { id: number; mode: 'point'; pointBefore: BreakpointPoint[]; draggedPointId: string; moved: boolean }
   | { id: number; mode: 'polygons'; start: ImagePoint; original: AnnotationPolygon[]; polygonIds: Set<string>; moved: boolean }
@@ -207,15 +239,25 @@ function visibleImageRect(view: View, cssWidth: number, cssHeight: number, width
   };
 }
 
-function brushBounds(points: ImagePoint[], radius: number): BrushBounds {
-  const bounds = { left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity };
-  for (const point of points) {
-    if (point.x - radius < bounds.left) bounds.left = point.x - radius;
-    if (point.x + radius > bounds.right) bounds.right = point.x + radius;
-    if (point.y - radius < bounds.top) bounds.top = point.y - radius;
-    if (point.y + radius > bounds.bottom) bounds.bottom = point.y + radius;
+/**
+ * Thêm chấm tròn của các đỉnh nằm trong khung nhìn vào `path`, mỗi ô lưới 8 px màn hình một chấm (`occupied` dùng
+ * chung giữa các polygon). Dùng cho handle của polygon đang chọn và cho gợi ý neo: hàng nghìn đỉnh vẫn chỉ là
+ * vài lệnh vẽ, chấm chồng nhau không vẽ lại.
+ */
+function addGridDots(
+  path: Path2D, ring: PolygonNode[], radius: number, view: View, viewport: PolygonBounds, occupied: Set<number>,
+  keep: (node: PolygonNode) => boolean = () => true, force: (node: PolygonNode) => boolean = () => false,
+) {
+  for (const node of ring) {
+    if (!keep(node)) continue;
+    if (node.x < viewport.left || node.x > viewport.right || node.y < viewport.top || node.y > viewport.bottom) continue;
+    const cell = Math.floor((node.x * view.scale + view.x) / 8) * 65536 + Math.floor((node.y * view.scale + view.y) / 8);
+    const forced = force(node);
+    if (!forced && occupied.has(cell)) continue;
+    occupied.add(cell);
+    path.moveTo(node.x + radius, node.y);
+    path.arc(node.x, node.y, radius, 0, Math.PI * 2);
   }
-  return bounds;
 }
 
 /** Polygons describe the mask only when POLYGON_SET is the last operation (no brush/reset after it). */
@@ -268,8 +310,7 @@ function closestPolygonEdge(polygon: AnnotationPolygon, point: ImagePoint) {
 
 const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas(props, ref) {
   const {
-    brushMode,
-    brushSize,
+    paintMode,
     height,
     imageUrl,
     initialBreakpoints,
@@ -288,14 +329,15 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     currentMaskUrl,
     showMask,
     magnet = false,
+    brightness = 1,
+    edgeStrength = 0,
+    onViewChange,
     tool,
     width,
   } = props;
   const viewportRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLCanvasElement>(null);
-  const interactionCanvasRef = useRef<HTMLCanvasElement>(null);
-  const cursorCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskLayerRef = useRef<HTMLCanvasElement>(null);
   const vectorLayerRef = useRef<HTMLCanvasElement>(null);
   // Polygon being drawn and the selection marquee: tiny, redrawn per move, so the photo stays untouched.
@@ -303,17 +345,16 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   // Off-DOM back buffer for dirty-rectangle redraws of the vector layer (see renderVectorLayer).
   const vectorBufferRef = useRef<HTMLCanvasElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
+  // Ảnh đã làm rõ biên (unsharp mask) khi edgeStrength > 0; null = dùng ảnh gốc. Chỉ đổi hiển thị.
+  const enhancedPhotoRef = useRef<HTMLCanvasElement | null>(null);
   // [full photo, ½, ¼, …]: zoomed out, the stage samples the smallest level that still covers the screen.
   const photoLevelsRef = useRef<Array<HTMLImageElement | HTMLCanvasElement>>([]);
+  const pyramidSourceRef = useRef<HTMLImageElement | HTMLCanvasElement | null>(null);
   // Decoded prediction; its normalized binary canvas (predictionRef) is only built when reset/accept needs it.
   const predictionImageRef = useRef<HTMLImageElement | null>(null);
   const predictionRef = useRef<HTMLCanvasElement | null>(null);
   const maskRef = useRef<HTMLCanvasElement | null>(null);
   const tintRef = useRef<HTMLCanvasElement | null>(null);
-  // White pixels for locked polygons. Brush commits restore only the touched ROI from this cache.
-  const lockedMaskRef = useRef<HTMLCanvasElement | null>(null);
-  // False while no polygon is locked: lockedMaskRef is then fully transparent and restoring it is skipped.
-  const lockedPixelsRef = useRef(false);
   const viewRef = useRef<View>({ scale: 1, x: 0, y: 0 });
   const fittedRef = useRef(false);
   const readyRef = useRef(false);
@@ -339,25 +380,34 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     status: vectorStatusRef.current,
     polygons: initialPolygonData.identity,
   });
-  const brushOperationRef = useRef<BrushOperation[]>(initialOperations.filter(
-    (operation): operation is BrushOperation => operation.type === 'BRUSH_ADD' || operation.type === 'BRUSH_ERASE',
-  ));
   const historyUndoRef = useRef<HistoryEntry[]>([]);
   const historyRedoRef = useRef<HistoryEntry[]>([]);
   const selectedNodeIdsRef = useRef(new Set<string>());
   const selectedPolygonIdsRef = useRef(new Set<string>());
   // New polygon being placed point by point, with its own per-point undo/redo (see polygon-draft.ts).
   const draftRef = useRef(new PolygonDraft());
+  // Công cụ đã bắt đầu bản nháp (P hoặc Paint): đổi sang công cụ khác ngoài Pan thì hủy bản nháp.
+  const draftToolRef = useRef<EditorTool | null>(null);
+  // Xem trước kéo + Shift trong Select: các đường tự hoàn thiện và điểm neo (vẽ trên lớp draft).
+  const nodeAnchorPreviewRef = useRef<{ routes: ImagePoint[][]; target: ImagePoint } | null>(null);
+  // Hàm xem trước kéo node mới nhất (nhấn/nhả Shift giữa lúc kéo gọi lại theo vị trí con trỏ cuối).
+  const nodeDragRef = useRef<(active: Extract<PointerActivity, { mode: 'nodes' | 'polygons' }>, point: ImagePoint, shift: boolean) => void>(() => undefined);
   const draftLayerDrawnRef = useRef(false);
   const hoveredNodeRef = useRef<PolygonNode | null>(null);
   const lastHistoryRef = useRef('');
   const polygonHoverRef = useRef<ImagePoint | null>(null);
-  const snapTargetRef = useRef<SnapTarget | null>(null);
+  // Điểm neo dưới con trỏ (P/Paint) để vẽ vòng chỉ báo.
+  const snapTargetRef = useRef<AnchorTarget | null>(null);
   // Xem trước auto anchor (giữ Shift) và vị trí con trỏ thật (chưa bắt dính) khi vẽ polygon.
   const draftAutofillRef = useRef<AutoAnchorResult | null>(null);
   const polygonCursorRef = useRef<ImagePoint | null>(null);
   // Điểm nháp vừa chấm bằng một lần nhấp: nhấp đúp ngay tại đó (lần nhấp đầu của nhấp đúp đã chấm nó) không hoàn tất.
-  const lastAddedDraftPointRef = useRef<{ id: string; time: number } | null>(null);
+  /**
+   * Điểm nháp vừa chấm + số lần nhấp trúng lại nó. Nhấp đúp lên BẤT KỲ điểm đã chấm đều hoàn tất (người dùng xác
+   * nhận 2026-11-16); chỉ cú nhấp đúp ở chỗ trống (lần nhấp đầu tự tạo điểm, lần hai trúng lại đúng một lần) là
+   * không — khi đó `retouches` mới bằng 1. Trước đây chặn theo 600 ms nên nhấp đúp lên điểm vừa vẽ không ăn.
+   */
+  const lastAddedDraftPointRef = useRef<{ id: string; time: number; retouches: number } | null>(null);
   const magnetRef = useRef(magnet);
   // Điểm của mask khác mà node đang kéo đã dính vào (magnet), vẽ vòng chỉ báo trên lớp draft.
   const magnetTargetRef = useRef<ImagePoint | null>(null);
@@ -373,12 +423,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   const enclosedPocketCursorRef = useRef<ImagePoint | null>(null);
   const cutPathRef = useRef<PolygonNode[]>([]);
   const suppressContextMenuSelectionRef = useRef(false);
-  const brushStrokeRef = useRef<ImagePoint[]>([]);
-  const brushCursorRef = useRef<ImagePoint | null>(null);
-  const pendingBrushSamplesRef = useRef<Array<{ clientX: number; clientY: number }>>([]);
-  const latestBrushCursorRef = useRef<{ clientX: number; clientY: number } | null>(null);
-  const brushFrameRef = useRef<number | null>(null);
-  const brushRef = useRef({ mode: brushMode, size: brushSize });
+  const paintModeRef = useRef(paintMode);
   const marqueeRef = useRef<Marquee | null>(null);
   const breakpointsRef = useRef(copyBreakpoints(initialBreakpoints));
   const pointUndoRef = useRef<BreakpointPoint[][]>([]);
@@ -411,10 +456,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     stage: boolean; draft: boolean; mask: boolean; maskRect: PolygonBounds | null; vectors: boolean; vectorsRect: PolygonBounds | null;
   }>({ stage: true, draft: true, mask: true, maskRect: null, vectors: true, vectorsRect: null });
   const settleTimerRef = useRef<number | null>(null);
-  const notifyTimerRef = useRef<number | null>(null);
-  const backgroundVectorTimerRef = useRef<number | null>(null);
-  const pendingVectorNotifyRef = useRef(false);
-  const clearInteractionOnFrameRef = useRef(false);
   const aliveRef = useRef(true);
   useEffect(() => {
     aliveRef.current = true;
@@ -422,8 +463,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       aliveRef.current = false;
       brushWorkerRef.current?.terminate();
       brushWorkerRef.current = null;
-      if (brushFrameRef.current !== null) cancelAnimationFrame(brushFrameRef.current);
-      for (const timer of [vectorizeTimerRef, settleTimerRef, notifyTimerRef, backgroundVectorTimerRef]) {
+      for (const timer of [vectorizeTimerRef, settleTimerRef]) {
         if (timer.current !== null) window.clearTimeout(timer.current);
         timer.current = null;
       }
@@ -465,23 +505,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     onSelectionChange([...selectedPolygonIdsRef.current]);
   }, [onSelectionChange]);
 
-  // Brush strokes reach React (workspace panels, dirty state) at most every 400 ms instead of per
-  // stroke; saving and leaving the brush flush the pending notification first.
-  const scheduleNotify = useCallback(() => {
-    if (notifyTimerRef.current !== null) return;
-    notifyTimerRef.current = window.setTimeout(() => {
-      notifyTimerRef.current = null;
-      notifyChange();
-    }, 400);
-  }, [notifyChange]);
-
-  const flushNotify = useCallback(() => {
-    if (notifyTimerRef.current === null) return;
-    window.clearTimeout(notifyTimerRef.current);
-    notifyTimerRef.current = null;
-    notifyChange();
-  }, [notifyChange]);
-
   const ensureMaskRaster = useCallback(() => {
     const polygons = pendingMaskPolygonsRef.current;
     const context = maskRef.current?.getContext('2d', { willReadFrequently: true });
@@ -494,26 +517,15 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       ? [{ ...polygon, holes: polygon.holes?.filter(validRing) }] : []);
     putPolygonRaster(context, drawable, width, height);
     pendingMaskPolygonsRef.current = null;
-    // The worker rebuilds the identical raster from the same polygons (a few typed arrays), instead of a
-    // later full-image getImageData + transfer on the main thread right after the first brush stroke.
-    const worker = brushWorkerRef.current;
-    if (worker) {
-      const geometry = packGeometry(drawable);
-      worker.postMessage(
-        { type: 'INIT_POLYGONS', revision: maskRevisionRef.current, width, height, geometry } satisfies MaskWorkerRequest,
-        packedTransfer(geometry),
-      );
-      workerSyncedRef.current = true;
-    }
   }, [height, width]);
 
+  // Worker chỉ còn dùng để chuyển một lần mask CHỈ CÓ RASTER (mask dự đoán, Khôi phục mask ban đầu, annotation
+  // brush cũ) sang polygon; Paint không còn ghi pixel nên không gửi vùng thay đổi nào (2026-11-12).
   const syncWorkerMask = useCallback(() => {
     const worker = brushWorkerRef.current;
     const context = maskRef.current?.getContext('2d', { willReadFrequently: true });
     if (!worker || !context || workerSyncedRef.current) return;
     ensureMaskRaster();
-    // Pending polygons were just sent to the worker as INIT_POLYGONS.
-    if (workerSyncedRef.current) return;
     const imageData = context.getImageData(0, 0, width, height);
     worker.postMessage(
       { type: 'INIT_MASK', revision: maskRevisionRef.current, width, height, imageData } satisfies MaskWorkerRequest,
@@ -522,29 +534,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     workerSyncedRef.current = true;
   }, [ensureMaskRaster, height, width]);
 
-  const drawBrushCursor = useCallback(() => {
-    const target = cursorCanvasRef.current;
-    const context = target?.getContext('2d');
-    if (!target || !context) return;
-    context.clearRect(0, 0, target.width, target.height);
-    const cursor = brushCursorRef.current;
-    if (!cursor || toolRef.current !== 'brush') return;
-    const ratio = pixelRatio();
-    const view = viewRef.current;
-    const radius = Math.max(0.5, brushRef.current.size / 2);
-    context.save();
-    context.setTransform(ratio * view.scale, 0, 0, ratio * view.scale, ratio * view.x, ratio * view.y);
-    context.beginPath();
-    context.arc(cursor.x, cursor.y, radius, 0, Math.PI * 2);
-    context.lineWidth = 3 / view.scale;
-    context.strokeStyle = 'rgba(255,255,255,.9)';
-    context.stroke();
-    context.lineWidth = 1.25 / view.scale;
-    context.strokeStyle = brushRef.current.mode === 'add' ? '#6d4ef2' : ERASE_COLOR;
-    context.stroke();
-    context.restore();
-  }, []);
-
   /**
    * Stage: background + photo only, redrawn when the view or the canvas size changes (never for a
    * selection, node drag, draft point or brush commit). Zoomed out, the photo is sampled from the
@@ -552,7 +541,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
    */
   const renderNow = useCallback((): 'skipped' | 'drawn' | 'resized' => {
     const stage = stageRef.current;
-    const image = imageRef.current;
+    const image = enhancedPhotoRef.current ?? imageRef.current;
     if (!stage || !image || !readyRef.current) return 'skipped';
     const context = stage.getContext('2d');
     if (!context) return 'skipped';
@@ -561,7 +550,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     const pixelWidth = Math.max(1, Math.round(rect.width * ratio));
     const pixelHeight = Math.max(1, Math.round(rect.height * ratio));
     let resized = false;
-    for (const canvas of [stage, maskLayerRef.current, vectorLayerRef.current, draftLayerRef.current, interactionCanvasRef.current, cursorCanvasRef.current]) {
+    for (const canvas of [stage, maskLayerRef.current, vectorLayerRef.current, draftLayerRef.current]) {
       if (canvas && (canvas.width !== pixelWidth || canvas.height !== pixelHeight)) {
         canvas.width = pixelWidth;
         canvas.height = pixelHeight;
@@ -593,10 +582,8 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         visible.left, visible.top, visibleWidth, visibleHeight);
     }
     context.restore();
-    // The cursor overlay lives in screen space; keep it attached to the image while zooming/panning.
-    if (toolRef.current === 'brush') drawBrushCursor();
     return resized ? 'resized' : 'drawn';
-  }, [drawBrushCursor, height, width]);
+  }, [height, width]);
 
   /** Draft polygon (with the hover preview edge) and the selection marquee, in screen space. */
   const renderDraftLayer = useCallback(() => {
@@ -605,7 +592,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (!layer || !context) return;
     const draft = draftRef.current.nodes;
     const marquee = marqueeRef.current;
-    if (!draft.length && !marquee && !magnetTargetRef.current && !anchorHoverRef.current && !enclosedPocketHoverRef.current && !snapTargetRef.current && !cutPathRef.current.length && !['rectangle', 'circle'].includes(pointerRef.current?.mode ?? '')) {
+    if (!draft.length && !marquee && !magnetTargetRef.current && !nodeAnchorPreviewRef.current && !anchorHoverRef.current && !enclosedPocketHoverRef.current && !snapTargetRef.current && !cutPathRef.current.length && !['rectangle', 'circle'].includes(pointerRef.current?.mode ?? '')) {
       // Nothing to show: clear once, then skip until something is drawn again.
       if (draftLayerDrawnRef.current) { context.setTransform(1, 0, 0, 1, 0, 0); context.clearRect(0, 0, layer.width, layer.height); }
       draftLayerDrawnRef.current = false;
@@ -621,30 +608,34 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (draft.length) {
       const hover = polygonHoverRef.current;
       const autofill = draftAutofillRef.current;
+      // Paint (−): bản nháp đỏ để biết polygon sẽ trừ khỏi mask; P và Paint (+) giữ màu tím.
+      const subtract = toolRef.current === 'brush' && paintModeRef.current === 'subtract';
+      const draftFill = subtract ? ERASE_COLOR : POLYGON_FILL;
+      const draftStroke = subtract ? ERASE_COLOR : '#6d4ef2';
       // Đang xem trước auto anchor: bản nháp kèm các điểm sẽ chèn; không kéo cạnh tới con trỏ (con trỏ nằm trong mask).
       const preview = autofill ? [...draft, ...autofill.nodes] : hover ? [...draft, { id: 'preview', ...hover }] : draft;
       context.beginPath();
       if (preview.length >= 3) {
         drawSmoothClosedPath(context, preview, 0.08, polygonsRef.current);
         context.globalAlpha = Math.min(0.72, Math.max(0.2, display.maskOpacity * 0.85));
-        context.fillStyle = POLYGON_FILL;
+        context.fillStyle = draftFill;
         context.fill();
         context.globalAlpha = 1;
         context.setLineDash([8 / view.scale, 5 / view.scale]);
         context.lineWidth = 2 / view.scale;
-        context.strokeStyle = autofill ? '#10b981' : '#6d4ef2';
+        context.strokeStyle = autofill ? '#10b981' : draftStroke;
         context.stroke();
         context.setLineDash([]);
       } else {
         preview.forEach((node, index) => index === 0 ? context.moveTo(node.x, node.y) : context.lineTo(node.x, node.y));
         context.lineWidth = 2 / view.scale;
-        context.strokeStyle = '#6d4ef2';
+        context.strokeStyle = draftStroke;
         context.stroke();
       }
       for (const node of draft) {
         context.beginPath();
         context.arc(node.x, node.y, 3.5 / view.scale, 0, Math.PI * 2);
-        context.fillStyle = '#7c5cfa';
+        context.fillStyle = subtract ? ERASE_COLOR : '#7c5cfa';
         context.fill();
       }
       if (autofill) {
@@ -905,7 +896,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     }
 
     const snapTarget = snapTargetRef.current;
-    if (snapTarget && (toolRef.current === 'polygon' || toolRef.current === 'anchor')) {
+    if (snapTarget && (isDraftTool(toolRef.current) || toolRef.current === 'anchor')) {
       context.save();
       context.beginPath();
       context.arc(snapTarget.point.x, snapTarget.point.y, 6.5 / view.scale, 0, Math.PI * 2);
@@ -917,7 +908,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       context.fillStyle = '#10b981';
       context.fill();
 
-      if (toolRef.current === 'polygon' && !snapTarget.isVertex) {
+      if (isDraftTool(toolRef.current) && !snapTarget.vertexId) {
         context.font = `600 ${11 / view.scale}px ui-sans-serif, system-ui, sans-serif`;
         const text = '+ Tạo anchor trên biên';
         const tw = context.measureText(text).width;
@@ -938,6 +929,28 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       context.arc(magnetTarget.x, magnetTarget.y, 7 / view.scale, 0, Math.PI * 2);
       context.lineWidth = 2 / view.scale;
       context.strokeStyle = '#10b981';
+      context.stroke();
+    }
+
+    // Kéo + Shift (Select): đường tự hoàn thiện dọc biên mask đích và điểm neo.
+    const nodeAnchor = nodeAnchorPreviewRef.current;
+    if (nodeAnchor) {
+      context.lineWidth = 2.5 / view.scale;
+      context.strokeStyle = '#10b981';
+      for (const route of nodeAnchor.routes) {
+        context.beginPath();
+        route.forEach((point, index) => index === 0 ? context.moveTo(point.x, point.y) : context.lineTo(point.x, point.y));
+        context.stroke();
+        for (const point of route.slice(1, -1)) {
+          context.beginPath();
+          context.arc(point.x, point.y, 2.5 / view.scale, 0, Math.PI * 2);
+          context.fillStyle = '#10b981';
+          context.fill();
+        }
+      }
+      context.beginPath();
+      context.arc(nodeAnchor.target.x, nodeAnchor.target.y, 7 / view.scale, 0, Math.PI * 2);
+      context.lineWidth = 2 / view.scale;
       context.stroke();
     }
 
@@ -1115,6 +1128,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     context.lineWidth = 1.5 / view.scale;
     context.strokeStyle = POLYGON_STROKE;
     let currentStroke = POLYGON_STROKE;
+    // Gợi ý neo (người dùng yêu cầu 2026-11-12): ở P/Paint, và khi đang kéo node trong Select, hiện đỉnh của các
+    // polygon khác trong khung nhìn để biết đưa chuột tới đâu. Bỏ qua polygon quá nhỏ trên màn hình.
+    const showAnchorHints = isDraftTool(toolRef.current) || (toolRef.current === 'select' && pointerRef.current?.mode === 'nodes');
+    const hintPolygons: AnnotationPolygon[] = [];
     for (const polygon of polygonsRef.current) {
       if (polygon.nodes.length < 2) continue;
       const bounds = polygonBounds(polygon);
@@ -1122,6 +1139,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       if (reach.right < viewportBounds.left || reach.left > viewportBounds.right
           || reach.bottom < viewportBounds.top || reach.top > viewportBounds.bottom) continue;
       if (selectedPolygonIdsRef.current.has(polygon.id)) { selectedPolygons.push(polygon); continue; }
+      if (showAnchorHints && Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) * view.scale >= ANCHOR_HINT_MIN_SCREEN_SIZE) {
+        hintPolygons.push(polygon);
+      }
       if (polygon.meta?.locked) { lockedPolygons.push(polygon); continue; }
       const color = outlineColor(polygon);
       // Regions smaller than a screen pixel at this zoom: one dot instead of a path.
@@ -1140,6 +1160,26 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     }
     context.strokeStyle = '#667085';
     for (const polygon of lockedPolygons) context.stroke(polygonPathAt(polygon, view.scale));
+    if (hintPolygons.length) {
+      // Chấm rỗng nhỏ, viền theo màu label (mask khóa: xám), khác handle tím của polygon đang chọn.
+      const occupied = new Set<number>();
+      const hintsByColor = new Map<string, Path2D>();
+      const radius = ANCHOR_HINT_RADIUS / view.scale;
+      for (const polygon of hintPolygons) {
+        const color = polygon.meta?.locked ? '#98a2b3' : outlineColor(polygon);
+        let path = hintsByColor.get(color);
+        if (!path) { path = new Path2D(); hintsByColor.set(color, path); }
+        for (const ring of polygonRings(polygon)) addGridDots(path, ring, radius, view, viewportBounds, occupied);
+      }
+      context.globalAlpha = 1;
+      context.lineWidth = 1.25 / view.scale;
+      for (const [color, path] of hintsByColor) {
+        context.fillStyle = '#ffffff';
+        context.fill(path);
+        context.strokeStyle = color;
+        context.stroke(path);
+      }
+    }
     for (const polygon of selectedPolygons) {
       const locked = polygon.meta?.locked === true;
       context.globalAlpha = outlineAlpha;
@@ -1185,28 +1225,22 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         }
         context.fillText(text, anchorX + paddingX + iconWidth, tagY + tagHeight / 2);
       }
-      if (toolRef.current === 'select' || toolRef.current === 'polygon' || toolRef.current === 'anchor') {
+      if (toolRef.current === 'select' || isDraftTool(toolRef.current) || toolRef.current === 'anchor') {
         // Screen-space grid: retain exact vertices for editing, avoid overdraw of overlapping handles.
         // All handles of one style go into a single path, so thousands of nodes cost two draw calls.
+        // Node đang chọn luôn được vẽ và giữ ô lưới trước, node thường trong cùng ô bị bỏ.
         const occupied = new Set<number>();
         const normalHandles = new Path2D();
         const activeHandles = new Path2D();
-        const normalRadius = 2.75 / view.scale;
-        const activeRadius = 4.25 / view.scale;
+        const isSelectedNode = (node: PolygonNode) => selectedNodeIdsRef.current.has(node.id);
+        const visibleNode = (node: PolygonNode) => toolRef.current !== 'anchor' || Boolean(node.isAnchor);
         for (const ring of polygonRings(polygon)) {
-          for (const node of ring) {
-            if (toolRef.current === 'anchor' && !node.isAnchor) continue;
-            if (node.x < viewportBounds.left || node.x > viewportBounds.right
-                || node.y < viewportBounds.top || node.y > viewportBounds.bottom) continue;
-            const nodeSelected = selectedNodeIdsRef.current.has(node.id);
-            const cell = Math.floor((node.x * view.scale + view.x) / 8) * 65536 + Math.floor((node.y * view.scale + view.y) / 8);
-            if (!nodeSelected && occupied.has(cell)) continue;
-            occupied.add(cell);
-            const path = nodeSelected ? activeHandles : normalHandles;
-            const radius = nodeSelected ? activeRadius : normalRadius;
-            path.moveTo(node.x + radius, node.y);
-            path.arc(node.x, node.y, radius, 0, Math.PI * 2);
-          }
+          addGridDots(activeHandles, ring, 4.25 / view.scale, view, viewportBounds, occupied,
+            (node) => visibleNode(node) && isSelectedNode(node), () => true);
+        }
+        for (const ring of polygonRings(polygon)) {
+          addGridDots(normalHandles, ring, 2.75 / view.scale, view, viewportBounds, occupied,
+            (node) => visibleNode(node) && !isSelectedNode(node));
         }
         context.lineWidth = 1.5 / view.scale;
         context.fillStyle = locked ? '#eaecf0' : '#cfc4ff';
@@ -1307,12 +1341,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         dirty.draft = false;
       }
       applyLayerTransforms();
-      if (clearInteractionOnFrameRef.current) {
-        // The live brush preview disappears in the same frame as the committed mask appears: no flicker.
-        clearInteractionOnFrameRef.current = false;
-        const overlay = interactionCanvasRef.current;
-        overlay?.getContext('2d')?.clearRect(0, 0, overlay.width, overlay.height);
-      }
       // While points of a new polygon are being placed, undo/redo only step through those points.
       const state = draftRef.current.historyState(historyUndoRef.current.length, historyRedoRef.current.length);
       const key = JSON.stringify(state);
@@ -1357,9 +1385,20 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
    * View changed (zoom/pan): redraw the photo and draft now, move the mask/vector layers on the GPU,
    * and redraw those sharp once the gesture settles.
    */
+  /** Báo khung nhìn cho minimap ở sidebar (người dùng xác nhận 2026-11-16). */
+  const notifyView = useCallback(() => {
+    const stage = stageRef.current;
+    if (!stage || !onViewChange) return;
+    const rect = stage.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const view = viewRef.current;
+    onViewChange({ x: view.x, y: view.y, scale: view.scale, viewportWidth: rect.width, viewportHeight: rect.height });
+  }, [onViewChange]);
+
   const renderView = useCallback(() => {
     dirtyRef.current.stage = true;
     dirtyRef.current.draft = true;
+    notifyView();
     scheduleFrame();
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = window.setTimeout(() => {
@@ -1371,7 +1410,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       dirty.vectorsRect = null;
       scheduleFrame();
     }, 120);
-  }, [scheduleFrame]);
+  }, [notifyView, scheduleFrame]);
 
   /** Mask content changed; with `rect` only that image rectangle of the mask layer is redrawn. */
   const invalidateMask = useCallback((rect?: PolygonBounds) => {
@@ -1402,40 +1441,24 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   }, []);
 
   useEffect(() => {
-    if (toolRef.current === 'brush' && tool !== 'brush') {
-      flushNotify();
-      if (pendingVectorNotifyRef.current) {
-        pendingVectorNotifyRef.current = false;
-        notifyChange('MODIFIED', polygonsRef.current);
-      }
-      brushStrokeRef.current = [];
-      brushCursorRef.current = null;
-      pendingBrushSamplesRef.current = [];
-      if (pointerRef.current?.mode === 'brush') pointerRef.current = null;
-      for (const canvas of [interactionCanvasRef.current, cursorCanvasRef.current]) {
-        const context = canvas?.getContext('2d');
-        if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
-      }
-      if (vectorRevisionRef.current !== maskRevisionRef.current) {
-        vectorStatusRef.current = 'DIRTY';
-        vectorCacheRef.current.status = 'DIRTY';
-        polygonModeRef.current = false;
-        scheduleVectorizationRef.current(0);
-        onMessage('Đang chuẩn bị biên polygon… Mask raster vẫn được giữ nguyên.');
-      }
-    }
-    // Prepare the binary raster (and the worker) as soon as the main thread is idle, so the first stroke
-    // commits without a hitch while the tool switch itself paints immediately. A stroke that starts
-    // earlier prepares it synchronously in commitBrushStroke.
-    if (tool === 'brush') whenIdle(() => { if (aliveRef.current && toolRef.current === 'brush') ensureMaskRaster(); });
-    if (tool !== 'polygon' && tool !== 'pan' && draftRef.current.editing) {
+    // Đổi sang công cụ khác ngoài Pan thì hủy bản nháp; P và Paint không dùng chung bản nháp của nhau.
+    if (tool !== 'pan' && tool !== draftToolRef.current && draftRef.current.editing) {
       draftRef.current.clear();
+      draftAutofillRef.current = null;
       polygonHoverRef.current = null;
     }
+    if (!isDraftTool(tool)) snapTargetRef.current = null;
     hoveredNodeRef.current = null;
     toolRef.current = tool;
     render();
-  }, [ensureMaskRaster, flushNotify, notifyChange, onMessage, render, tool]);
+  }, [render, tool]);
+
+  useEffect(() => {
+    // Đổi +/− giữ bản nháp, chỉ vẽ lại màu bản nháp.
+    paintModeRef.current = paintMode;
+    dirtyRef.current.draft = true;
+    scheduleFrame();
+  }, [paintMode, scheduleFrame]);
 
   useEffect(() => {
     const previous = displayRef.current;
@@ -1468,59 +1491,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     context.globalCompositeOperation = 'source-over';
   }, []);
 
-  const clearOverlay = useCallback((target: HTMLCanvasElement | null) => {
-    const context = target?.getContext('2d');
-    if (target && context) context.clearRect(0, 0, target.width, target.height);
-  }, []);
-
-  const drawTransientSegments = useCallback((points: ImagePoint[], mode: BrushMode, radius: number) => {
-    const target = interactionCanvasRef.current;
-    const context = target?.getContext('2d');
-    if (!target || !context || !points.length) return;
-    const ratio = pixelRatio();
-    const view = viewRef.current;
-    context.save();
-    context.setTransform(ratio * view.scale, 0, 0, ratio * view.scale, ratio * view.x, ratio * view.y);
-    // Opaque paint + CSS opacity on the layer: overlapping frame segments do not darken at joints.
-    context.fillStyle = mode === 'add' ? POLYGON_FILL : ERASE_COLOR;
-    context.strokeStyle = context.fillStyle;
-    context.lineWidth = radius * 2;
-    context.lineCap = 'round';
-    context.lineJoin = 'round';
-    context.beginPath();
-    if (points.length === 1) {
-      context.arc(points[0].x, points[0].y, radius, 0, Math.PI * 2);
-      context.fill();
-    } else {
-      context.moveTo(points[0].x, points[0].y);
-      for (let index = 1; index < points.length; index += 1) context.lineTo(points[index].x, points[index].y);
-      context.stroke();
-    }
-    context.restore();
-  }, []);
-
-  useEffect(() => {
-    brushRef.current = { mode: brushMode, size: brushSize };
-    if (toolRef.current === 'brush') drawBrushCursor();
-  }, [brushMode, brushSize, drawBrushCursor]);
-
   const rebuildPolygonTint = useCallback((polygons: AnnotationPolygon[]) => {
     const target = tintRef.current;
     const context = target?.getContext('2d');
     if (!target || !context) return;
-    let lockedMask = lockedMaskRef.current;
-    if (!lockedMask) {
-      lockedMask = document.createElement('canvas');
-      lockedMaskRef.current = lockedMask;
-    }
-    if (lockedMask.width !== target.width) lockedMask.width = target.width;
-    if (lockedMask.height !== target.height) lockedMask.height = target.height;
-    const lockedContext = lockedMask.getContext('2d');
-    const lockedPolygons = polygons.filter((polygon) => polygon.meta?.locked && polygon.nodes.length >= 3);
-    // Keep the protection mask binary, matching the authoritative pixel mask exactly. Opaque cached
-    // pixels can be copied repeatedly without antialiased edge alpha accumulating between strokes.
-    if (lockedContext) putPolygonRaster(lockedContext, lockedPolygons, lockedMask.width, lockedMask.height);
-    lockedPixelsRef.current = Boolean(lockedContext) && lockedPolygons.length > 0;
     // Native antialiased fill (cached Path2D) instead of a per-pixel JS loop: smooth edges and
     // no full-image ImageData. The binary export raster is rebuilt lazily by ensureMaskRaster.
     context.clearRect(0, 0, target.width, target.height);
@@ -1540,14 +1514,15 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
    * averages like a box filter). The stage switches to a level as soon as it exists; until then, and
    * when zoomed in, it draws the full photo.
    */
-  const buildPhotoPyramid = useCallback((image: HTMLImageElement) => {
+  const buildPhotoPyramid = useCallback((image: HTMLImageElement | HTMLCanvasElement) => {
     const build = ++pyramidBuildRef.current;
     const sizes = photoPyramidSizes(width, height);
     const levels: Array<HTMLImageElement | HTMLCanvasElement> = [image];
     photoLevelsRef.current = levels.slice();
+    pyramidSourceRef.current = image;
     const next = () => {
       const size = sizes[levels.length - 1];
-      if (!size || !aliveRef.current || pyramidBuildRef.current !== build || imageRef.current !== image) return;
+      if (!size || !aliveRef.current || pyramidBuildRef.current !== build || pyramidSourceRef.current !== image) return;
       const canvas = document.createElement('canvas');
       canvas.width = size.width;
       canvas.height = size.height;
@@ -1564,6 +1539,67 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     };
     whenIdle(next);
   }, [height, scheduleFrame, width]);
+
+  /**
+   * LÀM RÕ BIÊN bằng unsharp mask (người dùng xác nhận 2026-11-16): out = ảnh + strength × (ảnh − bản làm mờ 2 px).
+   * Tính MỘT LẦN trên ảnh nguồn khi đổi giá trị (~60 ms với ảnh 2 Mpx, có debounce) rồi thay nguồn vẽ của lớp
+   * stage + pyramid — không tính lại theo frame nên pan/zoom không lag. Chỉ đổi hiển thị, không đụng mask/export.
+   */
+  const applyEdgeEnhance = useCallback((strength: number) => {
+    const image = imageRef.current;
+    if (!image) return;
+    if (strength <= 0) {
+      if (!enhancedPhotoRef.current) return;
+      enhancedPhotoRef.current = null;
+      buildPhotoPyramid(image);
+      dirtyRef.current.stage = true;
+      scheduleFrame();
+      return;
+    }
+    const blurCanvas = document.createElement('canvas');
+    blurCanvas.width = width;
+    blurCanvas.height = height;
+    const blurContext = blurCanvas.getContext('2d', { willReadFrequently: true });
+    const output = document.createElement('canvas');
+    output.width = width;
+    output.height = height;
+    const outputContext = output.getContext('2d', { willReadFrequently: true });
+    if (!blurContext || !outputContext) return;
+    blurContext.filter = 'blur(2px)';
+    blurContext.drawImage(image, 0, 0, width, height);
+    outputContext.drawImage(image, 0, 0, width, height);
+    const sharp = outputContext.getImageData(0, 0, width, height);
+    const blurred = blurContext.getImageData(0, 0, width, height);
+    const source = sharp.data;
+    const soft = blurred.data;
+    const amount = strength * 2;
+    for (let index = 0; index < source.length; index += 4) {
+      source[index] += (source[index] - soft[index]) * amount;
+      source[index + 1] += (source[index + 1] - soft[index + 1]) * amount;
+      source[index + 2] += (source[index + 2] - soft[index + 2]) * amount;
+    }
+    outputContext.putImageData(sharp, 0, 0);
+    enhancedPhotoRef.current = output;
+    buildPhotoPyramid(output);
+    dirtyRef.current.stage = true;
+    scheduleFrame();
+  }, [buildPhotoPyramid, height, scheduleFrame, width]);
+  const edgeStrengthRef = useRef(edgeStrength);
+  const applyEdgeEnhanceRef = useRef(applyEdgeEnhance);
+  applyEdgeEnhanceRef.current = applyEdgeEnhance;
+
+  // Độ sáng: CSS filter trên RIÊNG lớp stage (ảnh), composite trên GPU — mask/viền/điểm không đổi màu.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (stage) stage.style.filter = brightness !== 1 ? `brightness(${brightness})` : '';
+  }, [brightness]);
+
+  useEffect(() => {
+    edgeStrengthRef.current = edgeStrength;
+    const timer = window.setTimeout(() => applyEdgeEnhanceRef.current(edgeStrengthRef.current), 200);
+    return () => window.clearTimeout(timer);
+  }, [edgeStrength]);
+
 
   /**
    * GPU-backed canvases lose their pixels on a GPU reset or under memory pressure. The layers are only
@@ -1589,57 +1625,19 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       }
     }
     // Pyramid levels are GPU canvases too.
-    if (imageRef.current) buildPhotoPyramid(imageRef.current);
+    const photoSource = enhancedPhotoRef.current ?? imageRef.current;
+    if (photoSource) buildPhotoPyramid(photoSource);
     invalidateAll();
   }, [buildPhotoPyramid, invalidateAll, rebuildTint]);
   const contextRestoreRef = useRef(repaintAfterContextLoss);
   contextRestoreRef.current = repaintAfterContextLoss;
 
   useEffect(() => {
-    const canvases = [stageRef, maskLayerRef, vectorLayerRef, draftLayerRef, interactionCanvasRef, cursorCanvasRef]
+    const canvases = [stageRef, maskLayerRef, vectorLayerRef, draftLayerRef]
       .flatMap((canvasRef) => canvasRef.current ? [canvasRef.current] : []);
     const onRestored = () => contextRestoreRef.current();
     for (const canvas of canvases) canvas.addEventListener('contextrestored', onRestored);
     return () => { for (const canvas of canvases) canvas.removeEventListener('contextrestored', onRestored); };
-  }, []);
-
-  const paintBrushPreview = useCallback((points: ImagePoint[], mode: BrushMode, radius: number, bounds?: BrushBounds) => {
-    if (!points.length) return;
-    for (const [target, color] of [[maskRef.current, '#fff'], [tintRef.current, POLYGON_FILL]] as const) {
-      const context = target?.getContext('2d');
-      if (!target || !context) continue;
-      context.save();
-      context.globalCompositeOperation = mode === 'erase' ? 'destination-out' : 'source-over';
-      context.fillStyle = color;
-      context.strokeStyle = color;
-      context.lineWidth = radius * 2;
-      context.lineCap = 'round';
-      context.lineJoin = 'round';
-      context.beginPath();
-      if (points.length === 1) {
-        context.arc(points[0].x, points[0].y, radius, 0, Math.PI * 2);
-        context.fill();
-      } else {
-        points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
-        context.stroke();
-      }
-      context.restore();
-    }
-    const lockedMask = lockedMaskRef.current;
-    if (!lockedMask || !bounds || !lockedPixelsRef.current) return;
-    const patchWidth = bounds.right - bounds.left;
-    const patchHeight = bounds.bottom - bounds.top;
-    if (patchWidth <= 0 || patchHeight <= 0) return;
-    // Restore only the touched region, so locked pixels stay immutable without scanning the mask.
-    for (const target of [maskRef.current, tintRef.current]) {
-      const context = target?.getContext('2d');
-      if (!target || !context) continue;
-      context.drawImage(
-        lockedMask,
-        bounds.left, bounds.top, patchWidth, patchHeight,
-        bounds.left, bounds.top, patchWidth, patchHeight,
-      );
-    }
   }, []);
 
   const requestLatestVector = useCallback((): Promise<void> => {
@@ -1658,10 +1656,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     vectorStatusRef.current = 'VECTORING';
     vectorCacheRef.current.status = 'VECTORING';
     vectorizingRevisionRef.current = revision;
-    if (backgroundVectorTimerRef.current !== null) {
-      window.clearTimeout(backgroundVectorTimerRef.current);
-      backgroundVectorTimerRef.current = null;
-    }
     syncWorkerMask();
     brushWorkerRef.current?.postMessage({ type: 'VECTORIZE', revision, send: true } satisfies MaskWorkerRequest);
     return waiting;
@@ -1681,18 +1675,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   }, [requestLatestVector, vectorsCurrent]);
   scheduleVectorizationRef.current = scheduleVectorization;
 
-  // While the user draws, the worker keeps contours up to date in the background without posting them
-  // back (no main-thread cost). Leaving the brush or saving then only transfers the changed components.
-  const scheduleBackgroundVectorize = useCallback(() => {
-    if (backgroundVectorTimerRef.current !== null) window.clearTimeout(backgroundVectorTimerRef.current);
-    backgroundVectorTimerRef.current = window.setTimeout(() => {
-      backgroundVectorTimerRef.current = null;
-      if (pointerRef.current || vectorizingRevisionRef.current !== null || vectorsCurrent()) return;
-      syncWorkerMask();
-      brushWorkerRef.current?.postMessage({ type: 'VECTORIZE', revision: maskRevisionRef.current, send: false } satisfies MaskWorkerRequest);
-    }, 450);
-  }, [syncWorkerMask, vectorsCurrent]);
-
   const handleWorkerMessage = useCallback((response: MaskWorkerResponse) => {
     if (!aliveRef.current) return;
     if (response.type === 'ERROR') {
@@ -1708,7 +1690,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       if (response.revision !== maskRevisionRef.current && !vectorsCurrent()) scheduleVectorizationRef.current(0);
       return;
     }
-    if (response.type === 'MASK_READY' || response.type === 'STROKE_APPLIED') {
+    if (response.type === 'MASK_READY') {
       workerRasterRevisionRef.current = response.revision;
       return;
     }
@@ -1736,10 +1718,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       vectorWaitersRef.current.delete(response.revision);
       if (response.revision !== maskRevisionRef.current) {
         // The mask changed meanwhile. Only re-trace when the current polygons are really out of date.
-        if (!vectorsCurrent()) {
-          if (toolRef.current === 'brush' && !vectorWaitersRef.current.size) scheduleBackgroundVectorize();
-          else scheduleVectorizationRef.current(0);
-        }
+        if (!vectorsCurrent()) scheduleVectorizationRef.current(0);
         completedWaiters.forEach((resolve) => resolve());
         return;
       }
@@ -1750,18 +1729,16 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       }
       const polygons = [...vectorSourceRef.current.values()];
       polygonsRef.current = polygons;
-      if (toolRef.current === 'select' || toolRef.current === 'polygon') polygonModeRef.current = true;
+      if (toolRef.current === 'select' || isDraftTool(toolRef.current)) polygonModeRef.current = true;
       vectorRevisionRef.current = response.revision;
       vectorStatusRef.current = 'READY';
       vectorCacheRef.current = { revision: response.revision, status: 'READY', polygons };
-      // Still drawing: no React update now (it would stall the brush); leaving the brush/saving notifies.
-      if (toolRef.current === 'brush') pendingVectorNotifyRef.current = true;
-      else notifyChange('MODIFIED', polygons);
+      notifyChange('MODIFIED', polygons);
       invalidateMask();
       render();
       completedWaiters.forEach((resolve) => resolve());
       if (process.env.NODE_ENV !== 'production') {
-        console.debug('[brush-performance]', {
+        console.debug('[raster-vectorize]', {
           maskRevision: maskRevisionRef.current,
           vectorRevision: response.revision,
           vectorizeDuration: response.duration,
@@ -1771,7 +1748,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         });
       }
     }
-  }, [invalidateMask, notifyChange, onMessage, render, scheduleBackgroundVectorize, vectorsCurrent]);
+  }, [invalidateMask, notifyChange, onMessage, render, vectorsCurrent]);
   workerMessageRef.current = handleWorkerMessage;
 
   /** One long-lived worker per canvas; its mask is (re)sent lazily by syncWorkerMask. */
@@ -1827,8 +1804,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     const scale = Math.max(0.05, Math.min((rect.width - 36) / width, (rect.height - 36) / height));
     viewRef.current = { scale, x: (rect.width - width * scale) / 2, y: (rect.height - height * scale) / 2 };
     onZoomChange?.(scale);
+    notifyView();
     invalidateAll();
-  }, [height, invalidateAll, onZoomChange, width]);
+  }, [height, invalidateAll, notifyView, onZoomChange, width]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1888,6 +1866,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         if (polygonMode) rebuildPolygonTint(polygonsRef.current);
         createMaskWorker();
         buildPhotoPyramid(image);
+        if (edgeStrengthRef.current > 0) applyEdgeEnhanceRef.current(edgeStrengthRef.current);
         readyRef.current = true;
         fittedRef.current = true;
         fit();
@@ -1918,60 +1897,17 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     };
   }, [height, width]);
 
-  const clientPointToImage = useCallback((clientX: number, clientY: number, knownRect?: DOMRect): ImagePoint => {
-    const stage = stageRef.current;
-    if (!stage) return { x: 0, y: 0 };
-    const rect = knownRect ?? stage.getBoundingClientRect();
-    const view = viewRef.current;
-    return {
-      x: Math.max(0, Math.min(width, (clientX - rect.left - view.x) / view.scale)),
-      y: Math.max(0, Math.min(height, (clientY - rect.top - view.y) / view.scale)),
-    };
-  }, [height, width]);
-
-  const flushBrushFrame = useCallback(() => {
-    brushFrameRef.current = null;
-    const started = performance.now();
-    const active = pointerRef.current;
-    const samples = pendingBrushSamplesRef.current;
-    pendingBrushSamplesRef.current = [];
-    const rect = stageRef.current?.getBoundingClientRect();
-    if (active?.mode === 'brush' && samples.length) {
-      const segment = [active.last];
-      const minimumDistance = Math.max(0.1, Math.min(0.5, active.radius * 0.2));
-      for (const sample of samples) {
-        const point = clientPointToImage(sample.clientX, sample.clientY, rect);
-        if (Math.hypot(point.x - active.last.x, point.y - active.last.y) < minimumDistance) continue;
-        brushStrokeRef.current.push(point);
-        active.last = point;
-        segment.push(point);
-      }
-      if (segment.length > 1) drawTransientSegments(segment, active.brushMode, active.radius);
-    }
-    const cursor = latestBrushCursorRef.current;
-    if (cursor) brushCursorRef.current = clientPointToImage(cursor.clientX, cursor.clientY, rect);
-    drawBrushCursor();
-    if (process.env.NODE_ENV !== 'production' && performance.now() - started > 4) {
-      console.debug('[brush-performance]', { brushFrameDuration: performance.now() - started });
-    }
-  }, [clientPointToImage, drawBrushCursor, drawTransientSegments]);
-
-  const scheduleBrushFrame = useCallback(() => {
-    if (brushFrameRef.current === null) brushFrameRef.current = requestAnimationFrame(flushBrushFrame);
-  }, [flushBrushFrame]);
-
   const pushHistory = useCallback((entry: HistoryEntry) => {
     const stack = historyUndoRef.current;
     stack.push(entry);
-    let bytes = stack.reduce((sum, item) => sum + historyBytes(item), 0);
-    while (stack.length > HISTORY_LIMIT || (bytes > HISTORY_BYTES && stack.length > 1)) bytes -= historyBytes(stack.shift()!);
+    while (stack.length > HISTORY_LIMIT) stack.shift();
     historyRedoRef.current = [];
   }, []);
 
   /**
-   * Polygon edits are only valid on polygons that describe the current mask. Right after brush strokes
-   * (or on a raster-only file) they are still being traced: committing then would replace the whole mask
-   * with stale or empty polygons, and undo would "restore" that empty state.
+   * Polygon edits are only valid on polygons that describe the current mask. On a raster-only mask
+   * (prediction PNG, reset, legacy brush annotation) they are still being traced: committing then would
+   * replace the whole mask with stale or empty polygons, and undo would "restore" that empty state.
    */
   const commitPolygons = useCallback((next: AnnotationPolygon[], before: DocumentState = captureDocument()) => {
     if (!before.vectorsCurrent) {
@@ -1983,7 +1919,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     polygonsRef.current = next;
     polygonModeRef.current = true;
     operationsRef.current = polygonOperation(next);
-    brushOperationRef.current = [];
     maskRevisionRef.current += 1;
     vectorRevisionRef.current = maskRevisionRef.current;
     vectorStatusRef.current = 'READY';
@@ -2036,32 +1971,101 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     return true;
   }, [commitPolygons, onMessage, onPolygonComplete]);
 
-  const completePolygon = useCallback(() => {
-    const draft = draftRef.current.nodes;
-    if (draft.length < 3) {
-      onMessage('Đa giác cần ít nhất 3 node.');
+  /**
+   * Paint (công cụ brush): polygon vừa vẽ được nối (+) vào hoặc trừ (−) khỏi mask bằng phép boolean polygon
+   * (người dùng xác nhận 2026-11-12). Không ghi pixel, không vector hóa lại, nên mask khác không bị dính.
+   * Lỗi thì giữ nguyên bản nháp để sửa tiếp; thành công thì ở lại Paint.
+   */
+  const commitPaintDraft = useCallback((draft: PolygonNode[]) => {
+    const result = applyPolygonPaint(polygonsRef.current, draft, paintModeRef.current, {
+      selectedIds: selectedPolygonIdsRef.current,
+      newRegion: { label: nextLabel(polygonsRef.current, 'wart'), meta: { semantic: 'wart_flesh', source: 'human' } },
+      bounds: { width, height },
+    });
+    if ('error' in result) {
+      onMessage(result.error);
+      render();
       return false;
     }
-    if (vectorsCurrent()) return commitDraft(draft);
+    draftRef.current.clear();
+    draftAutofillRef.current = null;
+    snapTargetRef.current = null;
+    hoveredNodeRef.current = null;
+    polygonHoverRef.current = null;
+    selectedNodeIdsRef.current.clear();
+    selectedPolygonIdsRef.current = new Set(result.resultIds);
+    if (!commitPolygons(result.polygons)) return false;
+    onMessage(result.message);
+    return true;
+  }, [commitPolygons, height, onMessage, render, width]);
+
+  const completePolygon = useCallback(() => {
+    const draft = draftRef.current.nodes;
+    // Paint (−) với đúng 2 điểm là đường cắt tách mask (người dùng xác nhận 2026-11-16), không cần vòng kín.
+    const cutLine = toolRef.current === 'brush' && paintModeRef.current === 'subtract' && draft.length === 2;
+    if (draft.length < 3 && !cutLine) {
+      onMessage(toolRef.current === 'brush' && paintModeRef.current === 'subtract'
+        ? 'Cần 2 điểm (đường cắt tách mask) hoặc từ 3 điểm (polygon trừ).'
+        : 'Đa giác cần ít nhất 3 node.');
+      return false;
+    }
+    const commit = toolRef.current === 'brush' ? commitPaintDraft : commitDraft;
+    if (vectorsCurrent()) return commit(draft);
     // Existing mask is still being turned into polygons: keep the draft and add it as soon as they are ready.
-    onMessage('Đang cập nhật polygon từ mask… polygon mới sẽ được thêm ngay khi xong.');
+    onMessage('Đang cập nhật polygon từ mask… polygon sẽ được áp dụng ngay khi xong.');
     void requestLatestVector().then(() => {
       if (!aliveRef.current || draftRef.current.nodes !== draft) return;
-      if (vectorsCurrent()) commitDraft(draft);
+      if (vectorsCurrent()) commit(draft);
       else onMessage('Chưa cập nhật được polygon từ mask. Hãy bấm hoàn tất lại.');
     });
     return false;
-  }, [commitDraft, onMessage, requestLatestVector, vectorsCurrent]);
+  }, [commitDraft, commitPaintDraft, onMessage, requestLatestVector, vectorsCurrent]);
 
   /**
-   * Xem trước auto anchor khi giữ Shift (người dùng xác nhận 2026-11-06): con trỏ trong (hoặc sát) mask kế bên thì
-   * hiện đường bám biên tự do từ điểm vừa chấm tới điểm biên gần con trỏ nhất của mask đó.
+   * HÍT TỰ ĐỘNG (nút magnet trong lớp phủ, người dùng xác nhận 2026-11-16): tắt magnet thì mọi việc tự dính vào
+   * điểm/biên mask đều tắt — magnet khi kéo node (V), neo khi chấm điểm (P/Paint) và vòng chỉ báo khi rê. Giữ Shift
+   * (neo + tự hoàn thiện) và công cụ Neo (A) vẫn hít, vì khi đó người dùng chủ động yêu cầu.
+   */
+  const autoSnapTarget = (point: ImagePoint, tolerance: number): AnchorTarget | null => (
+    magnetRef.current ? findAnchorTarget(polygonsRef.current, point, tolerance) : null
+  );
+
+  /**
+   * Xem trước tự hoàn thiện khi giữ Shift (người dùng xác nhận 2026-11-06, lõi sửa 2026-11-12): con trỏ trong (hoặc
+   * sát) mask kế bên thì hiện đường bám biên tự do từ điểm vừa chấm tới điểm biên gần con trỏ nhất của mask đó.
    */
   const autoAnchorPreview = useCallback((shift: boolean) => {
     const cursor = polygonCursorRef.current;
     if (!shift || !cursor || !draftRef.current.nodes.length) return null;
-    return findAutoAnchorPath(polygonsRef.current, cursor, draftRef.current.nodes, 14 / viewRef.current.scale);
+    return explainAutoAnchorPath(polygonsRef.current, cursor, draftRef.current.nodes, 14 / viewRef.current.scale).result;
   }, []);
+
+  /**
+   * TỰ HOÀN THIỆN = CHÈN ĐIỂM, KHÔNG HOÀN TẤT (người dùng xác nhận 2026-11-16): nhấn Shift (hoặc Shift + nhấp)
+   * khi đang vẽ chèn ngay các điểm bám biên tự do từ điểm vừa chấm tới mask dưới con trỏ vào BẢN NHÁP. Bản nháp
+   * vẫn ở trạng thái vẽ: Ctrl+Z gỡ từng điểm, chỉ nhấp đúp lên một điểm (hoặc Enter/nút) mới hoàn tất mask.
+   * Nhấn Shift lần nữa không tạo điểm trùng: điểm cuối đã nằm ở đích nên lõi trả NO_ROUTE và bản nháp giữ nguyên.
+   */
+  const insertAutoComplete = useCallback((cursor: ImagePoint, options: { quiet?: boolean } = {}): boolean => {
+    const draft = draftRef.current.nodes;
+    if (!isDraftTool(toolRef.current) || !draft.length) return false;
+    const { result: auto, failure } = explainAutoAnchorPath(polygonsRef.current, cursor, draft, 14 / viewRef.current.scale);
+    draftAutofillRef.current = null;
+    if (!auto) {
+      if (!options.quiet) onMessage(COMPLETION_FAILURE_MESSAGES[failure ?? 'NO_TARGET']);
+      render();
+      return false;
+    }
+    // Điểm đích được NEO vào mask chứa nó (chèn đỉnh nếu rơi giữa cạnh), để biên mới trùng đỉnh với mask cũ.
+    if (auto.anchor) {
+      const anchored = applyAnchor(polygonsRef.current, auto.anchor);
+      if (anchored.polygons !== polygonsRef.current) commitPolygons(anchored.polygons);
+    }
+    for (const node of auto.nodes) draftRef.current.add(node);
+    onMessage(`Đã chèn ${auto.nodes.length} điểm bám theo biên. Vẽ tiếp, Ctrl+Z gỡ từng điểm; nhấp đúp lên một điểm hoặc Enter để hoàn tất.`);
+    render();
+    return true;
+  }, [commitPolygons, onMessage, render]);
 
   const cancelCurrentPath = useCallback(() => {
     draftRef.current.clear();
@@ -2073,67 +2077,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     cutPathRef.current = [];
     hoveredNodeRef.current = null;
     polygonHoverRef.current = null;
-    brushStrokeRef.current = [];
-    brushCursorRef.current = null;
-    if (pointerRef.current?.mode === 'brush') pointerRef.current = null;
     marqueeRef.current = null;
     render();
   }, [render]);
-
-  const commitBrushStroke = useCallback((points: ImagePoint[], mode: BrushMode, radius: number) => {
-    if (!points.length || !maskRef.current) return;
-    if (process.env.NODE_ENV !== 'production') performance.mark('brush-pointerup-start');
-    const rawBounds = brushBounds(points, radius + 1);
-    const bounds = {
-      left: Math.max(0, Math.floor(rawBounds.left)), top: Math.max(0, Math.floor(rawBounds.top)),
-      right: Math.min(width, Math.ceil(rawBounds.right)), bottom: Math.min(height, Math.ceil(rawBounds.bottom)),
-    };
-    ensureMaskRaster();
-    const context = maskRef.current.getContext('2d', { willReadFrequently: true });
-    if (!context || bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
-    const before = captureDocument();
-    const patchWidth = bounds.right - bounds.left;
-    const patchHeight = bounds.bottom - bounds.top;
-    const beforePixels = context.getImageData(bounds.left, bounds.top, patchWidth, patchHeight);
-    paintBrushPreview(points, mode, radius, bounds);
-    const afterPixels = context.getImageData(bounds.left, bounds.top, patchWidth, patchHeight);
-    maskRevisionRef.current += 1;
-    // Sub-centipixel precision is invisible but bloats the saved JSON for long strokes.
-    const compactPoints = points.map((point) => ({ x: Math.round(point.x * 100) / 100, y: Math.round(point.y * 100) / 100 }));
-    const operation: BrushOperation = {
-      id: crypto.randomUUID(), revision: maskRevisionRef.current,
-      type: mode === 'erase' ? 'BRUSH_ERASE' : 'BRUSH_ADD', radius, points: compactPoints, bounds,
-    };
-    operationsRef.current.push(operation);
-    brushOperationRef.current.push(operation);
-    const hadSelection = selectedPolygonIdsRef.current.size > 0 || selectedNodeIdsRef.current.size > 0;
-    selectedNodeIdsRef.current.clear();
-    selectedPolygonIdsRef.current.clear();
-    humanActionRef.current = 'MODIFIED';
-    vectorStatusRef.current = 'DIRTY';
-    vectorCacheRef.current.status = 'DIRTY';
-    pushHistory({ kind: 'brush', before, after: captureDocument(), bounds, beforePixels, afterPixels });
-    // Visible immediately: only the stroke rectangle of the mask layer is redrawn.
-    invalidateMask(bounds);
-    // The worker receives just the stroke rectangle and re-traces contours in the background while the
-    // user keeps drawing; nothing comes back until polygons are needed (leave brush / save).
-    if (workerSyncedRef.current) {
-      // The protected ROI is authoritative; replaying the stroke in the worker could erase locked pixels.
-      const pixels = new ImageData(new Uint8ClampedArray(afterPixels.data), patchWidth, patchHeight);
-      brushWorkerRef.current?.postMessage(
-        { type: 'PUT_PATCH', revision: maskRevisionRef.current, bounds, pixels } satisfies MaskWorkerRequest,
-        [pixels.data.buffer],
-      );
-    }
-    scheduleBackgroundVectorize();
-    scheduleNotify();
-    if (hadSelection) notifySelection();
-    drawBrushCursor();
-    if (process.env.NODE_ENV !== 'production') {
-      performance.mark('brush-visible-commit');
-      performance.measure('brush-pointerup-visible', 'brush-pointerup-start', 'brush-visible-commit');
-    }
-  }, [captureDocument, drawBrushCursor, ensureMaskRaster, height, invalidateMask, notifySelection, paintBrushPreview, pushHistory, scheduleBackgroundVectorize, scheduleNotify, width]);
 
   const applyCut = useCallback(() => {
     const selectedPolygonId = [...selectedPolygonIdsRef.current][0];
@@ -2264,7 +2210,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     hoveredNodeRef.current = null;
     if (event.button === 2) {
       event.preventDefault();
-      if (tool === 'polygon' || (tool === 'anchor' && hitNode(point, true))) return;
+      if (isDraftTool(tool) || (tool === 'anchor' && hitNode(point, true))) return;
       if (tool !== 'select' && tool !== 'anchor') return;
       const polygon = hitPolygon(point);
       if (!polygon || polygon.meta?.locked) return;
@@ -2317,53 +2263,37 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       }
       return;
     }
-    if (tool === 'polygon') {
+    if (isDraftTool(tool)) {
       const snapTolerance = 14 / viewRef.current.scale;
       const draft = draftRef.current.nodes;
-      // Shift + chuột trái: chèn các điểm auto anchor bám biên tự do từ điểm vừa chấm tới mask đang trỏ. KHÔNG hoàn
-      // tất polygon, vẫn ở chế độ P (người dùng xác nhận 2026-11-06). Mỗi điểm chèn là một bước nháp: Ctrl+Z gỡ từng điểm.
+      // Shift + chuột trái: TỰ HOÀN THIỆN — chèn các điểm bám biên tự do từ điểm vừa chấm tới mask đang trỏ. KHÔNG
+      // hoàn tất polygon, vẫn ở P/Paint (người dùng xác nhận 2026-11-06). Mỗi điểm chèn là một bước nháp: Ctrl+Z gỡ từng điểm.
       if (event.shiftKey && draft.length) {
-        const auto = findAutoAnchorPath(polygonsRef.current, point, draft, snapTolerance);
-        draftAutofillRef.current = null;
-        if (!auto) {
-          onMessage('Không nối được: điểm vừa chấm phải nằm trên biên mask chưa có mask khác nối, và con trỏ phải ở trong hoặc sát mask kế bên.');
-          render();
-          return;
-        }
-        // Điểm đích thành đỉnh của mask chứa nó, để biên mới trùng đỉnh với mask cũ.
-        const owner = polygonsRef.current.find((polygon) => polygon.id === auto.target.polygonId);
-        if (owner && !owner.meta?.locked && !auto.closesToStart && closestPointOnPolygon(owner, auto.target).distance <= 0.5) {
-          const { polygon: updated, inserted } = ensurePolygonHasNodeAt(owner, auto.target, 0.5);
-          if (inserted) commitPolygons(polygonsRef.current.map((polygon) => (polygon.id === updated.id ? updated : polygon)));
-        }
-        for (const node of auto.nodes) draftRef.current.add(node);
-        onMessage(`Đã chèn ${auto.nodes.length} điểm bám theo biên. Vẽ tiếp, Ctrl+Z gỡ từng điểm; nhấp đúp lên một điểm hoặc Enter để hoàn tất.`);
-        render();
+        insertAutoComplete(point);
         return;
       }
       // Nhấp lên một điểm đã chấm không chấm thêm (nhấp đúp lên điểm để hoàn tất, người dùng xác nhận 2026-11-06).
-      if (draft.some((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale)) {
+      const touched = draft.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale);
+      if (touched) {
+        const added = lastAddedDraftPointRef.current;
+        if (added && added.id === touched.id) added.retouches += 1;
         render();
         return;
       }
-      const snap = findSnapTargetToPolygons(polygonsRef.current, point, snapTolerance);
+      // NEO (người dùng xác nhận 2026-11-12): gần biên mask thì điểm nối vào đúng điểm đó; rơi giữa cạnh thì mask kia
+      // được chèn đỉnh này để hai mask chung điểm. Tắt magnet thì chấm đúng vị trí con trỏ.
+      const snap = autoSnapTarget(point, snapTolerance);
       let effectivePoint = snap ? snap.point : point;
-
-      if (snap && !snap.isVertex) {
-        const targetPoly = polygonsRef.current.find((p) => p.id === snap.polygonId);
-        if (targetPoly && !targetPoly.meta?.locked) {
-          const { polygon: updatedTarget, node: newAnchor } = insertNodeAtEdge(
-            targetPoly,
-            snap.edgeIndex,
-            snap.point,
-          );
-          effectivePoint = { x: newAnchor.x, y: newAnchor.y };
-          commitPolygons(polygonsRef.current.map((p) => (p.id === updatedTarget.id ? updatedTarget : p)));
+      if (snap && !snap.vertexId) {
+        const anchored = applyAnchor(polygonsRef.current, snap);
+        effectivePoint = anchored.point;
+        if (anchored.polygons !== polygonsRef.current) {
+          commitPolygons(anchored.polygons);
           onMessage('Đã tạo anchor mới trên biên của mask cũ.');
         }
       }
 
-      if (!draftRef.current.nodes.length && !snap) {
+      if (tool === 'polygon' && !draftRef.current.nodes.length && !snap) {
         const pocket = enclosedPocketHoverRef.current || findEnclosedPocketAtPoint(polygonsRef.current, point, 250 / viewRef.current.scale);
         if (pocket) {
           let finalNodes = pocket.nodes;
@@ -2394,31 +2324,14 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
 
       // Nhấp thường (kể cả lên biên mask khác hay điểm đầu) chỉ chấm một điểm, không hoàn tất polygon.
       const added = { id: crypto.randomUUID(), ...effectivePoint, isAnchor: true };
+      if (!draftRef.current.nodes.length) draftToolRef.current = tool;
       draftRef.current.add(added);
-      lastAddedDraftPointRef.current = { id: added.id, time: performance.now() };
-      render();
-      return;
-    }
-    if (tool === 'brush') {
-      event.currentTarget.setPointerCapture(event.pointerId);
-      brushStrokeRef.current = [point];
-      brushCursorRef.current = point;
-      pendingBrushSamplesRef.current = [];
-      pointerRef.current = {
-        id: event.pointerId,
-        mode: 'brush',
-        last: point,
-        brushMode: brushRef.current.mode,
-        radius: Math.max(0.5, brushRef.current.size / 2),
-      };
-      clearOverlay(interactionCanvasRef.current);
-      const overlay = interactionCanvasRef.current;
-      if (overlay) {
-        overlay.style.opacity = brushRef.current.mode === 'add'
-          ? String(Math.min(0.85, Math.max(0.3, displayRef.current.maskOpacity))) : '0.42';
+      lastAddedDraftPointRef.current = { id: added.id, time: performance.now(), retouches: 0 };
+      // Paint (−) với đúng 2 điểm là đường cắt (người dùng xác nhận 2026-11-16): nhắc cách áp dụng.
+      if (tool === 'brush' && paintModeRef.current === 'subtract' && draftRef.current.nodes.length === 2) {
+        onMessage('Đường cắt 2 điểm: nhấp đúp lên một điểm, Enter hoặc nút Áp dụng để tách mask. Chấm tiếp nếu muốn vẽ polygon trừ.');
       }
-      drawTransientSegments([point], brushRef.current.mode, Math.max(0.5, brushRef.current.size / 2));
-      drawBrushCursor();
+      render();
       return;
     }
 
@@ -2575,8 +2488,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         nodeIds: new Set(selectedNodeIdsRef.current),
         moved: false,
         grab: { x: nodeHit.node.x, y: nodeHit.node.y },
+        lastPoint: point,
       };
       notifySelection();
+      // Vẽ lại toàn bộ một lần: lớp vector hiện gợi ý neo (đỉnh các polygon khác) trong lúc kéo.
       render();
       return;
     }
@@ -2594,15 +2509,17 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
 
   const onDoubleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
     if (props.readOnly) return;
-    if (tool === 'polygon') {
+    if (isDraftTool(tool)) {
       event.preventDefault();
-      // Chỉ nhấp đúp lên một điểm đã chấm từ trước mới hoàn tất (người dùng xác nhận 2026-11-06). Lần nhấp thứ hai
-      // không chấm thêm (trúng điểm), nên nhấp đúp ở chỗ trống chỉ để lại đúng một điểm như nhấp đơn.
+      // Nhấp đúp lên BẤT KỲ điểm đã chấm đều hoàn tất (người dùng xác nhận 2026-11-16, kể cả điểm vừa vẽ xong —
+      // cần cho đường cắt 2 điểm của Paint (−)). Chỉ cú nhấp đúp ở chỗ trống không hoàn tất: lần nhấp đầu của nó
+      // tự tạo điểm rồi lần hai trúng lại đúng MỘT lần (`retouches === 1`), còn nhấp đúp lên điểm có sẵn đi qua
+      // hai lần nhấp trúng (`retouches ≥ 2`) hoặc trúng điểm không phải điểm vừa thêm.
       const point = imagePoint(event);
       const hit = draftRef.current.nodes.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale);
       const added = lastAddedDraftPointRef.current;
-      const justPlaced = Boolean(hit && added && added.id === hit.id && performance.now() - added.time < 600);
-      if (hit && !justPlaced) completePolygon();
+      const emptySpaceDoubleClick = Boolean(hit && added && added.id === hit.id && added.retouches <= 1 && performance.now() - added.time < 600);
+      if (hit && !emptySpaceDoubleClick) completePolygon();
       else render();
       return;
     }
@@ -2664,7 +2581,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     event.preventDefault();
     if (!readyRef.current) return;
     const point = imagePoint(event);
-    if (tool === 'polygon') {
+    if (isDraftTool(tool)) {
       const hit = draftRef.current.nodes.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale);
       if (hit) {
         draftRef.current.remove(hit.id);
@@ -2705,15 +2622,96 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     render();
   };
 
+  /**
+   * Xem trước khi kéo node/polygon (pointermove và nhấn/nhả Shift giữa chừng dùng chung). Trong Select, kéo đúng
+   * một node + giữ Shift: NEO vào mask đang trỏ và TỰ HOÀN THIỆN cạnh tới điểm kề đã nằm trên biên đó
+   * (planNodeAnchorDrag, người dùng xác nhận 2026-11-12). Không giữ Shift thì magnet như cũ.
+   */
+  const updateNodeDrag = (
+    active: Extract<PointerActivity, { mode: 'nodes' | 'polygons' }>,
+    point: ImagePoint,
+    shift: boolean,
+  ) => {
+    let deltaX = point.x - active.start.x;
+    let deltaY = point.y - active.start.y;
+    let plan: NodeAnchorPlan | null = null;
+    if (active.mode === 'nodes' && tool === 'select' && shift && active.nodeIds.size === 1 && active.polygonIds.size === 1) {
+      const [nodeId] = active.nodeIds;
+      const [polygonId] = active.polygonIds;
+      active.others ??= active.original.filter((polygon) => polygon.id !== polygonId);
+      plan = planNodeAnchorDrag({
+        polygons: active.original, others: active.others, polygonId, nodeId, cursor: point, tolerance: 14 / viewRef.current.scale,
+      });
+    }
+    if (active.mode === 'nodes') active.anchor = plan;
+    const anchorPreview = plan ? { routes: plan.routes, target: plan.target.point } : null;
+    if (anchorPreview || nodeAnchorPreviewRef.current) {
+      nodeAnchorPreviewRef.current = anchorPreview;
+      renderDraft();
+    }
+    if (!plan && active.mode === 'nodes' && active.grab && tool === 'select') {
+      // Magnet: node đang nắm dính vào đỉnh gần nhất (≤ MAGNET_RADIUS px màn hình) của mask không tham gia kéo; mọi node
+      // đang kéo dịch cùng một đoạn. Không hút vào đỉnh của chính polygon đang kéo (tránh chồng đỉnh kề).
+      const target = magnetRef.current
+        ? nearestMagnetVertex(active.original, active.polygonIds, active.grab.x + deltaX, active.grab.y + deltaY, MAGNET_RADIUS / viewRef.current.scale)
+        : null;
+      if (target) {
+        deltaX = target.x - active.grab.x;
+        deltaY = target.y - active.grab.y;
+      }
+      if (target?.x !== magnetTargetRef.current?.x || target?.y !== magnetTargetRef.current?.y) {
+        magnetTargetRef.current = target;
+        renderDraft();
+      }
+    } else if (magnetTargetRef.current) {
+      magnetTargetRef.current = null;
+      renderDraft();
+    }
+    active.moved = active.moved || Math.hypot(deltaX, deltaY) > 0.5 || Boolean(plan);
+    const previous = polygonsRef.current;
+    const wasPolygonMode = polygonModeRef.current;
+    polygonsRef.current = plan
+      ? active.original.map((polygon) => (polygon.id === plan!.preview.id ? plan!.preview : polygon))
+      : active.original.map((polygon) => {
+        if (polygon.meta?.locked) return polygon;
+        if (!active.polygonIds.has(polygon.id)) return polygon;
+        if (active.mode === 'polygons') {
+          const translate = (node: PolygonNode) => ({ ...node, x: Math.max(0, Math.min(width, node.x + deltaX)), y: Math.max(0, Math.min(height, node.y + deltaY)) });
+          return { ...polygon, nodes: polygon.nodes.map(translate), holes: polygon.holes?.map((ring) => ring.map(translate)) };
+        }
+        return {
+          ...polygon,
+          nodes: tool === 'anchor' ? computeSmoothNodeDisplacements(polygon.nodes, active.nodeIds, deltaX, deltaY, width, height) : polygon.nodes.map((node) => active.nodeIds.has(node.id)
+            ? { ...node, x: Math.max(0, Math.min(width, node.x + deltaX)), y: Math.max(0, Math.min(height, node.y + deltaY)) }
+            : node),
+          holes: polygon.holes?.map((ring) => ring.map((node) => active.nodeIds.has(node.id)
+            ? { ...node, x: Math.max(0, Math.min(width, node.x + deltaX)), y: Math.max(0, Math.min(height, node.y + deltaY)) } : node)),
+        };
+      });
+    polygonModeRef.current = true;
+    // Dirty rectangle: only where the moved polygons were drawn last frame and are drawn now.
+    const next = polygonsRef.current;
+    let dirtyRect: PolygonBounds | null = null;
+    if (wasPolygonMode && previous.length === next.length) {
+      const scale = viewRef.current.scale;
+      for (let index = 0; index < next.length; index += 1) {
+        if (previous[index] === next[index]) continue;
+        for (const extent of [vectorExtent(previous[index], scale), vectorExtent(next[index], scale)]) {
+          dirtyRect = dirtyRect ? {
+            left: Math.min(dirtyRect.left, extent.left), top: Math.min(dirtyRect.top, extent.top),
+            right: Math.max(dirtyRect.right, extent.right), bottom: Math.max(dirtyRect.bottom, extent.bottom),
+          } : extent;
+        }
+      }
+    }
+    if (dirtyRect) invalidateVectors(dirtyRect); else render();
+  };
+  nodeDragRef.current = updateNodeDrag;
+
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (props.readOnly && pointerRef.current?.mode !== 'pan') { pointerRef.current = null; return; }
     const active = pointerRef.current;
     if (!active) {
-      if (tool === 'brush') {
-        latestBrushCursorRef.current = { clientX: event.clientX, clientY: event.clientY };
-        scheduleBrushFrame();
-        return;
-      }
       const point = imagePoint(event);
       if (tool === 'anchor') {
         const hitTolerance = 14 / viewRef.current.scale;
@@ -2742,9 +2740,10 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         if (needsRender) renderDraft();
         return;
       }
-      if (tool === 'polygon') {
+      if (isDraftTool(tool)) {
         const snapTolerance = 14 / viewRef.current.scale;
-        const snap = findSnapTargetToPolygons(polygonsRef.current, point, snapTolerance);
+        // NEO: vòng chỉ báo tại điểm biên mà nhấp chuột sẽ nối vào (không có khi tắt magnet).
+        const snap = autoSnapTarget(point, snapTolerance);
         snapTargetRef.current = snap;
         const effectivePoint = snap ? snap.point : point;
 
@@ -2753,12 +2752,12 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           enclosedPocketCursorRef.current = null;
           polygonHoverRef.current = effectivePoint;
           polygonCursorRef.current = point;
-          // Chỉ xem trước auto anchor khi giữ Shift; không giữ Shift thì vẽ tay bình thường.
+          // Chỉ xem trước tự hoàn thiện khi giữ Shift; không giữ Shift thì vẽ tay bình thường.
           draftAutofillRef.current = autoAnchorPreview(event.shiftKey);
         } else {
           polygonHoverRef.current = null;
           draftAutofillRef.current = null;
-          if (!snap) {
+          if (!snap && tool === 'polygon') {
             const pocket = findEnclosedPocketAtPoint(polygonsRef.current, point, 250 / viewRef.current.scale);
             enclosedPocketHoverRef.current = pocket;
             enclosedPocketCursorRef.current = pocket ? point : null;
@@ -2793,17 +2792,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       renderView();
       return;
     }
-    if (active.mode === 'brush') {
-      const samples = typeof event.nativeEvent.getCoalescedEvents === 'function'
-        ? event.nativeEvent.getCoalescedEvents()
-        : [event.nativeEvent];
-      for (const sample of samples) {
-        pendingBrushSamplesRef.current.push({ clientX: sample.clientX, clientY: sample.clientY });
-      }
-      latestBrushCursorRef.current = { clientX: event.clientX, clientY: event.clientY };
-      scheduleBrushFrame();
-      return;
-    }
     const point = imagePoint(event);
     if (active.mode === 'rectangle') {
       active.current = point;
@@ -2826,61 +2814,11 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       return;
     }
     if (active.mode === 'nodes' || active.mode === 'polygons') {
-      let deltaX = point.x - active.start.x;
-      let deltaY = point.y - active.start.y;
-      if (active.mode === 'nodes' && active.grab && tool === 'select') {
-        // Magnet: node đang nắm dính vào đỉnh gần nhất (≤ 10 px màn hình) của mask không tham gia kéo; mọi node
-        // đang kéo dịch cùng một đoạn. Không hút vào đỉnh của chính polygon đang kéo (tránh chồng đỉnh kề).
-        const target = magnetRef.current
-          ? nearestMagnetVertex(active.original, active.polygonIds, active.grab.x + deltaX, active.grab.y + deltaY, 10 / viewRef.current.scale)
-          : null;
-        if (target) {
-          deltaX = target.x - active.grab.x;
-          deltaY = target.y - active.grab.y;
-        }
-        if (target?.x !== magnetTargetRef.current?.x || target?.y !== magnetTargetRef.current?.y) {
-          magnetTargetRef.current = target;
-          renderDraft();
-        }
-      }
-      active.moved = active.moved || Math.hypot(deltaX, deltaY) > 0.5;
-      const previous = polygonsRef.current;
-      const wasPolygonMode = polygonModeRef.current;
-      polygonsRef.current = active.original.map((polygon) => {
-        if (polygon.meta?.locked) return polygon;
-        if (!active.polygonIds.has(polygon.id)) return polygon;
-        if (active.mode === 'polygons') {
-          const translate = (node: PolygonNode) => ({ ...node, x: Math.max(0, Math.min(width, node.x + deltaX)), y: Math.max(0, Math.min(height, node.y + deltaY)) });
-          return { ...polygon, nodes: polygon.nodes.map(translate), holes: polygon.holes?.map((ring) => ring.map(translate)) };
-        }
-        return {
-          ...polygon,
-          nodes: tool === 'anchor' ? computeSmoothNodeDisplacements(polygon.nodes, active.nodeIds, deltaX, deltaY, width, height) : polygon.nodes.map((node) => active.nodeIds.has(node.id)
-            ? { ...node, x: Math.max(0, Math.min(width, node.x + deltaX)), y: Math.max(0, Math.min(height, node.y + deltaY)) }
-            : node),
-          holes: polygon.holes?.map((ring) => ring.map((node) => active.nodeIds.has(node.id)
-            ? { ...node, x: Math.max(0, Math.min(width, node.x + deltaX)), y: Math.max(0, Math.min(height, node.y + deltaY)) } : node)),
-        };
-      });
-      polygonModeRef.current = true;
-      // Dirty rectangle: only where the moved polygons were drawn last frame and are drawn now.
-      const next = polygonsRef.current;
-      let dirtyRect: PolygonBounds | null = null;
-      if (wasPolygonMode && previous.length === next.length) {
-        const scale = viewRef.current.scale;
-        for (let index = 0; index < next.length; index += 1) {
-          if (previous[index] === next[index]) continue;
-          for (const extent of [vectorExtent(previous[index], scale), vectorExtent(next[index], scale)]) {
-            dirtyRect = dirtyRect ? {
-              left: Math.min(dirtyRect.left, extent.left), top: Math.min(dirtyRect.top, extent.top),
-              right: Math.max(dirtyRect.right, extent.right), bottom: Math.max(dirtyRect.bottom, extent.bottom),
-            } : extent;
-          }
-        }
-      }
-      if (dirtyRect) invalidateVectors(dirtyRect); else render();
+      if (active.mode === 'nodes') active.lastPoint = point;
+      updateNodeDrag(active, point, event.shiftKey);
       return;
     }
+
     if (active.mode === 'marquee') {
       marqueeRef.current = { start: active.start, end: point, additive: active.additive };
       renderDraft();
@@ -2935,10 +2873,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     enclosedPocketCursorRef.current = null;
     renderDraft();
     if (pointerRef.current) return;
-    if (brushCursorRef.current) {
-      brushCursorRef.current = null;
-      latestBrushCursorRef.current = null;
-      drawBrushCursor();
+    if (snapTargetRef.current) {
+      snapTargetRef.current = null;
+      renderDraft();
     }
     if (polygonHoverRef.current) {
       polygonHoverRef.current = null;
@@ -2950,33 +2887,26 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (props.readOnly && pointerRef.current?.mode !== 'pan') { pointerRef.current = null; return; }
     const active = pointerRef.current;
     if (!active || active.id !== event.pointerId) return;
-    if (active.mode === 'brush') {
-      if (brushFrameRef.current !== null) cancelAnimationFrame(brushFrameRef.current);
-      flushBrushFrame();
-    }
     pointerRef.current = null;
-    if (active.mode === 'brush') {
-      const stroke = brushStrokeRef.current;
-      brushStrokeRef.current = [];
-      if (event.type !== 'pointercancel' && stroke.length) {
-        const point = imagePoint(event);
-        const last = stroke[stroke.length - 1];
-        const completedStroke = Math.hypot(point.x - last.x, point.y - last.y) > 0 ? [...stroke, point] : stroke;
-        commitBrushStroke(completedStroke, active.brushMode, active.radius);
-      }
-      clearInteractionOnFrameRef.current = true;
-      scheduleFrame();
-      drawBrushCursor();
-      return;
-    }
     if (active.mode === 'nodes' || active.mode === 'polygons') {
       if (magnetTargetRef.current) { magnetTargetRef.current = null; renderDraft(); }
+      if (nodeAnchorPreviewRef.current) { nodeAnchorPreviewRef.current = null; renderDraft(); }
+      const plan = active.mode === 'nodes' ? active.anchor : null;
       if (active.moved) {
-        const moved = polygonsRef.current;
+        // Kéo + Shift: commit P đã neo + tự hoàn thiện cùng đỉnh neo chèn vào mask đích, một bước history.
+        const moved = plan ? plan.next : polygonsRef.current;
         const original = active.mode === 'nodes' ? active.historyBefore ?? active.original : active.original;
         polygonsRef.current = original;
         const before = { operations: polygonOperation(original), polygons: original, vectorsCurrent: vectorsCurrent() };
         if (!commitPolygons(moved, before)) render();
+        else if (plan) {
+          onMessage(plan.inserted
+            ? `Đã neo điểm vào biên mask và tự hoàn thiện ${plan.inserted} điểm dọc biên.`
+            : 'Đã neo điểm vào biên mask.');
+        }
+      } else if (tool === 'select' && active.mode === 'nodes') {
+        // Ẩn gợi ý neo đã hiện trong lúc giữ chuột.
+        render();
       }
       return;
     }
@@ -3093,62 +3023,26 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   };
 
   /**
-   * Restores one side of a history entry. States whose polygons describe the mask are restored exactly
-   * from those polygons; brush states only put back the pixels of the stroke rectangle.
+   * Restores one side of a history entry. Every entry is a polygon state that describes the mask (commitPolygons
+   * refuses edits on a raster that is not traced yet), so it is restored exactly from its polygons.
    */
-  const restoreDocument = useCallback((state: DocumentState, patch?: { bounds: BrushBounds; pixels: ImageData }) => {
+  const restoreDocument = useCallback((state: DocumentState) => {
     hoveredNodeRef.current = null;
     selectedNodeIdsRef.current.clear();
     selectedPolygonIdsRef.current.clear();
     operationsRef.current = [...state.operations];
-    brushOperationRef.current = state.operations.filter(isBrushOperation);
     humanActionRef.current = 'MODIFIED';
     maskRevisionRef.current += 1;
-    if (state.vectorsCurrent || !patch) {
-      polygonsRef.current = state.polygons;
-      polygonModeRef.current = true;
-      vectorRevisionRef.current = maskRevisionRef.current;
-      vectorStatusRef.current = 'READY';
-      vectorCacheRef.current = { revision: maskRevisionRef.current, status: 'READY', polygons: state.polygons };
-      rebuildPolygonTint(state.polygons);
-    } else {
-      ensureMaskRaster();
-      const maskContext = maskRef.current?.getContext('2d', { willReadFrequently: true });
-      const tintContext = tintRef.current?.getContext('2d');
-      if (!maskContext || !tintContext) return;
-      const { bounds, pixels } = patch;
-      maskContext.putImageData(pixels, bounds.left, bounds.top);
-      const colored = tintContext.createImageData(pixels.width, pixels.height);
-      for (let offset = 0; offset < colored.data.length; offset += 4) {
-        colored.data[offset] = 124; colored.data[offset + 1] = 92; colored.data[offset + 2] = 250;
-        colored.data[offset + 3] = pixels.data[offset + 3];
-      }
-      tintContext.putImageData(colored, bounds.left, bounds.top);
-      const lockedMask = lockedMaskRef.current;
-      if (lockedMask && lockedPixelsRef.current) {
-        tintContext.drawImage(
-          lockedMask,
-          bounds.left, bounds.top, pixels.width, pixels.height,
-          bounds.left, bounds.top, pixels.width, pixels.height,
-        );
-      }
-      if (workerSyncedRef.current) {
-        const copy = new ImageData(new Uint8ClampedArray(pixels.data), pixels.width, pixels.height);
-        brushWorkerRef.current?.postMessage(
-          { type: 'PUT_PATCH', revision: maskRevisionRef.current, bounds, pixels: copy } satisfies MaskWorkerRequest,
-          [copy.data.buffer],
-        );
-      }
-      vectorStatusRef.current = 'DIRTY';
-      vectorCacheRef.current.status = 'DIRTY';
-      polygonModeRef.current = false;
-      if (toolRef.current === 'brush') scheduleBackgroundVectorize(); else scheduleVectorizationRef.current();
-      invalidateMask(bounds);
-    }
+    polygonsRef.current = state.polygons;
+    polygonModeRef.current = true;
+    vectorRevisionRef.current = maskRevisionRef.current;
+    vectorStatusRef.current = 'READY';
+    vectorCacheRef.current = { revision: maskRevisionRef.current, status: 'READY', polygons: state.polygons };
+    rebuildPolygonTint(state.polygons);
     render();
     notifyChange('MODIFIED');
     notifySelection();
-  }, [ensureMaskRaster, invalidateMask, notifyChange, notifySelection, rebuildPolygonTint, render, scheduleBackgroundVectorize]);
+  }, [notifyChange, notifySelection, rebuildPolygonTint, render]);
 
   const undo = useCallback(() => {
     if (pointerRef.current) return;
@@ -3174,7 +3068,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     const entry = historyUndoRef.current.pop();
     if (!entry) { render(); return; }
     historyRedoRef.current.push(entry);
-    restoreDocument(entry.before, entry.kind === 'brush' ? { bounds: entry.bounds, pixels: entry.beforePixels } : undefined);
+    restoreDocument(entry.before);
   }, [notifyChange, render, restoreDocument, tool]);
 
   const redo = useCallback(() => {
@@ -3199,7 +3093,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     const entry = historyRedoRef.current.pop();
     if (!entry) return;
     historyUndoRef.current.push(entry);
-    restoreDocument(entry.after, entry.kind === 'brush' ? { bounds: entry.bounds, pixels: entry.afterPixels } : undefined);
+    restoreDocument(entry.after);
   }, [notifyChange, render, restoreDocument, tool]);
 
   const beginPolygonEdit = useCallback(() => {
@@ -3343,7 +3237,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       } else if ((event.key === 'Delete' || event.key === 'Backspace') && tool === 'point') {
         event.preventDefault();
         deleteSelectedPoint();
-      } else if (event.key === 'Enter' && tool === 'polygon') {
+      } else if (event.key === 'Enter' && isDraftTool(tool)) {
         event.preventDefault();
         completePolygon();
       } else if (event.key === 'Escape') {
@@ -3360,21 +3254,44 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     return () => window.removeEventListener('keydown', onKey);
   }, [applyCut, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, props.readOnly, redo, selectAllPolygons, tool, undo, updateSelectedPolygonLabel]);
 
-  // Nhấn/nhả Shift khi đang vẽ polygon: bật/tắt xem trước đường tự nối ngay, không cần rê chuột.
+  // Nhấn Shift khi đang vẽ (P/Paint): CHÈN ngay các điểm bám biên vào bản nháp, không hoàn tất mask (người dùng
+  // xác nhận 2026-11-16: Shift = tự hoàn thiện đường viền, chỉ nhấp đúp lên điểm mới hoàn tất). Thả Shift giữ
+  // nguyên các điểm đã chèn, chỉ dọn phần xem trước. Khi đang kéo một node trong Select, Shift bật/tắt neo + tự
+  // hoàn thiện tại vị trí con trỏ cuối như cũ. Mất tiêu điểm cửa sổ (Alt+Tab) cũng dọn xem trước như thả Shift.
   useEffect(() => {
-    if (tool !== 'polygon' || props.readOnly) return;
-    const onShift = (event: KeyboardEvent) => {
-      if (event.key !== 'Shift' || event.repeat || !draftRef.current.nodes.length) return;
-      draftAutofillRef.current = autoAnchorPreview(event.type === 'keydown');
+    if (props.readOnly) return;
+    const clearPreview = () => {
+      if (!draftAutofillRef.current) return;
+      draftAutofillRef.current = null;
       renderDraft();
+    };
+    const onShift = (event: KeyboardEvent) => {
+      if (event.key !== 'Shift' || event.repeat) return;
+      const shift = event.type === 'keydown';
+      const active = pointerRef.current;
+      if (active?.mode === 'nodes' && tool === 'select' && active.lastPoint) {
+        nodeDragRef.current(active, active.lastPoint, shift);
+        return;
+      }
+      if (!isDraftTool(tool) || !draftRef.current.nodes.length) return;
+      if (!shift) {
+        clearPreview();
+        return;
+      }
+      const draft = draftRef.current.nodes;
+      const cursor = polygonCursorRef.current ?? { x: draft[draft.length - 1].x, y: draft[draft.length - 1].y };
+      // Con trỏ chưa rời điểm cuối (hoặc nhấn lại tại chỗ): lõi trả NO_ROUTE, im lặng giữ bản nháp.
+      insertAutoComplete(cursor, { quiet: true });
     };
     window.addEventListener('keydown', onShift);
     window.addEventListener('keyup', onShift);
+    window.addEventListener('blur', clearPreview);
     return () => {
       window.removeEventListener('keydown', onShift);
       window.removeEventListener('keyup', onShift);
+      window.removeEventListener('blur', clearPreview);
     };
-  }, [autoAnchorPreview, props.readOnly, renderDraft, tool]);
+  }, [insertAutoComplete, props.readOnly, renderDraft, tool]);
 
   const zoomAt = useCallback((factor: number, anchor: ImagePoint) => {
     viewRef.current = zoomViewAt(viewRef.current, factor, anchor);
@@ -3407,10 +3324,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   }, [renderView, zoomAt]);
 
   useImperativeHandle(ref, () => ({
-    // Before saving brush edits, vectorize once so the saved POLYGON_SET matches what was drawn
-    // (see currentOperations). A failed or slow worker falls back to saving the raw operations.
+    // Annotation cũ lưu bằng nét brush (trước 2026-11-12): vector hóa một lần trước khi lưu để POLYGON_SET khớp
+    // raster (see currentOperations). A failed or slow worker falls back to saving the raw operations.
     flushPendingEdits: async () => {
-      flushNotify();
       const last = operationsRef.current.at(-1);
       if ((last?.type === 'BRUSH_ADD' || last?.type === 'BRUSH_ERASE') && vectorRevisionRef.current !== maskRevisionRef.current) {
         let timer = 0;
@@ -3419,11 +3335,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
           new Promise<void>((resolve) => { timer = window.setTimeout(resolve, 15_000); }),
         ]);
         window.clearTimeout(timer);
-      }
-      // Polygons adopted while still in the brush tool were not announced yet.
-      if (pendingVectorNotifyRef.current) {
-        pendingVectorNotifyRef.current = false;
-        notifyChange('MODIFIED', polygonsRef.current);
       }
     },
     exportMask: async () => {
@@ -3451,12 +3362,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       vectorStatusRef.current = 'DIRTY';
       vectorCacheRef.current = { revision: -1, status: 'DIRTY', polygons: [] };
       polygonsRef.current = [];
-      lockedMaskRef.current?.getContext('2d')?.clearRect(0, 0, width, height);
-      lockedPixelsRef.current = false;
       polygonModeRef.current = false;
       operationsRef.current = [{ type: 'RESET_TO_PREDICTION' }];
-      brushOperationRef.current = [];
-      // Earlier stroke patches no longer apply to the replaced raster.
+      // Earlier polygon states no longer apply to the replaced raster.
       historyUndoRef.current = [];
       historyRedoRef.current = [];
       humanActionRef.current = 'MODIFIED';
@@ -3480,15 +3388,12 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       }
       cancelCurrentPath();
       polygonsRef.current = [];
-      lockedMaskRef.current?.getContext('2d')?.clearRect(0, 0, width, height);
-      lockedPixelsRef.current = false;
       polygonModeRef.current = false;
       maskRevisionRef.current += 1;
       vectorRevisionRef.current = -1;
       vectorStatusRef.current = 'DIRTY';
       vectorCacheRef.current = { revision: -1, status: 'DIRTY', polygons: [] };
       operationsRef.current = [{ type: 'RESET_TO_PREDICTION' }];
-      brushOperationRef.current = [];
       historyUndoRef.current = [];
       historyRedoRef.current = [];
       selectedNodeIdsRef.current.clear();
@@ -3527,7 +3432,15 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       const stage = stageRef.current;
       if (stage) zoomAt(factor, { x: stage.clientWidth / 2, y: stage.clientHeight / 2 });
     },
-  }), [clearAllPolygons, selectAllPolygons, beginPolygonEdit, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, ensureMaskRaster, ensurePrediction, fit, flushNotify, groupSelectedPolygons, height, invalidateMask, notifyChange, notifySelection, onMessage, props.readOnly, rebuildTint, redo, render, requestLatestVector, selectPolygon, smoothSelectedPolygons, toggleSelectedPolygonLock, undo, updateSelectedPolygonLabel, width, zoomAt]);
+    panTo: (x, y) => {
+      const stage = stageRef.current;
+      if (!stage) return;
+      const view = viewRef.current;
+      viewRef.current = { scale: view.scale, x: stage.clientWidth / 2 - x * view.scale, y: stage.clientHeight / 2 - y * view.scale };
+      fittedRef.current = true;
+      renderView();
+    },
+  }), [clearAllPolygons, selectAllPolygons, beginPolygonEdit, cancelCurrentPath, completePolygon, deleteSelectedPoint, deleteSelection, ensureMaskRaster, ensurePrediction, fit, groupSelectedPolygons, height, invalidateMask, notifyChange, notifySelection, onMessage, props.readOnly, rebuildTint, redo, render, requestLatestVector, selectPolygon, smoothSelectedPolygons, toggleSelectedPolygonLock, undo, updateSelectedPolygonLabel, width, zoomAt, renderView]);
 
   return (
     <div className={`canvas-viewport tool-${tool}`} ref={viewportRef}>
@@ -3547,8 +3460,6 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         <canvas ref={maskLayerRef} className="raster-mask-layer" aria-hidden="true" />
         <canvas ref={vectorLayerRef} className="vector-layer" aria-hidden="true" />
         <canvas ref={draftLayerRef} className="draft-layer" aria-hidden="true" />
-        <canvas ref={interactionCanvasRef} className="brush-interaction-layer" aria-hidden="true" />
-        <canvas ref={cursorCanvasRef} className="brush-cursor-layer" aria-hidden="true" />
       </div>
       {(['h', 'v'] as const).map((axis) => (
         <div key={axis} ref={axis === 'h' ? horizontalBarRef : verticalBarRef} className={`canvas-scrollbar ${axis === 'h' ? 'horizontal' : 'vertical'}`}

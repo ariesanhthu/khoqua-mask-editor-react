@@ -1,21 +1,19 @@
-import type { BrushOperation } from '../types/index';
-import { forEachPolygonSpan, MaskVectorizer, type PixelBounds } from './mask-pixels';
-import { packedTransfer, packPolygons, unpackGeometry, type PackedGeometry, type PackedPolygons } from './polygon-pack';
+import { MaskVectorizer, type PixelBounds } from './mask-pixels';
+import { packedTransfer, packPolygons, type PackedPolygons } from './polygon-pack';
 
+/**
+ * Worker chuyển mask CHỈ CÓ RASTER sang polygon một lần (mask dự đoán PNG, "Khôi phục mask ban đầu", annotation cũ
+ * lưu bằng nét brush). Từ 2026-11-12 Paint sửa thẳng trên polygon (polygon-paint.ts) nên không còn gửi nét tô
+ * hay vùng pixel thay đổi tới đây (người dùng xác nhận: bỏ chuyển pixel → polygon trong Paint).
+ */
 export type MaskWorkerRequest =
   | { type: 'INIT_MASK'; revision: number; width: number; height: number; imageData: ImageData }
-  // The main thread knows the mask as polygons (POLYGON_SET): rasterize them here with the same
-  // pixel-center rule instead of reading and transferring the whole raster on the main thread.
-  | { type: 'INIT_POLYGONS'; revision: number; width: number; height: number; geometry: PackedGeometry }
-  | { type: 'APPLY_STROKE'; operation: BrushOperation }
-  | { type: 'PUT_PATCH'; revision: number; bounds: PixelBounds; pixels: ImageData }
-  // send=false: re-trace in the background (while the user keeps drawing) without posting anything back.
+  // send=false: re-trace without posting anything back.
   | { type: 'VECTORIZE'; revision: number; send: boolean };
 
 export type MaskWorkerResponse =
   | { type: 'MASK_READY'; revision: number }
-  | { type: 'STROKE_APPLIED'; revision: number }
-  // Delta against the components sent last time; full=true replaces everything (after INIT_*).
+  // Delta against the components sent last time; full=true replaces everything (after INIT_MASK).
   // `added` is packed into transferable typed arrays (see polygon-pack.ts).
   | { type: 'VECTOR_RESULT'; revision: number; full: boolean; removed: string[]; added: PackedPolygons; duration: number }
   | { type: 'ERROR'; revision: number; message: string };
@@ -44,29 +42,6 @@ function readRegion(bounds: PixelBounds) {
   vectorizer.markDirty({ left, top, right, bottom });
 }
 
-function drawStroke(operation: BrushOperation) {
-  if (!context || !operation.points.length) return;
-  context.save();
-  context.globalCompositeOperation = operation.type === 'BRUSH_ERASE' ? 'destination-out' : 'source-over';
-  context.fillStyle = '#fff';
-  context.strokeStyle = '#fff';
-  context.lineCap = 'round';
-  context.lineJoin = 'round';
-  context.lineWidth = operation.radius * 2;
-  context.beginPath();
-  if (operation.points.length === 1) {
-    context.arc(operation.points[0].x, operation.points[0].y, operation.radius, 0, Math.PI * 2);
-    context.fill();
-  } else {
-    for (let index = 0; index < operation.points.length; index += 1) {
-      const point = operation.points[index];
-      if (index === 0) context.moveTo(point.x, point.y); else context.lineTo(point.x, point.y);
-    }
-    context.stroke();
-  }
-  context.restore();
-}
-
 self.onmessage = (event: MessageEvent<MaskWorkerRequest>) => {
   const request = event.data;
   try {
@@ -82,45 +57,6 @@ self.onmessage = (event: MessageEvent<MaskWorkerRequest>) => {
       vectorizer.markAllDirty();
       currentMaskRevision = request.revision;
       self.postMessage({ type: 'MASK_READY', revision: currentMaskRevision } satisfies MaskWorkerResponse);
-      return;
-    }
-    if (request.type === 'INIT_POLYGONS') {
-      const { width, height } = request;
-      const canvas = new OffscreenCanvas(width, height);
-      context = canvas.getContext('2d', { willReadFrequently: true });
-      if (!context) throw new Error('OffscreenCanvas 2D is unavailable.');
-      vectorizer = new MaskVectorizer(width, height);
-      const { pixels } = vectorizer;
-      forEachPolygonSpan(unpackGeometry(request.geometry), { left: 0, top: 0, right: width, bottom: height }, (y, start, end) => {
-        pixels.fill(255, y * width + start, y * width + end);
-      });
-      // Keep the canvas in step with the binary buffer for APPLY_STROKE (PUT_PATCH overwrites its rectangle).
-      const image = context.createImageData(width, height);
-      const words = new Uint32Array(image.data.buffer);
-      for (let index = 0; index < pixels.length; index += 1) if (pixels[index]) words[index] = 0xffffffff;
-      context.putImageData(image, 0, 0);
-      generation += 1;
-      sentIds = null;
-      vectorizer.markAllDirty();
-      currentMaskRevision = request.revision;
-      self.postMessage({ type: 'MASK_READY', revision: currentMaskRevision } satisfies MaskWorkerResponse);
-      return;
-    }
-    if (request.type === 'APPLY_STROKE') {
-      if (!context) throw new Error('Worker mask is not initialized.');
-      drawStroke(request.operation);
-      const { bounds } = request.operation;
-      readRegion({ left: bounds.left - 1, top: bounds.top - 1, right: bounds.right + 1, bottom: bounds.bottom + 1 });
-      currentMaskRevision = request.operation.revision;
-      self.postMessage({ type: 'STROKE_APPLIED', revision: currentMaskRevision } satisfies MaskWorkerResponse);
-      return;
-    }
-    if (request.type === 'PUT_PATCH') {
-      if (!context) throw new Error('Worker mask is not initialized.');
-      context.putImageData(request.pixels, request.bounds.left, request.bounds.top);
-      readRegion(request.bounds);
-      currentMaskRevision = request.revision;
-      self.postMessage({ type: 'STROKE_APPLIED', revision: currentMaskRevision } satisfies MaskWorkerResponse);
       return;
     }
     if (!vectorizer || request.revision !== currentMaskRevision) {

@@ -568,10 +568,8 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
 .editor-shell .canvas-viewport .raster-mask-layer,.editor-shell .canvas-viewport .vector-layer { pointer-events: none; transform-origin: 0 0; }
 .editor-shell .canvas-viewport .raster-mask-layer { z-index: 1; }
 .editor-shell .canvas-viewport .vector-layer { z-index: 2; }
-/* Draft polygon + marquee layer: above outlines, below the brush preview/cursor (same z-index, earlier in DOM). */
+/* Draft polygon + marquee layer: above outlines (Paint draws polygons on this layer too since 2026-11-12). */
 .editor-shell .canvas-viewport .draft-layer { z-index: 3; pointer-events: none; }
-.editor-shell .canvas-viewport .brush-interaction-layer,.editor-shell .canvas-viewport .brush-cursor-layer { z-index: 3; pointer-events: none; }
-.editor-shell .canvas-viewport .brush-cursor-layer { z-index: 4; }
 .editor-shell .canvas-hint {
   right: auto;
   bottom: 14px;
@@ -613,10 +611,6 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
 .editor-shell .save-indicator.saving,.editor-shell .save-indicator.syncing { color: #dc6803; }
 .editor-shell .save-indicator.offline,.editor-shell .save-indicator.conflict { color: #d92d20; }
 .layer-toggle {
-  position: absolute;
-  z-index: 6;
-  top: 84px;
-  left: 38px;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -631,17 +625,30 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
 }
 .layer-toggle svg { width: 15px; height: 15px; }
 .layer-toggle.active { color: var(--editor-primary-dark); }
-/* Nút lớp phủ + tùy chọn màu theo label và độ mờ (áp dụng cả mask lẫn đường biên), 2026-11-05. */
-.overlay-controls { position: absolute; z-index: 6; top: 84px; left: 38px; display: grid; gap: 6px; justify-items: start; }
-.overlay-controls .layer-toggle { position: static; }
-.overlay-options { display: grid; gap: 7px; width: 172px; padding: 8px 10px; color: var(--editor-muted); background: rgba(255,255,255,.94); border: 1px solid var(--editor-border); border-radius: 10px; box-shadow: 0 4px 14px rgba(16,24,40,.06); font-size: 10px; }
-.overlay-opacity { display: grid; grid-template-columns: auto minmax(0, 1fr) 30px; align-items: center; gap: 6px; }
+/* Sidebar trái 2026-11-16 (người dùng xác nhận): minimap + công cụ hiển thị thay cho chữ "Dự án chú thích /
+   Hàng đợi tệp"; nút Lớp phủ/Magnet/độ mờ chuyển từ nổi trên canvas vào dưới minimap. */
+.sidebar-canvas-tools { display: grid; gap: 8px; width: 100%; }
+.canvas-minimap { display: grid; gap: 5px; width: 100%; }
+.minimap-frame { position: relative; overflow: hidden; width: 100%; background: #0d1322; border: 1px solid var(--editor-border); border-radius: 10px; cursor: crosshair; touch-action: none; }
+.minimap-frame img { position: absolute; top: 0; left: 0; max-width: none; user-select: none; pointer-events: none; }
+.minimap-viewport { position: absolute; border: 1.5px solid #ef4444; background: rgba(239,68,68,.12); border-radius: 2px; pointer-events: none; }
+.minimap-zoom { display: grid; grid-template-columns: auto minmax(0, 1fr) 30px; align-items: center; gap: 6px; color: var(--editor-muted); font-size: 9px; }
+.minimap-zoom input { width: 100%; height: 3px; margin: 0; padding: 0; accent-color: var(--editor-primary); box-shadow: none; }
+.minimap-zoom strong { color: var(--editor-primary-dark); text-align: right; }
+.sidebar-view-controls { display: grid; gap: 6px; width: 100%; padding: 8px; background: #f8f9fc; border: 1px solid var(--editor-border); border-radius: 10px; }
+.sidebar-view-controls .layer-toggle { width: 100%; background: #fff; box-shadow: none; }
+.sidebar-view-controls .magnet-toggle:not(.active) { color: var(--editor-muted); }
+.overlay-opacity { display: grid; grid-template-columns: auto minmax(0, 1fr) 30px; align-items: center; gap: 6px; color: var(--editor-muted); font-size: 10px; }
 .overlay-opacity input { width: 100%; height: 3px; margin: 0; padding: 0; accent-color: var(--editor-primary); box-shadow: none; }
 .overlay-opacity strong { color: var(--editor-primary-dark); font-size: 9px; text-align: right; }
-/* Thanh brush (top 92px, cao 46px, giữa vùng canvas) che nút lớp phủ khi vùng canvas hẹp (~700px, hai sidebar mở):
-   khi đang dùng brush, đặt cả nhóm lớp phủ xuống dưới thanh đó. */
-.overlay-controls.with-brush-toolbar { top: 146px; }
-.overlay-controls .magnet-toggle:not(.active) { color: var(--editor-muted); }
+/* Chỉnh hiển thị ảnh (độ sáng + làm rõ biên + đặt lại), chỉ đổi hiển thị. */
+.image-adjust { display: grid; gap: 6px; padding-top: 6px; border-top: 1px dashed var(--editor-border); color: var(--editor-muted); font-size: 10px; }
+.image-adjust label { display: grid; grid-template-columns: 44px minmax(0, 1fr) 34px; align-items: center; gap: 6px; }
+.image-adjust input { width: 100%; height: 3px; margin: 0; padding: 0; accent-color: var(--editor-primary); box-shadow: none; }
+.image-adjust strong { color: var(--editor-primary-dark); font-size: 9px; text-align: right; }
+.image-adjust-reset { padding: 5px 8px; color: var(--editor-muted); background: #fff; border: 1px solid var(--editor-border); border-radius: 8px; font-size: 10px; cursor: pointer; }
+.image-adjust-reset:hover:not(:disabled) { color: var(--editor-primary-dark); border-color: #d8ceff; }
+.image-adjust-reset:disabled { opacity: .55; cursor: default; }
 /* Thông báo editor trong sidebar phải thay cho toast nổi (2026-11-05); toast nổi chỉ còn khi sidebar không hiện. */
 .panel-message { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; color: var(--editor-muted); background: #f8f9fc; border: 1px solid var(--editor-border); border-radius: 10px; font-size: 11px; line-height: 1.55; }
 .panel-message.has-message { color: var(--editor-body); background: #f6f3ff; border-color: #ded6ff; }
@@ -694,11 +701,8 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
 .brush-mode-switch button:hover { color: var(--editor-primary-dark); background: #f6f3ff; }
 .brush-mode-switch button.active { color: var(--editor-primary-dark); background: var(--editor-primary-soft); box-shadow: inset 0 0 0 1px #d4c8ff; }
 .brush-mode-switch button.active.erase { color: #b42318; background: #fef3f2; box-shadow: inset 0 0 0 1px #fecdca; }
-.brush-toolbar .toolbar-divider { width: 1px; height: 22px; margin: 0; }
-.brush-size-field { display: inline-flex; align-items: center; gap: 9px; min-width: 0; color: var(--editor-muted); font-size: 10px; font-weight: 700; white-space: nowrap; }
-.brush-size-field input[type="range"] { width: 118px; min-width: 60px; height: 3px; padding: 0; accent-color: var(--editor-primary); box-shadow: none; }
-.brush-size-field .brush-size-number { width: 52px; height: 26px; padding: 2px 4px; color: var(--editor-primary-dark); background: #f6f3ff; border: 1px solid #ded6ff; border-radius: 6px; text-align: center; font-size: 10px; font-weight: 700; }
-.brush-size-field strong { min-width: 46px; padding: 2px 6px; color: var(--editor-primary-dark); background: #f6f3ff; border: 1px solid #ded6ff; border-radius: 6px; text-align: center; font-size: 10px; }
+/* Phím tắt của chế độ Paint (= nối, - trừ) hiện ngay trên nút. */
+.brush-mode-switch button kbd { min-width: 18px; padding: 1px 5px; color: inherit; background: rgba(255,255,255,.7); border: 1px solid currentColor; border-radius: 5px; font: 700 10px/1.3 ui-monospace, monospace; opacity: .75; }
 
 .editor-shell .control-panel,.right-sidebar-rail {
   z-index: 10;
@@ -845,17 +849,9 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
   .canvas-control-stack { top: 12px; right: 6px; }
   .canvas-statusbar { top: 22px; left: 22px; }
   .canvas-statusbar .save-indicator,.canvas-file { display: none; }
-  .layer-toggle { top: 64px; left: 22px; }
   .brush-toolbar { top: 104px; left: 50%; max-width: calc(100% - 76px); padding: 4px 9px 4px 4px; gap: 7px; }
   .brush-mode-switch button { padding: 0 8px; }
-  .brush-mode-switch button span,.brush-size-field > span { display: none; }
-  .layer-toggle span { display: none; }
-  /* Một hàng ngắn cạnh nút lớp phủ, không đè thanh brush (top 104px). */
-  .overlay-controls { top: 64px; left: 22px; grid-auto-flow: column; align-items: center; }
-  .overlay-options { display: flex; align-items: center; width: auto; gap: 8px; padding: 6px 8px; }
-  .overlay-opacity > span { display: none; }
-  .overlay-opacity { grid-template-columns: 72px 28px; }
-  .overlay-controls.with-brush-toolbar { top: 64px; }
+  .brush-mode-switch button span { display: none; }
   .shortcut-content { grid-template-columns: 1fr; }
   .draft-choice-dialog { padding: 22px 18px; }
   .draft-choice-options { grid-template-columns: 1fr; }
@@ -878,11 +874,11 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
   scrollbar-color: #c5cad4 transparent;
   scrollbar-width: thin;
 }
-.editor-shell .file-queue button { flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 7px 9px; border: 1px solid var(--editor-border, #e4e7ec); border-radius: 8px; background: transparent; color: var(--editor-text, #344054); cursor: pointer; }
+.editor-shell .file-queue button { flex-shrink: 0; display: flex; flex-direction: column; gap: 1px; text-align: left; padding: 4px 8px; border: 1px solid var(--editor-border, #e4e7ec); border-radius: 8px; background: transparent; color: var(--editor-text, #344054); cursor: pointer; }
 .editor-shell .file-queue button:hover:not(:disabled) { background: #f8f9fc; border-color: #d8ceff; }
 .editor-shell .file-queue button[aria-current="page"] { border-color: #7c5cfa; background: #f0ebff; }
-.editor-shell .file-queue strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.editor-shell .file-queue small,.editor-shell .file-queue span { font-size: 10px; line-height: 1.25; color: var(--editor-muted, #667085); }
+.editor-shell .file-queue strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.editor-shell .file-queue small,.editor-shell .file-queue span { font-size: 9px; line-height: 1.2; color: var(--editor-muted, #667085); }
 .editor-shell .queue-pagination { display: flex; justify-content: space-between; align-items: center; padding: 6px 5px 2px 0; font-size: 11px; }
 .editor-shell .queue-pagination button { border: 0; border-radius: 6px; padding: 4px 10px; }
 .editor-shell fieldset.control-panel-scroll { min-width: 0; margin: 0; border: 0; }

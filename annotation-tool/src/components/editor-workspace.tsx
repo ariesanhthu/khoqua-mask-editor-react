@@ -26,9 +26,12 @@ import {
 import { deleteLocalDraft, draftKey, getLocalDraft, putLocalDraft } from '@/lib/local-drafts';
 import { labelsForKind, nextLabel, polygonLabelKind, type PolygonLabelKind } from '@/lib/polygon-labels';
 import { parseWebPolygonImport } from '@/lib/web-import';
-import type { BrushMode } from '@/lib/polygon-geometry';
+import type { PaintMode } from '@/lib/polygon-paint';
+import { PAINT_ICON_PATHS } from './paint-mode-icon';
 import { formatTime, VersionFacts, VersionPreview } from './version-compare';
+import CanvasMinimap from './canvas-minimap';
 import EditorCanvas, {
+  type CanvasViewInfo,
   type EditorCanvasHandle,
   type EditorHistoryState,
   type EditorCanvasSnapshot,
@@ -47,12 +50,6 @@ interface EditorSeed {
 }
 
 const emptyBreakpoints: BreakpointAnnotation = { state: 'NOT_ANNOTATED', points: [] };
-
-// Cỡ nét tính bằng pixel của ảnh gốc, không đổi theo mức thu phóng.
-const BRUSH_MIN_SIZE = 1;
-const BRUSH_MAX_SIZE = 200;
-const BRUSH_SLIDER_MAX_SIZE = 64;
-const clampBrushSize = (size: number) => Math.max(BRUSH_MIN_SIZE, Math.min(BRUSH_MAX_SIZE, Math.round(size)));
 
 // So sanh noi dung ban nhap tren thiet bi voi du lieu may chu. Chenh lech revision
 // khong dong nghia voi xung dot: neu noi dung y het nhau thi ban nhap chi la rac con
@@ -134,17 +131,20 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     const stored = Number(localStorage.getItem('mask-opacity'));
     return Number.isFinite(stored) && stored >= 0.1 && stored <= 1 ? stored : 0.5;
   });
-  const [brushMode, setBrushMode] = useState<BrushMode>(() => (
-    typeof window !== 'undefined' && localStorage.getItem('brush-mode') === 'erase' ? 'erase' : 'add'
-  ));
-  const [brushSize, setBrushSize] = useState(() => {
-    if (typeof window === 'undefined') return 8;
-    const stored = Number(localStorage.getItem('brush-size'));
-    return Number.isFinite(stored) && stored >= BRUSH_MIN_SIZE ? clampBrushSize(stored) : 8;
+  // Paint (B): nối (+) hoặc trừ (−) bằng polygon (người dùng xác nhận 2026-11-12). Giá trị cũ 'erase' của brush đọc thành trừ.
+  const [paintMode, setPaintMode] = useState<PaintMode>(() => {
+    if (typeof window === 'undefined') return 'add';
+    const stored = localStorage.getItem('brush-mode');
+    return stored === 'subtract' || stored === 'erase' ? 'subtract' : 'add';
   });
   const [showMask, setShowMask] = useState(true);
   // Magnet trong Select (V): kéo node tới gần điểm của mask khác thì dính vào điểm đó (người dùng xác nhận 2026-11-05).
   const [magnet, setMagnet] = useState(() => typeof window === 'undefined' || localStorage.getItem('select-magnet') !== '0');
+  // Hiển thị ảnh để xem dễ hơn (người dùng xác nhận 2026-11-16): độ sáng + làm rõ biên, chỉ đổi hiển thị; có nút
+  // đặt lại về ảnh gốc. Khung nhìn canvas cho minimap ở sidebar trái.
+  const [brightness, setBrightness] = useState(1);
+  const [edgeStrength, setEdgeStrength] = useState(0);
+  const [canvasView, setCanvasView] = useState<CanvasViewInfo | null>(null);
   const changeOpacity = (value: number) => {
     setOpacity(value);
     localStorage.setItem('mask-opacity', String(value));
@@ -159,10 +159,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     if (zoomLabelRef.current) zoomLabelRef.current.textContent = `${Math.round(scale * 100)}%`;
   }, []);
   const toolRef = useRef(tool);
-  const brushSizeRef = useRef(brushSize);
   useEffect(() => { toolRef.current = tool; }, [tool]);
-  useEffect(() => { brushSizeRef.current = brushSize; localStorage.setItem('brush-size', String(brushSize)); }, [brushSize]);
-  useEffect(() => { localStorage.setItem('brush-mode', brushMode); }, [brushMode]);
+  useEffect(() => { localStorage.setItem('brush-mode', paintMode); }, [paintMode]);
   const [selectedPolygonIds, setSelectedPolygonIds] = useState<string[]>([]);
   const [snapshot, setSnapshot] = useState<EditorCanvasSnapshot>({
     humanAction: 'UNTOUCHED', breakpoints: emptyBreakpoints, maskOperations: [], polygons: [],
@@ -204,12 +202,11 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         changeToolRef.current('pan');
       } else if (key === 'p') {
         changeToolRef.current('polygon', 'mask');
-      } else if (key === 'b' || key === 'e') {
-        setBrushMode(key === 'e' ? 'erase' : 'add');
-        changeToolRef.current('brush', 'mask');
-      } else if ((event.key === '[' || event.key === ']') && toolRef.current === 'brush') {
-        const step = Math.max(1, Math.round(brushSizeRef.current * 0.2));
-        setBrushSize(clampBrushSize(brushSizeRef.current + (event.key === '[' ? -step : step)));
+      } else if (key === 'b' || key === 'e' || event.key === '=' || event.key === '+' || event.key === '-') {
+        // Paint ở mọi công cụ của bước Vùng chọn (người dùng xác nhận 2026-11-12): B / = / + → nối (+), E / - → trừ (−).
+        // Đang ở Paint thì chỉ đổi chế độ, bản nháp giữ nguyên.
+        setPaintMode(key === 'e' || event.key === '-' ? 'subtract' : 'add');
+        if (toolRef.current !== 'brush') changeToolRef.current('brush', 'mask');
       } else if (key === 'r') {
         changeToolRef.current('rectangle', 'mask');
       } else if (key === 'c') {
@@ -755,7 +752,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   const selectTool = useCallback(async (nextTool: EditorTool, nextStep = workspaceStep) => {
     if (navigating || status === 'SYNCING') return;
     if (nextStep !== workspaceStep && !await flushExplicitly()) return;
-    if (!readOnly && !conflictRef.current && (['select', 'polygon', 'rectangle', 'circle', 'anchor', 'cut'].includes(nextTool)) && nextStep === 'mask') canvasRef.current?.beginPolygonEdit();
+    // Paint (brush) sửa thẳng trên polygon từ 2026-11-12 nên cũng cần polygon sẵn sàng như các công cụ polygon khác.
+    if (!readOnly && !conflictRef.current && (['select', 'polygon', 'rectangle', 'circle', 'anchor', 'cut', 'brush'].includes(nextTool)) && nextStep === 'mask') canvasRef.current?.beginPolygonEdit();
     if (nextTool === 'brush') setShowMask(true);
     setTool(readOnly ? 'pan' : nextTool);
     setWorkspaceStep(nextStep);
@@ -845,14 +843,40 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
           <button className="sidebar-toggle left" aria-label={leftCollapsed ? 'Mở sidebar trái' : 'Thu gọn sidebar trái'} title={leftCollapsed ? 'Mở sidebar' : 'Thu gọn sidebar'} onClick={() => setLeftCollapsed((value) => !value)}>
             <Icon name={leftCollapsed ? 'chevron-right' : 'chevron-left'} />
           </button>
+          {/* Chỉ còn icon folder để quay lại danh sách; chữ "Dự án chú thích / Bộ dữ liệu / Hàng đợi tệp" bỏ
+              để nhường chỗ cho minimap + công cụ hiển thị (người dùng xác nhận 2026-11-16). */}
           <div className="project-summary">
             <button className="project-icon" aria-label="Quay lại danh sách tệp" title="Quay lại danh sách tệp" onClick={() => void goBack()}><Icon name="folder" /></button>
-            <div className="sidebar-label">
-              <strong>Dự án chú thích</strong>
-              <small title={bootstrap.file.projectId}>Bộ dữ liệu hiện tại</small>
-            </div>
           </div>
-          <button className="sidebar-primary-button" onClick={() => void goBack()}><Icon name="files" /><span className="sidebar-label">Hàng đợi tệp</span></button>
+          <div className="sidebar-canvas-tools sidebar-label">
+            <CanvasMinimap imageUrl={bootstrap.assets.imageUrl} imageWidth={bootstrap.file.width} imageHeight={bootstrap.file.height}
+              view={canvasView} onPan={(x, y) => canvasRef.current?.panTo(x, y)} />
+            {workspaceStep === 'mask' ? <div className="sidebar-view-controls">
+              <button className={`layer-toggle ${showMask ? 'active' : ''}`} title={showMask ? 'Ẩn lớp phủ' : 'Hiện lớp phủ'} onClick={() => setShowMask((visible) => !visible)}><Icon name="layers" /> <span>{showMask ? 'Lớp phủ đang bật' : 'Lớp phủ đang ẩn'}</span></button>
+              <button className={`layer-toggle magnet-toggle ${magnet ? 'active' : ''}`} aria-pressed={magnet} title={magnet ? 'Tắt magnet: kéo node trong chế độ V không dính vào điểm gần đó' : 'Bật magnet: kéo node trong chế độ V dính vào điểm gần đó'} onClick={() => setMagnet((value) => { localStorage.setItem('select-magnet', value ? '0' : '1'); return !value; })}><Icon name="magnet" /> <span>{magnet ? 'Magnet đang bật' : 'Magnet đang tắt'}</span></button>
+              {showMask ? <label className="overlay-opacity" title="Độ đậm của mask và đường biên">
+                <span>Độ mờ</span>
+                <input type="range" min="0.1" max="1" step="0.05" value={opacity} aria-label="Độ mờ lớp phủ (mask và đường biên)" onChange={(event) => changeOpacity(Number(event.target.value))} />
+                <strong>{Math.round(opacity * 100)}%</strong>
+              </label> : null}
+              {/* Chỉnh hiển thị ảnh (người dùng xác nhận 2026-11-16): độ sáng (CSS filter GPU) + làm rõ biên
+                  (unsharp mask, tính một lần) + đặt lại. Không đổi dữ liệu lưu/export. */}
+              <div className="image-adjust">
+                <label title="Độ sáng của ảnh (chỉ hiển thị)">
+                  <span>Độ sáng</span>
+                  <input type="range" min="0.4" max="1.8" step="0.05" value={brightness} aria-label="Độ sáng ảnh" onChange={(event) => setBrightness(Number(event.target.value))} />
+                  <strong>{Math.round(brightness * 100)}%</strong>
+                </label>
+                <label title="Làm rõ biên quả bằng unsharp mask (chỉ hiển thị)">
+                  <span>Rõ biên</span>
+                  <input type="range" min="0" max="1" step="0.1" value={edgeStrength} aria-label="Làm rõ biên" onChange={(event) => setEdgeStrength(Number(event.target.value))} />
+                  <strong>{Math.round(edgeStrength * 100)}%</strong>
+                </label>
+                <button className="image-adjust-reset" disabled={brightness === 1 && edgeStrength === 0} title="Về ảnh gốc: bỏ chỉnh độ sáng và làm rõ biên"
+                  onClick={() => { setBrightness(1); setEdgeStrength(0); }}>Đặt lại ảnh gốc</button>
+              </div>
+            </div> : null}
+          </div>
           <nav className="file-queue" aria-label="Danh sách tệp">
             {queueError ? <p role="status">{queueError}</p> : null}
             {queue.map((file) => <button key={file.id} aria-current={file.id === fileId ? 'page' : undefined}
@@ -885,35 +909,17 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
             {readOnly && (bootstrap.lockedBySelf || !bootstrap.lockedBy) ? <button disabled={navigating} onClick={editHere} title="Nhận lại quyền sửa từ phiên khác của chính bạn">Sửa tại đây</button> : null}
             <button disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} onClick={() => void saveExplicitly()}>Lưu</button>
           </div>
-          {workspaceStep === 'mask' ? <div className={`overlay-controls ${tool === 'brush' ? 'with-brush-toolbar' : ''}`}>
-            <button className={`layer-toggle ${showMask ? 'active' : ''}`} title={showMask ? 'Ẩn lớp phủ' : 'Hiện lớp phủ'} onClick={() => setShowMask((visible) => !visible)}><Icon name="layers" /> <span>{showMask ? 'Lớp phủ đang bật' : 'Lớp phủ đang ẩn'}</span></button>
-            <button className={`layer-toggle magnet-toggle ${magnet ? 'active' : ''}`} aria-pressed={magnet} title={magnet ? 'Tắt magnet: kéo node trong chế độ V không dính vào điểm gần đó' : 'Bật magnet: kéo node trong chế độ V dính vào điểm gần đó'} onClick={() => setMagnet((value) => { localStorage.setItem('select-magnet', value ? '0' : '1'); return !value; })}><Icon name="magnet" /> <span>{magnet ? 'Magnet đang bật' : 'Magnet đang tắt'}</span></button>
-            {showMask ? <div className="overlay-options">
-              <label className="overlay-opacity" title="Độ đậm của mask và đường biên">
-                <span>Độ mờ</span>
-                <input type="range" min="0.1" max="1" step="0.05" value={opacity} aria-label="Độ mờ lớp phủ (mask và đường biên)" onChange={(event) => changeOpacity(Number(event.target.value))} />
-                <strong>{Math.round(opacity * 100)}%</strong>
-              </label>
-            </div> : null}
-          </div> : null}
 
-          {workspaceStep === 'mask' && tool === 'brush' ? <fieldset className="brush-toolbar" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} aria-label="Công cụ bút vẽ và tẩy">
-            <div className="brush-mode-switch" role="group" aria-label="Chế độ nét vẽ">
-              <button type="button" className={brushMode === 'add' ? 'active' : ''} aria-pressed={brushMode === 'add'} title="Bút vẽ — tô thêm mask (B)" onClick={() => setBrushMode('add')}>
-                <Icon name="brush" /><span>Bút vẽ</span>
+          {workspaceStep === 'mask' && tool === 'brush' ? <fieldset className="brush-toolbar" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} aria-label="Chế độ Paint: nối hoặc trừ mask bằng polygon">
+            {/* Icon + phím cho biết đang nối (+) hay trừ (−) (người dùng yêu cầu 2026-11-12). */}
+            <div className="brush-mode-switch" role="group" aria-label="Chế độ Paint">
+              <button type="button" className={paintMode === 'add' ? 'active' : ''} aria-pressed={paintMode === 'add'} title="Nối vào mask (=)" onClick={() => setPaintMode('add')}>
+                <Icon name="paint-add" /><span>Nối</span><kbd>=</kbd>
               </button>
-              <button type="button" className={brushMode === 'erase' ? 'active erase' : ''} aria-pressed={brushMode === 'erase'} title="Tẩy — tẩy xuyên qua mask để tách vùng (E)" onClick={() => setBrushMode('erase')}>
-                <Icon name="eraser" /><span>Tẩy</span>
+              <button type="button" className={paintMode === 'subtract' ? 'active erase' : ''} aria-pressed={paintMode === 'subtract'} title="Trừ khỏi mask (-)" onClick={() => setPaintMode('subtract')}>
+                <Icon name="paint-subtract" /><span>Trừ</span><kbd>-</kbd>
               </button>
             </div>
-            <span className="toolbar-divider" />
-            <label className="brush-size-field">
-              <span>Cỡ nét</span>
-              <input type="range" min={BRUSH_MIN_SIZE} max={BRUSH_SLIDER_MAX_SIZE} step="1" value={Math.min(brushSize, BRUSH_SLIDER_MAX_SIZE)}
-                onChange={(event) => setBrushSize(clampBrushSize(Number(event.target.value)))} />
-              <input className="brush-size-number" type="number" min={BRUSH_MIN_SIZE} max={BRUSH_MAX_SIZE} step="1" value={brushSize}
-                aria-label="Cỡ nét theo pixel" onChange={(event) => setBrushSize(clampBrushSize(Number(event.target.value)))} />
-            </label>
           </fieldset> : null}
 
           <div className="canvas-control-stack">
@@ -930,7 +936,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               <ToolbarButton active={tool === 'circle'} label="Vẽ vòng tròn (C)" icon="circle" onClick={() => selectTool('circle', 'mask')} />
               <ToolbarButton active={tool === 'anchor'} label="Chế độ điểm neo: Bấm viền để thêm & kéo anchor point (A)" icon="anchor" onClick={() => selectTool('anchor', 'mask')} />
               {/* Temporarily hidden: <ToolbarButton active={tool === 'point'} label="Đánh dấu point u vấu (M)" icon="pin" onClick={() => selectTool('point', 'warts')} /> */}
-              <ToolbarButton active={tool === 'brush'} label="Bút vẽ / Tẩy mask (B)" icon="brush" onClick={() => selectTool('brush', 'mask')} />
+              <ToolbarButton active={tool === 'brush'} label="Paint: vẽ polygon nối (+) / trừ (−) mask (B · = nối · - trừ)" icon={paintMode === 'subtract' ? 'paint-subtract' : 'paint-add'} onClick={() => selectTool('brush', 'mask')} />
               <ToolbarButton disabled={selectedPolygonIds.length < 2} label="Gộp polygon đã chọn" icon="merge" onClick={() => canvasRef.current?.groupSelectedPolygons()} />
               <ToolbarButton disabled={selectedPolygonIds.length < 1} label="Làm mịn biên polygon đã chọn" icon="smooth" onClick={() => canvasRef.current?.smoothSelectedPolygons()} />
               <span className="toolbar-divider" />
@@ -947,8 +953,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
             currentMaskUrl={bootstrap.assets.currentMaskUrl} localMaskBlob={seed.localMaskBlob}
             initialHumanAction={seed.humanAction} initialBreakpoints={seed.breakpoints} initialOperations={seed.operations}
             readOnly={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} tool={readOnly ? 'pan' : tool} maskOpacity={opacity} showMask={showMask} magnet={magnet}
-            brushMode={brushMode} brushSize={brushSize}
-            onHistoryChange={setHistory} onPolygonComplete={onPolygonComplete}
+            paintMode={paintMode} brightness={brightness} edgeStrength={edgeStrength}
+            onHistoryChange={setHistory} onPolygonComplete={onPolygonComplete} onViewChange={setCanvasView}
             onChange={onEditorChange} onSelectionChange={setSelectedPolygonIds} onReady={onCanvasReady} onMessage={setToast} onZoomChange={updateZoomLabel} />
         </section>
 
@@ -985,7 +991,9 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
                 {/* Thông báo của editor hiện ở đây thay cho toast nổi trên canvas (người dùng xác nhận 2026-11-05);
                     chưa có thông báo thì hiện gợi ý ngắn theo công cụ. */}
                 <div className={`panel-message ${toast ? 'has-message' : ''}`} role="status" aria-live="polite">
-                  {toast ? <><span>{toast}</span><button type="button" aria-label="Ẩn thông báo" title="Ẩn thông báo" onClick={() => setToast('')}>×</button></> : <span>{history.local
+                  {toast ? <><span>{toast}</span><button type="button" aria-label="Ẩn thông báo" title="Ẩn thông báo" onClick={() => setToast('')}>×</button></> : <span>{tool === 'brush'
+                  ? `Paint đang ${paintMode === 'subtract' ? 'TRỪ (−): polygon vẽ xong được trừ khỏi các mask nó chồng lên; chỉ chấm 2 điểm xuyên qua mask rồi Enter thì TÁCH mask làm hai tại đường đó' : 'NỐI (+): polygon vẽ xong được nối vào mask nó chạm/chồng (mask khác không bị dính)'}. Nhấp chấm điểm (gần biên thì neo vào điểm đó), Shift + chuột trái để tự hoàn thiện dọc biên, nhấp đúp lên một điểm hoặc Enter để áp dụng. Phím = nối, - trừ.`
+                  : history.local
                   ? 'Đang vẽ polygon: Ctrl+Z gỡ từng điểm; Ctrl+Y hoặc Ctrl+Shift+Z chấm lại; Esc để hủy. Giữ Shift và trỏ vào trong mask kế bên để xem đường bám biên từ điểm vừa chấm; Shift + chuột trái để chèn các điểm đó (chưa hoàn tất). Nhấp đúp lên một điểm hoặc Enter để hoàn tất.'
                   : tool === 'anchor'
                   ? 'Chế độ điểm neo: Rê chuột lên viền mask để xem điểm thêm. Click và kéo chuột để tạo & tùy chỉnh anchor point ngay lập tức. Bấm chuột phải lên điểm để xóa.'
@@ -994,10 +1002,10 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
                   : tool === 'circle'
                   ? 'Chế độ vòng tròn: Nhấp và kéo chuột để tạo mask vòng tròn/oval. Giữ Shift để tạo vòng tròn đều, giữ Alt để vẽ từ tâm.'
                   : tool === 'select'
-                  ? `Chế độ chỉnh sửa: kéo node để chỉnh; chuột phải lên điểm để xóa.${magnet ? ' Magnet bật: node dính vào điểm gần đó.' : ''} Ctrl+Z hoàn tác.`
+                  ? `Chế độ chỉnh sửa: kéo node để chỉnh; giữ Shift khi kéo để neo vào biên mask đang trỏ và tự hoàn thiện dọc biên; chuột phải lên điểm để xóa.${magnet ? ' Magnet bật: node dính vào điểm gần đó.' : ''} Ctrl+Z hoàn tác.`
                   : 'Ctrl+Z hoàn tác toàn cục; Ctrl+Y hoặc Ctrl+Shift+Z làm lại.'}</span>}
                 </div>
-                {tool === 'polygon' ? <button className="button primary" onClick={() => void completePolygon()}>Hoàn tất polygon</button> : null}
+                {tool === 'polygon' || tool === 'brush' ? <button className="button primary" onClick={() => void completePolygon()}>{tool === 'brush' ? (paintMode === 'subtract' ? 'Áp dụng: trừ khỏi mask' : 'Áp dụng: nối vào mask') : 'Hoàn tất polygon'}</button> : null}
                 <div className="section-title-row"><p>Thông tin đối tượng</p><span>{polygonCount} vùng</span></div>
                 <PolygonLabelEditor
                   key={`${selectedPolygonIds.join(',')}:${selectedPolygons.map((polygon) => `${polygon.label}:${Boolean(polygon.meta?.locked)}`).join(',')}`}
@@ -1051,8 +1059,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       {helpOpen ? <div className="modal-backdrop help-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><section className="shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-title">
         <div className="shortcut-header"><div><span className="help-mark">?</span><span><h2 id="shortcut-title">Trợ giúp &amp; phím tắt</h2><p>Thao tác nhanh hơn trên vùng chú thích</p></span></div><button aria-label="Đóng trợ giúp" onClick={() => setHelpOpen(false)}>×</button></div>
         <div className="shortcut-content">
-          <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" /><Shortcut keys={['B']} label="Bút vẽ mask" /><Shortcut keys={['E']} label="Tẩy mask" /><Shortcut keys={['1']} label="Gán label u vấu mới (w*)" /><Shortcut keys={['2']} label="Gán label vết gợn mới (r*)" /><Shortcut keys={['[', ']']} label="Giảm / tăng cỡ nét" /><Shortcut keys={['R']} label="Vẽ hình chữ nhật" /><Shortcut keys={['C']} label="Vẽ vòng tròn" /><Shortcut keys={['A']} label="Thêm & kéo điểm neo" />{/* <Shortcut keys={['M']} label="Đánh dấu point u vấu" /> */}<Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'A']} label="Chọn tất cả polygon" /><Shortcut keys={['Ctrl', 'Z']} label={history.local ? "Hoàn tác điểm (cục bộ)" : "Hoàn tác toàn cục"} /><Shortcut keys={['Ctrl', 'Y']} label={history.local ? "Làm lại điểm (cục bộ)" : "Làm lại toàn cục"} /></section>
-          <section className="usage-tips"><h3>Mẹo sử dụng</h3><p><Icon name="cursor" />Ở chế độ V, kéo khung qua các node để chọn nhiều polygon.</p><p><Icon name="polygon" />Chế độ P chỉ dùng để vẽ một polygon mới. Nhấp chuột trái chấm điểm; giữ Shift + trỏ vào trong mask kế bên rồi Shift + chuột trái để chèn các điểm bám biên còn trống (không gộp mask); nhấp đúp lên một điểm để hoàn tất.</p><p><Icon name="eraser" />Ở chế độ B, tẩy xuyên qua mask để tách vùng; mỗi vùng khép kín thành một mask riêng.</p><p><Icon name="rectangle" />Chế độ R: Kéo chuột để vẽ nhanh mask hình chữ nhật.</p><p><Icon name="circle" />Chế độ C: Kéo chuột để vẽ mask hình tròn/oval. Giữ Shift để tạo vòng tròn đều, Alt để vẽ từ tâm.</p><p><Icon name="anchor" />Chế độ A (Điểm neo): Click lên viền mask để tạo anchor point và kéo tùy chỉnh hình dạng mask.</p><p><Icon name="layers" />Ẩn lớp phủ khi cần quan sát ảnh gốc.</p><p><Icon name="hand" />Dùng con lăn để zoom; Shift + con lăn để cuộn ngang; Ctrl + Shift + con lăn để cuộn dọc; kéo thanh cuộn ở mép canvas khi đã phóng to.</p></section>
+          <section><h3>Phím tắt</h3><Shortcut keys={['V']} label="Chọn / chỉnh sửa" /><Shortcut keys={['H']} label="Di chuyển ảnh" /><Shortcut keys={['P']} label="Vẽ polygon" /><Shortcut keys={['B', '=']} label="Paint nối (+) vào mask" /><Shortcut keys={['E', '-']} label="Paint trừ (−) khỏi mask" /><Shortcut keys={['Shift', 'kéo']} label="Kéo điểm: neo + tự hoàn thiện" /><Shortcut keys={['1']} label="Gán label u vấu mới (w*)" /><Shortcut keys={['2']} label="Gán label vết gợn mới (r*)" /><Shortcut keys={['R']} label="Vẽ hình chữ nhật" /><Shortcut keys={['C']} label="Vẽ vòng tròn" /><Shortcut keys={['A']} label="Thêm & kéo điểm neo" />{/* <Shortcut keys={['M']} label="Đánh dấu point u vấu" /> */}<Shortcut keys={['Enter']} label="Hoàn tất polygon" /><Shortcut keys={['Esc']} label="Hủy thao tác" /><Shortcut keys={['Delete']} label="Xóa lựa chọn" /><Shortcut keys={['Ctrl', 'A']} label="Chọn tất cả polygon" /><Shortcut keys={['Ctrl', 'Z']} label={history.local ? "Hoàn tác điểm (cục bộ)" : "Hoàn tác toàn cục"} /><Shortcut keys={['Ctrl', 'Y']} label={history.local ? "Làm lại điểm (cục bộ)" : "Làm lại toàn cục"} /></section>
+          <section className="usage-tips"><h3>Mẹo sử dụng</h3><p><Icon name="cursor" />Ở chế độ V, kéo khung qua các node để chọn nhiều polygon.</p><p><Icon name="polygon" />Chế độ P chỉ dùng để vẽ một polygon mới. Nhấp chuột trái chấm điểm; giữ Shift + trỏ vào trong mask kế bên rồi Shift + chuột trái để chèn các điểm bám biên còn trống (không gộp mask); nhấp đúp lên một điểm để hoàn tất.</p><p><Icon name="paint-add" />Chế độ B (Paint): vẽ polygon như P rồi nhấp đúp/Enter để nối (+) vào mask nó chạm; phím - chuyển sang trừ (−) để khoét hoặc cắt mask. Mask khác không bị dính vào.</p><p><Icon name="cursor" />Ở chế độ V, giữ Shift khi kéo một điểm để neo vào biên mask đang trỏ; cạnh tới điểm kề đã nằm trên biên đó tự bám theo biên.</p><p><Icon name="rectangle" />Chế độ R: Kéo chuột để vẽ nhanh mask hình chữ nhật.</p><p><Icon name="circle" />Chế độ C: Kéo chuột để vẽ mask hình tròn/oval. Giữ Shift để tạo vòng tròn đều, Alt để vẽ từ tâm.</p><p><Icon name="anchor" />Chế độ A (Điểm neo): Click lên viền mask để tạo anchor point và kéo tùy chỉnh hình dạng mask.</p><p><Icon name="layers" />Ẩn lớp phủ khi cần quan sát ảnh gốc.</p><p><Icon name="hand" />Dùng con lăn để zoom; Shift + con lăn để cuộn ngang; Ctrl + Shift + con lăn để cuộn dọc; kéo thanh cuộn ở mép canvas khi đã phóng to.</p></section>
         </div>
       </section></div> : null}
       {staleDraft && !conflict ? <div className="modal-backdrop draft-choice-backdrop"><section className="draft-choice-dialog" role="dialog" aria-modal="true" aria-labelledby="draft-choice-title" aria-describedby="draft-choice-description">
@@ -1111,7 +1119,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   );
 }
 
-type IconName = 'brush' | 'chevron-left' | 'chevron-right' | 'cursor' | 'eraser' | 'files' | 'fit' | 'folder' | 'hand' | 'layers' | 'merge' | 'pin' | 'polygon' | 'redo' | 'smooth' | 'trash' | 'undo' | 'rectangle' | 'circle' | 'anchor' | 'magnet';
+type IconName = 'brush' | 'chevron-left' | 'chevron-right' | 'cursor' | 'eraser' | 'files' | 'fit' | 'folder' | 'hand' | 'layers' | 'merge' | 'pin' | 'polygon' | 'redo' | 'smooth' | 'trash' | 'undo' | 'rectangle' | 'circle' | 'anchor' | 'magnet' | 'paint-add' | 'paint-subtract';
 
 function ToolbarButton({ active = false, danger = false, disabled = false, icon, label, onClick }: { active?: boolean; danger?: boolean; disabled?: boolean; icon: IconName; label: string; onClick(): void }) {
   return <button type="button" aria-label={label} aria-pressed={active || undefined} className={`${active ? 'active' : ''} ${danger ? 'danger' : ''}`} disabled={disabled} title={label} onClick={onClick}><Icon name={icon} /></button>;
@@ -1137,6 +1145,9 @@ function Icon({ name }: { name: IconName }) {
     merge: <><path d="M4 5h7v7H4zM13 12h7v7h-7z" /><path d="m9 15 6-6m-2 0h2v2" /></>,
     pin: <><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z" /><circle cx="12" cy="10" r="2" /></>,
     polygon: <path d="m7 4 10 2 3 10-8 5-9-7 4-10Z" />,
+    // Paint nối (+) / trừ (−): dùng chung với paint-mode-icon.tsx (người dùng yêu cầu 2026-11-12).
+    'paint-add': PAINT_ICON_PATHS.add,
+    'paint-subtract': PAINT_ICON_PATHS.subtract,
     rectangle: <rect x="3" y="5" width="18" height="14" rx="2" />,
     circle: <circle cx="12" cy="12" r="9" />,
     anchor: <><path d="M3 19C6 10 14 6 21 5" /><circle cx="12" cy="10" r="3.5" /><path d="M12 17v6m-3-3h6" /></>,

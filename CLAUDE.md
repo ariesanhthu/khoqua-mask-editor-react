@@ -44,7 +44,7 @@ Docs are written in Vietnamese. Reply in the language the user writes in; keep c
 | `node scripts/canvas-browser-check.mjs http://localhost:3217` | Headless-Chrome check of canvas interactions on the synthetic `/canvas-browser-check` page (start an isolated dev server first; see the script header) |
 
 The 4 gates (typecheck, test, lint, build) must pass before any deploy; CI runs test → typecheck → build.
-Baseline on 2026-11-07 (same-account lock takeover + two-version conflict chooser, on `dev/debug_anchor`): typecheck clean, lint clean, build ok, 276 tests in 30 files pass, `canvas-browser-check` 45/45 (last run 2026-11-06; canvas unchanged since). A regression from this baseline is yours to fix or report.
+Baseline on 2026-11-16 (magnet toggle covers all auto-snapping at 6 px, Shift inserts boundary points without finalizing, windowed completion model for real prelabels, on `dev`): typecheck clean, lint clean, build ok, 330 tests in 34 files pass, `canvas-browser-check` 73/73 (2-point line cut in Paint (−); left-sidebar minimap with pan; brightness/unsharp display adjustments with reset). A regression from this baseline is yours to fix or report.
 
 ## Non-negotiable rules (summary — full text in ENGINEERING_POLICY.md)
 

@@ -173,8 +173,42 @@ const checks = [];
 const check = (name, ok, detail) => { checks.push({ name, ok: Boolean(ok), detail }); };
 const metrics = [];
 
+// Mỗi thông báo hiện phía trên canvas và đẩy canvas xuống: tính lại tọa độ trước mỗi lần nhấp (cảnh 800×500).
+const clickImage = async (x, y, options) => { const p = (await imageToScreen(800, 500))(x, y); await click(p.x, p.y, options); await sleep(120); };
+const shiftClickImage = async (x, y) => {
+  const p = (await imageToScreen(800, 500))(x, y);
+  await mouse('mouseMoved', p.x, p.y, { modifiers: SHIFT }); await sleep(150);
+  await click(p.x, p.y, { modifiers: SHIFT }); await sleep(250);
+};
+/** Kéo chuột trái với Shift giữ suốt lần kéo (kéo điểm + Shift trong Select). */
+async function shiftDrag(map, from, to, steps = 20) {
+  const a = map(...from); const b = map(...to);
+  await mouse('mouseMoved', a.x, a.y, { modifiers: SHIFT });
+  await mouse('mousePressed', a.x, a.y, { button: 'left', buttons: 1, clickCount: 1, modifiers: SHIFT });
+  for (let i = 1; i <= steps; i += 1) { await mouse('mouseMoved', a.x + (b.x - a.x) * i / steps, a.y + (b.y - a.y) * i / steps, { button: 'left', buttons: 1, modifiers: SHIFT }); await sleep(16); }
+  await mouse('mouseReleased', b.x, b.y, { button: 'left', buttons: 0, clickCount: 1, modifiers: SHIFT });
+}
+// Pixel đọc từ ảnh chụp trang giải mã trên canvas tạm, không getImageData lớp hiển thị.
+const pixelsAt = async (points) => {
+  const { data } = await send('Page.captureScreenshot', { format: 'png' });
+  return evaluate(`(async () => {
+    const image = new Image(); image.src = 'data:image/png;base64,${data}'; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+    const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
+    return ${JSON.stringify(points)}.map(([x, y]) => Array.from(context.getImageData(Math.round(x), Math.round(y), 1, 1).data.slice(0, 3)));
+  })()`);
+};
+const sameColor = (a, b) => a.every((value, index) => Math.abs(value - b[index]) <= 2);
+const polygonsNow = () => evaluate(`window.__polygons.map((p) => ({ id: p.id, label: p.label, nodes: p.nodes.length, holes: (p.holes ?? []).length }))`);
+const insideMask = (id, x, y) => evaluate(`(() => {
+  const p = window.__polygons.find((item) => item.id === ${JSON.stringify(id)});
+  if (!p) return false;
+  const inRing = (ring) => { let inside = false; for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) { const a = ring[i]; const b = ring[j]; if ((a.y > ${y}) !== (b.y > ${y}) && ${x} < ((b.x - a.x) * (${y} - a.y)) / (b.y - a.y) + a.x) inside = !inside; } return inside; };
+  return inRing(p.nodes) && !(p.holes ?? []).some(inRing);
+})()`);
+
 try {
-  // ── Functional: default scene (800×500, saved rectangles r1/r2), harness starts in the brush tool ──
+  // ── Functional: default scene (800×500, saved rectangles r1/r2), harness starts in Select ──
   await send('Page.navigate', { url: `${base}/canvas-browser-check` });
   check('page loads', await waitFor(pageReady, 120000));
   await sleep(1500);
@@ -255,19 +289,60 @@ try {
   s = await state();
   check('Enter after Escape adds nothing', field(s.status, 'masks') === masksBefore, s.status);
 
-  // Brush through the center, vectorize on Select, undo, exported binary mask
+  // Paint (người dùng xác nhận 2026-11-12): vẽ polygon như P rồi Enter để NỐI (+) vào mask nó chạm, hoặc TRỪ (−).
+  // Không tô pixel, không vector hóa lại khi rời Paint: các mask khác giữ nguyên id và số node (trước đây bị "dính").
   await clickSelector('button[data-tool=brush]'); await sleep(300);
-  await clickButtonText('Add 12 px'); await sleep(100);
-  to = await imageToScreen(800, 500);
-  await drag(to, [260, 250], [540, 250], 25);
-  await sleep(300);
-  await clickSelector('button[data-tool=select]');
-  const vectorized = await waitFor(`(() => { const t = [...document.querySelectorAll('p')].find((p) => p.textContent.startsWith('Mode='))?.textContent ?? ''; return t.includes('center filled=true'); })()`, 15000);
+  await clickSelector('button[data-paint=add]'); await sleep(150);
+  check('Paint mode buttons show the shared icons and the active mode', await evaluate(`document.querySelector('button[data-paint=add]').getAttribute('aria-pressed') === 'true'
+    && document.querySelector('button[data-paint=subtract]').getAttribute('aria-pressed') === 'false'
+    && !!document.querySelector('button[data-paint=add] [data-paint-icon=add]') && !!document.querySelector('button[data-paint=subtract] [data-paint-icon=subtract]')`));
+  const neighboursBefore = (await polygonsNow()).filter((p) => p.id !== '0');
+  // (250,200) và (250,300) neo vào cạnh phải của r1 (x = 250): polygon trùng cạnh với r1.
+  for (const [x, y] of [[250, 200], [320, 200], [320, 300], [250, 300]]) await clickImage(x, y);
+  await enter(); await sleep(400);
   s = await state();
-  check('brush stroke through center vectorizes on Select (center filled, r3 merged → 6)', vectorized && field(s.status, 'masks') === '6', `${s.status} | ${s.message}`);
-  await clickButtonText('Undo'); await sleep(500);
+  check('Paint (+) sharing an edge extends that mask (no new mask, stays in Paint)', field(s.status, 'masks') === '6' && await insideMask('0', 290, 250) && field(s.status, 'tool') === 'brush', `${s.status} | ${s.message}`);
+  await clickSelector('button[data-tool=select]'); await sleep(500);
+  const neighboursAfter = (await polygonsNow()).filter((p) => p.id !== '0');
+  check('leaving Paint never re-vectorizes: every other mask keeps its id and node count', JSON.stringify(neighboursAfter) === JSON.stringify(neighboursBefore), JSON.stringify({ neighboursBefore, neighboursAfter }));
+  await clickSelector('button[data-tool=brush]'); await sleep(300);
+  await clickSelector('button[data-paint=subtract]'); await sleep(150);
+  for (const [x, y] of [[270, 220], [300, 220], [300, 280]]) await clickImage(x, y);
+  {
+    // Bản nháp (−) đỏ (ERASE_COLOR #f04438) để biết polygon sẽ trừ.
+    const p = (await imageToScreen(800, 500))(300, 220);
+    const [pixel] = await pixelsAt([[p.x, p.y]]);
+    check('Paint (−) draft is drawn red', pixel[0] > 200 && pixel[1] < 130 && pixel[2] < 130, JSON.stringify(pixel));
+  }
+  await clickSelector('button[data-paint=add]'); await sleep(150);
+  await clickSelector('button[data-paint=subtract]'); await sleep(150);
   s = await state();
-  check('undo after brush restores 6 polygons', field(s.status, 'masks') === '6', s.status);
+  check('switching + / − keeps the draft', field(s.history, 'local') === 'true', s.history);
+  await clickImage(270, 280);
+  await enter(); await sleep(400);
+  s = await state();
+  check('Paint (−) inside a mask cuts a hole and keeps its id', field(s.status, 'masks') === '6' && field(s.status, 'holes') === '1'
+    && !(await insideMask('0', 285, 250)) && await insideMask('0', 260, 250), `${s.status} | ${s.message}`);
+  // Các điểm neo vào hai cạnh của r2 (x 550..600): polygon cắt ngang trọn bề rộng r2.
+  for (const [x, y] of [[540, 240], [610, 240], [610, 260], [540, 260]]) await clickImage(x, y);
+  await enter(); await sleep(400);
+  s = await state();
+  const r2Pieces = (await polygonsNow()).filter((p) => p.label === 'r2').length;
+  check('Paint (−) across a mask splits it into two masks with the same label', field(s.status, 'masks') === '7' && r2Pieces === 2, `${s.status} | pieces=${r2Pieces} | ${s.message}`);
+  await ctrl('z'); await sleep(300);
+  check('one undo restores the split mask', (await evaluate(masksOf)) === 6);
+  // Đường cắt 2 ĐIỂM trong chế độ trừ (người dùng xác nhận 2026-11-16): hai điểm neo lên hai biên của r1 (y=130,
+  // tránh lỗ đã trừ ở trên); NHẤP ĐÚP LÊN CHÍNH ĐIỂM VỪA CHẤM hoàn tất (rule 2026-11-16: nhấp đúp lên bất kỳ
+  // điểm nào, không chỉ điểm chấm từ trước) và tách r1 làm hai mảnh cùng label tại đúng đường đó.
+  for (const [x, y] of [[190, 130], [260, 130]]) await clickImage(x, y);
+  { const p = (await imageToScreen(800, 500))(260, 130); await click(p.x, p.y, { clickCount: 1 }); await click(p.x, p.y, { clickCount: 2 }); }
+  await sleep(400);
+  s = await state();
+  const r1Pieces = (await polygonsNow()).filter((p) => p.label === 'r1').length;
+  check('Paint (−) with a 2-point line splits the mask at the cut', field(s.status, 'masks') === '7' && r1Pieces === 2, `${s.status} | pieces=${r1Pieces} | ${s.message}`);
+  await ctrl('z'); await sleep(300);
+  check('one undo restores the line-split mask', (await evaluate(masksOf)) === 6);
+  await clickSelector('button[data-tool=select]'); await sleep(300);
   await clickButtonText('Check PNG'); await sleep(500);
   s = await state();
   check('exported PNG: empty center, filled r1', /center alpha=0; mask alpha=255/.test(s.message), s.message);
@@ -321,13 +396,6 @@ try {
   await waitFor(pageReady, 120000); await sleep(700);
   await clickButtonText('Fit'); await sleep(200);
   await clickSelector('button[data-tool=polygon]'); await sleep(200);
-  // Mỗi thông báo hiện phía trên canvas và đẩy canvas xuống: tính lại tọa độ trước mỗi lần nhấp.
-  const clickImage = async (x, y, options) => { const p = (await imageToScreen(800, 500))(x, y); await click(p.x, p.y, options); await sleep(120); };
-  const shiftClickImage = async (x, y) => {
-    const p = (await imageToScreen(800, 500))(x, y);
-    await mouse('mouseMoved', p.x, p.y, { modifiers: SHIFT }); await sleep(150);
-    await click(p.x, p.y, { modifiers: SHIFT }); await sleep(250);
-  };
   // A trên biên trên của Bm, một điểm tự do, P trên biên dưới của tC: nhấp lên mask khác chỉ chấm điểm (chèn đỉnh vào mask).
   for (const [x, y] of [[450, 400], [510, 300], [470, 160]]) await clickImage(x, y);
   s = await state();
@@ -355,18 +423,58 @@ try {
   check('Shift + left click without a free boundary path inserts nothing and keeps drawing', (await evaluate(masksOf)) === 6 && field(s.history, 'local') === 'true' && field(s.history, 'totalNodes') === '28', `${s.status} | ${s.history}`);
   await escape(); await sleep(150);
 
+  // NHẤN PHÍM Shift khi đang vẽ (người dùng xác nhận 2026-11-16): chèn ngay các điểm bám biên vào BẢN NHÁP,
+  // không hoàn tất mask; thả Shift giữ nguyên; nhấn lại không tạo điểm trùng; chỉ nhấp đúp lên một điểm mới hoàn
+  // tất, nhấp đúp vùng trống thì không.
+  const shiftKey = (type) => send('Input.dispatchKeyEvent', { type, key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, modifiers: 8 });
+  for (const [x, y] of [[450, 400], [510, 300], [470, 160]]) await clickImage(x, y);
+  { const p = (await imageToScreen(800, 500))(230, 150); await mouse('mouseMoved', p.x, p.y); await sleep(250); }
+  await shiftKey('keyDown'); await sleep(400); await shiftKey('keyUp'); await sleep(250);
+  s = await state();
+  check('pressing the Shift key inserts boundary points into the draft without finalizing the mask',
+    (await evaluate(masksOf)) === 6 && field(s.history, 'local') === 'true' && /Đã chèn 3 điểm/.test(s.message), `${s.status} | ${s.history} | ${s.message}`);
+  await shiftKey('keyDown'); await sleep(300); await shiftKey('keyUp'); await sleep(200);
+  check('pressing Shift again at the same spot inserts no duplicate points', (await evaluate(masksOf)) === 6 && field((await state()).history, 'local') === 'true', (await state()).message);
+  { const p = (await imageToScreen(800, 500))(350, 300); await click(p.x, p.y, { clickCount: 1 }); await click(p.x, p.y, { clickCount: 2 }); }
+  await sleep(300);
+  check('double-click on empty space never finalizes the mask', (await evaluate(masksOf)) === 6 && field((await state()).history, 'local') === 'true', `${(await state()).status} | ${(await state()).history}`);
+  await ctrl('z'); await sleep(200);
+  // Nhấp đúp lên một điểm TỰ ĐỘNG (đỉnh (300,160) của dải trên nằm trên đường vừa chèn) hoàn tất mask.
+  { const p = (await imageToScreen(800, 500))(300, 160); await click(p.x, p.y, { clickCount: 1 }); await click(p.x, p.y, { clickCount: 2 }); }
+  await sleep(400);
+  s = await state();
+  check('double-click on an auto-inserted point finalizes: 3 drawn + 3 boundary points, old masks intact',
+    field(s.status, 'masks') === '7' && /last=w\d+:6/.test(s.history) && field(s.history, 'local') === 'false', `${s.status} | ${s.history}`);
+  await ctrl('z'); await sleep(250);
+  check('undo after the Shift-completed polygon restores 6 masks', (await evaluate(masksOf)) === 6);
+  // Dọn bản nháp dù các kiểm trên có trượt, để khối sau không thừa điểm.
+  await escape(); await sleep(150);
+
+  // Kéo điểm + Shift trong Select (người dùng xác nhận 2026-11-12): điểm NEO vào biên mask đang trỏ, cạnh tới điểm kề đã
+  // nằm trên biên đó TỰ HOÀN THIỆN bằng đỉnh thật. Polygon mới: (200,160) neo trên biên dưới tA, (250,250), (200,300).
+  for (const [x, y] of [[200, 160], [250, 250], [200, 300]]) await clickImage(x, y);
+  await enter(); await sleep(400);
+  await clickSelector('button[data-tool=select]'); await sleep(250);
+  const lastNodes = () => evaluate(`window.__polygons.at(-1).nodes.map((n) => [Math.round(n.x * 10) / 10, Math.round(n.y * 10) / 10])`);
+  const hasNode = (nodes, x, y) => nodes.some(([nx, ny]) => Math.abs(nx - x) < 0.6 && Math.abs(ny - y) < 0.6);
+  { const map = await imageToScreen(800, 500); await shiftDrag(map, [250, 250], [350, 150], 20); await sleep(400); }
+  const anchoredNodes = await lastNodes();
+  const tBNodes = await evaluate(`window.__polygons.find((p) => p.id === 's2').nodes.map((n) => [n.x, n.y])`);
+  // Biên dưới tA đã có đỉnh neo (230,160) từ Shift + nhấp ở trên: đường đi (200,160) → (230,160) → (300,160) → (350,160).
+  check('Shift + drag: the node anchors on the mask under the cursor and the edge follows its free boundary',
+    anchoredNodes.length === 5 && hasNode(anchoredNodes, 350, 160) && hasNode(anchoredNodes, 300, 160) && hasNode(anchoredNodes, 230, 160) && hasNode(anchoredNodes, 200, 160)
+      && !hasNode(anchoredNodes, 250, 250) && hasNode(tBNodes, 350, 160) && (await evaluate(masksOf)) === 7,
+    JSON.stringify({ anchoredNodes, tBNodes, message: (await state()).message }));
+  await ctrl('z'); await sleep(250);
+  const restoredNodes = await lastNodes();
+  check('one undo restores the node and the target mask', restoredNodes.length === 3 && hasNode(restoredNodes, 250, 250), JSON.stringify(restoredNodes));
+  { const map = await imageToScreen(800, 500); await drag(map, [250, 250], [330, 150], 12); await sleep(300); }
+  const freeNodes = await lastNodes();
+  check('without Shift the drag stays a normal drag (no boundary points inserted)', freeNodes.length === 3 && !hasNode(freeNodes, 300, 160), JSON.stringify(freeNodes));
+  await ctrl('z'); await sleep(250);
+
   // Màu theo label và độ mờ áp dụng cả lên viền (người dùng xác nhận 2026-11-05). Cảnh ?labels=1: hai mask tách
-  // rời cùng là r1 và một mask w1. Pixel đọc từ ảnh chụp trang giải mã trên canvas tạm, không getImageData lớp hiển thị.
-  const pixelsAt = async (points) => {
-    const { data } = await send('Page.captureScreenshot', { format: 'png' });
-    return evaluate(`(async () => {
-      const image = new Image(); image.src = 'data:image/png;base64,${data}'; await image.decode();
-      const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
-      const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
-      return ${JSON.stringify(points)}.map(([x, y]) => Array.from(context.getImageData(Math.round(x), Math.round(y), 1, 1).data.slice(0, 3)));
-    })()`);
-  };
-  const sameColor = (a, b) => a.every((value, index) => Math.abs(value - b[index]) <= 2);
+  // rời cùng là r1 và một mask w1.
   await send('Page.navigate', { url: `${base}/canvas-browser-check?labels=1` });
   await waitFor(pageReady, 120000); await sleep(700);
   await clickButtonText('Fit'); await sleep(300);
@@ -374,6 +482,34 @@ try {
   // Màu theo label là chế độ duy nhất (người dùng xác nhận 2026-11-06).
   const [labelA, labelB, labelW] = await pixelsAt(await maskCenters());
   check('label colours by default: two separate r1 masks share a colour, w1 differs', sameColor(labelA, labelB) && !sameColor(labelA, labelW), JSON.stringify([labelA, labelB, labelW]));
+  // Gợi ý neo (người dùng yêu cầu 2026-11-12): ở P/Paint, và khi đang kéo node trong Select, đỉnh của mask khác hiện chấm
+  // tâm trắng; Select đứng yên thì không. So pixel đúng tại góc (500,100) của mask r1 bên phải.
+  const cornerWhiteness = async () => { const p = (await imageToScreen(800, 500))(500, 100); const [pixel] = await pixelsAt([[p.x, p.y]]); return Math.min(...pixel); };
+  await clickSelector('button[data-tool=select]'); await sleep(300);
+  const idleCorner = await cornerWhiteness();
+  await clickSelector('button[data-tool=polygon]'); await sleep(300);
+  const drawCorner = await cornerWhiteness();
+  await clickSelector('button[data-tool=brush]'); await sleep(300);
+  const paintCorner = await cornerWhiteness();
+  await clickSelector('button[data-tool=select]'); await sleep(300);
+  let draggingCorner = 0;
+  {
+    const map = await imageToScreen(800, 500);
+    const fill = map(175, 200); await click(fill.x, fill.y); await sleep(200);
+    const a = map(250, 300); const b = map(240, 290);
+    await mouse('mouseMoved', a.x, a.y);
+    await mouse('mousePressed', a.x, a.y, { button: 'left', buttons: 1, clickCount: 1 });
+    for (let i = 1; i <= 4; i += 1) { await mouse('mouseMoved', a.x + (b.x - a.x) * i / 4, a.y + (b.y - a.y) * i / 4, { button: 'left', buttons: 1 }); await sleep(30); }
+    await sleep(300);
+    draggingCorner = await cornerWhiteness();
+    await mouse('mouseReleased', b.x, b.y, { button: 'left', buttons: 0, clickCount: 1 });
+    await sleep(300);
+    await ctrl('z'); await sleep(250);
+  }
+  const afterDragCorner = await cornerWhiteness();
+  check('anchor hints: other masks show their vertices in P, Paint and while dragging a node, not in idle Select',
+    drawCorner - idleCorner >= 40 && paintCorner - idleCorner >= 40 && draggingCorner - idleCorner >= 40 && Math.abs(afterDragCorner - idleCorner) <= 12,
+    JSON.stringify({ idleCorner, drawCorner, paintCorner, draggingCorner, afterDragCorner }));
   // Ẩn lớp tô để chỉ còn viền; so pixel đậm nhất quanh cạnh trái của mask r1 ở độ mờ 100% và 20%.
   await clickButtonText('Mask layer'); await sleep(200);
   const edgeDarkness = async () => {
@@ -388,24 +524,51 @@ try {
   check('outline follows the opacity slider (20% much lighter than 100%)', strongEdge > 150 && faintEdge < strongEdge * 0.45, `100%: ${strongEdge}, 20%: ${faintEdge}`);
 
   // Magnet trong Select (người dùng xác nhận 2026-11-05): kéo góc (250,300) của r1 tới gần góc (300,320) của w1.
+  // Khoảng cách tính theo px MÀN HÌNH (bán kính magnet là 6 px màn hình / zoom), nên quy đổi qua scale thật.
   await clickButtonText('Mask layer'); await sleep(150);
   await clickSelector('button[data-tool=select]'); await sleep(200);
+  const imageScale = async () => { const map = await imageToScreen(800, 500); return (map(100, 0).x - map(0, 0).x) / 100; };
+  const scale = await imageScale();
+  /** Điểm cách đỉnh (300,320) đúng `screenPx` px màn hình theo đường chéo. */
+  const nearCorner = (screenPx) => { const d = screenPx / (scale * Math.SQRT2); return [300 - d, 320 - d]; };
   const cornerOf = () => evaluate(`(() => { const n = window.__polygons.find((p) => p.id === 'l0').nodes[2]; return [n.x, n.y]; })()`);
-  const dragCorner = async () => {
+  const dragCorner = async (screenPx) => {
     const map = await imageToScreen(800, 500);
     const fill = map(175, 200); await click(fill.x, fill.y); await sleep(200);
-    await drag(map, [250, 300], [295, 316], 12); await sleep(300);
+    await drag(map, [250, 300], nearCorner(screenPx), 12); await sleep(300);
   };
-  await dragCorner();
+  const atCorner = (point) => Math.hypot(point[0] - 300, point[1] - 320) < 0.01;
+  await dragCorner(3);
   const snapped = await cornerOf();
-  check('magnet: dragged node sticks to the nearby vertex of another mask', snapped[0] === 300 && snapped[1] === 320, JSON.stringify(snapped));
+  check('magnet: dragged node sticks to a vertex 3 screen px away', atCorner(snapped), JSON.stringify(snapped));
+  await ctrl('z'); await sleep(250);
+  // Bán kính giảm còn 6 px màn hình (người dùng báo 10 px "hơi mạnh", 2026-11-16): 9 px không được hút nữa.
+  await dragCorner(9);
+  const weak = await cornerOf();
+  check('magnet: a vertex 9 screen px away is out of reach (radius 6)', !atCorner(weak) && Math.hypot(weak[0] - nearCorner(9)[0], weak[1] - nearCorner(9)[1]) < 2.5, JSON.stringify(weak));
   await ctrl('z'); await sleep(250);
   await clickButtonText('Magnet'); await sleep(150);
-  await dragCorner();
+  await dragCorner(3);
   const free = await cornerOf();
-  check('magnet off: the node stays where it is dropped', Math.abs(free[0] - 300) > 2 && Math.abs(free[0] - 295) < 2.5, JSON.stringify(free));
+  check('magnet off: the node stays where it is dropped', !atCorner(free) && Math.hypot(free[0] - nearCorner(3)[0], free[1] - nearCorner(3)[1]) < 2.5, JSON.stringify(free));
   await ctrl('z'); await sleep(250);
-  await clickButtonText('Magnet'); await sleep(150);
+
+  // Nút magnet tắt MỌI việc hít tự động (người dùng xác nhận 2026-11-16): chấm điểm bằng P cạnh biên mask l0 khi
+  // magnet tắt thì không neo, nên l0 không bị chèn đỉnh. Bật lại thì có. Giữ Shift vẫn neo (kiểm tra riêng ở trên).
+  const nodesOfL0 = async () => (await polygonsNow()).find((item) => item.id === 'l0').nodes;
+  const clickNearEdge = async () => { await clickImage(250 - 4 / scale, 200); await sleep(250); };
+  await clickSelector('button[data-tool=polygon]'); await sleep(250);
+  const beforeOff = await nodesOfL0();
+  await clickNearEdge();
+  check('magnet off: clicking next to an edge in P does not anchor into that mask', (await nodesOfL0()) === beforeOff, `${beforeOff} → ${await nodesOfL0()}`);
+  await escape(); await sleep(200);
+  await clickButtonText('Magnet'); await sleep(200);
+  const beforeOn = await nodesOfL0();
+  await clickNearEdge();
+  check('magnet on: clicking next to an edge in P anchors a vertex into that mask', (await nodesOfL0()) === beforeOn + 1, `${beforeOn} → ${await nodesOfL0()}`);
+  await escape(); await sleep(200);
+  await ctrl('z'); await sleep(250);
+  await clickSelector('button[data-tool=select]'); await sleep(200);
 
   // Thanh cuộn tự vẽ + Ctrl/Shift + con lăn (người dùng yêu cầu 2026-11-05).
   const scrollbars = () => evaluate(`(() => ['horizontal', 'vertical'].map((name) => { const bar = document.querySelector('.canvas-scrollbar.' + name); return { hidden: bar.hidden, transform: bar.firstElementChild.style.transform }; }))()`);
@@ -432,6 +595,50 @@ try {
   check('dragging the horizontal scrollbar thumb pans the view', afterDrag[0].transform !== afterCtrlShift[0].transform && field((await state()).status, 'zoom') === zoomBefore, JSON.stringify(afterDrag));
   await clickButtonText('Fit'); await sleep(300);
 
+  // ── Hiển thị ảnh + minimap (người dùng xác nhận 2026-11-16), cảnh ?photo=1: trái #666, phải #999, ranh x=400 ──
+  await send('Page.navigate', { url: `${base}/canvas-browser-check?photo=1` });
+  await waitFor(pageReady, 120000); await sleep(700);
+  await clickButtonText('Fit'); await sleep(400);
+  const luminanceAt = async (x, y) => { const p = (await imageToScreen(800, 500))(x, y); const [pixel] = await pixelsAt([[p.x, p.y]]); return (pixel[0] + pixel[1] + pixel[2]) / 3; };
+  const baseFar = await luminanceAt(300, 250);
+  const baseDark = await luminanceAt(398, 250);
+  const baseLight = await luminanceAt(403, 250);
+  await clickSelector('button[data-adjust=bright]'); await sleep(300);
+  const dimmed = await luminanceAt(300, 250);
+  check('brightness 60% dims the photo layer', dimmed < baseFar * 0.75, `far ${baseFar} → ${dimmed}`);
+  await clickSelector('button[data-adjust=reset]'); await sleep(400);
+  check('adjust reset restores the original pixels', Math.abs((await luminanceAt(300, 250)) - baseFar) <= 4, `far ${baseFar} → ${await luminanceAt(300, 250)}`);
+  // Unsharp: overshoot hai phía ranh trong tầm bán kính mờ 2 px (tối thêm ở phía tối, sáng thêm ở phía sáng);
+  // vùng phẳng xa ranh giữ nguyên — bằng chứng chỉ BIÊN được làm rõ.
+  await clickSelector('button[data-adjust=edge]'); await sleep(900);
+  const edgedDark = await luminanceAt(398, 250);
+  const edgedLight = await luminanceAt(403, 250);
+  const edgedFar = await luminanceAt(300, 250);
+  check('edge enhance (unsharp) overshoots both sides of the boundary, flat areas untouched',
+    edgedDark < baseDark - 3 && edgedLight > baseLight + 3 && Math.abs(edgedFar - baseFar) <= 2,
+    `dark ${baseDark} → ${edgedDark}; light ${baseLight} → ${edgedLight}; far ${baseFar} → ${edgedFar}`);
+  check('edge enhance never touches the polygons', JSON.stringify(await polygonsNow()) === JSON.stringify([{ id: 'p0', label: 'r1', nodes: 4, holes: 0 }]));
+  await clickSelector('button[data-adjust=reset]'); await sleep(900);
+  check('reset after edge enhance restores the boundary pixels', Math.abs((await luminanceAt(398, 250)) - baseDark) <= 4, `dark ${baseDark} → ${await luminanceAt(398, 250)}`);
+  // Minimap: khung đỏ phản ánh vùng nhìn; bấm trên minimap pan canvas chính, zoom giữ nguyên.
+  const viewportBox = () => evaluate(`(() => { const v = document.querySelector('[data-minimap-viewport]'); return v ? { left: Math.round(parseFloat(v.style.left)), width: Math.round(parseFloat(v.style.width)) } : null; })()`);
+  const fitBox = await viewportBox();
+  check('minimap shows the viewport frame', Boolean(fitBox && fitBox.width > 10), JSON.stringify(fitBox));
+  { const c = (await imageToScreen(800, 500))(400, 250); for (let i = 0; i < 6; i += 1) { await mouse('mouseWheel', c.x, c.y, { deltaX: 0, deltaY: -120 }); await sleep(20); } }
+  await sleep(300);
+  const zoomedBox = await viewportBox();
+  check('zooming the canvas shrinks the minimap frame', Boolean(zoomedBox && fitBox && zoomedBox.width < fitBox.width * 0.8), JSON.stringify({ fitBox, zoomedBox }));
+  const zoomKept = field((await state()).status, 'zoom');
+  { const m = await evaluate(`(() => { const f = document.querySelector('[data-minimap] .minimap-frame'); const r = f.getBoundingClientRect(); return { x: r.left + r.width * 0.15, y: r.top + r.height * 0.5 }; })()`);
+    await mouse('mouseMoved', m.x, m.y);
+    await mouse('mousePressed', m.x, m.y, { button: 'left', buttons: 1, clickCount: 1 });
+    await mouse('mouseReleased', m.x, m.y, { button: 'left', buttons: 0, clickCount: 1 }); }
+  await sleep(300);
+  const pannedBox = await viewportBox();
+  check('clicking the minimap pans the main canvas without changing zoom',
+    Boolean(pannedBox && zoomedBox && pannedBox.left !== zoomedBox.left) && field((await state()).status, 'zoom') === zoomKept,
+    JSON.stringify({ zoomedBox, pannedBox, zoomKept, zoomNow: field((await state()).status, 'zoom') }));
+
   // ── Large polygon-mode file (600 saved polygons, 2400×1600) under 4× CPU throttle ──
   await send('Emulation.setCPUThrottlingRate', { rate: 4 });
   const wheel = async (map, x, y, count, delta) => { const c = map(x, y); for (let i = 0; i < count; i += 1) { await mouse('mouseWheel', c.x, c.y, { deltaX: 0, deltaY: delta }); await sleep(16); } };
@@ -449,18 +656,18 @@ try {
     await drag(many, [86, 60], [110, 70], 30);
   }));
   check('many: node drag keeps 600 polygons', (await evaluate(masksOf)) === 600, String(await evaluate(masksOf)));
-  metrics.push(await measure('many: polygon → brush (tool switch)', async () => { await clickSelector('button[data-tool=brush]'); await sleep(600); }));
+  // Paint (+) bằng polygon (2026-11-12): không tô pixel, không vector hóa khi rời Paint, nên không mask nào bị gộp
+  // (bản brush cũ đo ở đây gộp 600 → 510 thành phần).
+  metrics.push(await measure('many: polygon → paint (tool switch)', async () => { await clickSelector('button[data-tool=brush]'); await sleep(600); }));
   many = await imageToScreen(2400, 1600);
-  metrics.push(await measure('many: brush strokes ×3', async () => {
-    for (let k = 0; k < 3; k += 1) { await drag(many, [300, 300 + k * 300], [2000, 380 + k * 300], 30); await sleep(150); }
+  metrics.push(await measure('many: paint (+) polygon across 3 masks', async () => {
+    for (const [x, y] of [[300, 290], [470, 290], [470, 330], [300, 330]]) { const p = many(x, y); await click(p.x, p.y); await sleep(60); }
+    await enter(); await sleep(400);
   }));
-  metrics.push(await measure('many: brush → select (vectorize)', async () => {
-    await clickSelector('button[data-tool=select]');
-    await waitFor(`${masksOf} !== 600`, 30000);
-    await sleep(300);
-  }));
-  // Same strokes on the same file gave 510 components before and after the 2026-10-25 render changes.
-  check('many: strokes merge polygons after vectorize', (await evaluate(masksOf)) < 600, String(await evaluate(masksOf)));
+  metrics.push(await measure('many: paint → select', async () => { await clickSelector('button[data-tool=select]'); await sleep(400); }));
+  check('many: Paint (+) and leaving Paint never merge masks (≥ 600 masks)', (await evaluate(masksOf)) >= 600, String(await evaluate(masksOf)));
+  // Lõi tự hoàn thiện đo ngay trong Chrome (CPU giới hạn 4×) trên 600 mask: dựng mô hình biên một lần, rồi mỗi lần rê/kéo.
+  metrics.push({ name: 'many: auto-complete core (ms, 600 masks, 4× CPU)', ...(await evaluate('window.__benchAutoComplete([86, 60], [110, 60], 50)')) });
   if (!process.env.SKIP_PERF) {
     metrics.push(await measure('many: polygon draft hover + 6 clicks', async () => {
       await clickSelector('button[data-tool=polygon]'); await sleep(300);
@@ -483,7 +690,7 @@ try {
     // Inset 3 px: pressing Escape turns on the stage canvas's :focus-visible outline at the edge.
     const viewport = await evaluate(`(() => { const r = document.querySelector('.canvas-viewport').getBoundingClientRect(); return { x: r.left + 3, y: r.top + 3, width: r.width - 6, height: r.height - 6, scale: 1 }; })()`);
     const screenshot = async () => (await send('Page.captureScreenshot', { format: 'png', clip: viewport })).data;
-    // Row 2 is above every brush stroke: a re-traced polygon with a node near (1260, 212).
+    // Row 2 is above the painted polygon: an unchanged 24-gon with a node near (1260, 212).
     const select = many(1230, 212); await click(select.x, select.y); await sleep(400);
     const before = await screenshot();
     const a = many(1260, 212); const b = many(1300, 250);
@@ -513,11 +720,13 @@ try {
       await clickSelector('button[data-tool=select]');
       await waitFor(`${masksOf} > 0`, 30000);
     }));
-    metrics.push(await measure('spiky: polygon → brush', async () => { await clickSelector('button[data-tool=brush]'); await sleep(500); }));
-    metrics.push(await measure('spiky: brush strokes ×3', async () => {
-      for (let k = 0; k < 3; k += 1) { await drag(spiky, [500, 300 + k * 150], [1100, 350 + k * 150], 30); await sleep(120); }
+    metrics.push(await measure('spiky: polygon → paint', async () => { await clickSelector('button[data-tool=brush]'); await sleep(500); }));
+    metrics.push(await measure('spiky: paint (−) polygon', async () => {
+      await clickSelector('button[data-paint=subtract]'); await sleep(100);
+      for (const [x, y] of [[700, 450], [900, 450], [900, 550], [700, 550]]) { const p = spiky(x, y); await click(p.x, p.y); await sleep(60); }
+      await enter(); await sleep(500);
     }));
-    metrics.push(await measure('spiky: brush → polygon', async () => { await clickSelector('button[data-tool=polygon]'); await sleep(2500); }));
+    metrics.push(await measure('spiky: paint → polygon', async () => { await clickSelector('button[data-tool=polygon]'); await sleep(500); }));
     metrics.push(await measure('spiky: wheel zoom in/out ×24', async () => { await wheel(spiky, 800, 500, 12, -100); await wheel(spiky, 800, 500, 12, 100); }));
   }
   await send('Emulation.setCPUThrottlingRate', { rate: 1 });
@@ -528,6 +737,10 @@ try {
   if (outFile) writeFileSync(outFile, JSON.stringify(result, null, 2));
   for (const item of checks) console.log(`${item.ok ? 'PASS' : 'FAIL'} ${item.name}${item.ok ? '' : ` — ${item.detail}`}`);
   for (const item of metrics) {
+    if ('coldMs' in item) {
+      console.log(`${item.name.padEnd(38)} cold ${item.coldMs} ms  warm ${item.warmMsPerMove} ms/move  drag ${item.dragMsPerMove} ms/move`);
+      continue;
+    }
     console.log(`${item.name.padEnd(38)} longTasks ${String(item.longTasks).padStart(2)} total ${String(item.longTaskTotal).padStart(5)} ms  max ${String(item.longTaskMax).padStart(4)} ms  p95 frame ${item.p95FrameGap} ms`);
   }
   for (const [name, lines] of Object.entries(profiles)) console.log(`\n# CPU profile: ${name}\n${lines.join('\n')}`);
