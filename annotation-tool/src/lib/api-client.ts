@@ -181,6 +181,14 @@ export async function autoGroupProject(projectId: string) {
   );
 }
 
+/** ADMIN giao (hoặc bỏ giao với `userId: null`) riêng các ảnh cho một người phụ trách (2026-11-24). */
+export async function setFileAssignee(projectId: string, fileIds: string[], userId: string | null) {
+  return apiFetch<{ updated: number; assignee: { userId: string; displayName: string } | null }>(
+    `/api/projects/${encodeURIComponent(projectId)}/files/assignee`,
+    { method: 'PUT', body: JSON.stringify({ fileIds, userId }) },
+  );
+}
+
 export async function getUsers() {
   return apiFetch<UserSummary[]>('/api/users');
 }

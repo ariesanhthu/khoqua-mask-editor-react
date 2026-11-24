@@ -21,6 +21,13 @@ Mẫu một mục:
 
 ---
 
+## 2026-11-24 — Giao và bỏ giao ảnh trên trang admin
+
+- ADMIN có thể giao lại ảnh, bỏ giao ngay trên thẻ hoặc bỏ giao hàng loạt trong nhóm. Tách thao tác bỏ chọn khỏi bỏ giao và giới hạn lựa chọn theo trang, nhóm và bộ lọc.
+- Dùng bảng `assignments` hiện có. Server kiểm quyền ADMIN, khóa hàng theo thứ tự ID, xử lý cả lô trong một transaction và đếm số ảnh thực sự được bỏ giao. Người được giao cả nhóm vẫn có quyền theo nhóm.
+- “Làm ảnh tiếp theo” lọc theo người phụ trách trước khi phân trang. Ảnh được giao cho chính người dùng được ưu tiên.
+- Bản phát hành qua 370 kiểm thử Vitest, typecheck, lint và build. Chrome trên dữ liệu PGlite cô lập đã kiểm tra giao lại, lưu qua tải lại trang, bỏ giao từng ảnh và hàng loạt, đổi trang, thử lại sau lỗi, quyền của người nhận và bố cục rộng 375 px.
+
 ## 2026-11-17 — Tải riêng ảnh hoàn tất kèm polygon/COCO JSON
 
 - **Người dùng xác nhận (2026-11-16):** nút cạnh Tải ZIP, dùng cho toàn bộ vai trò, chỉ ảnh hoàn tất kèm polygon COCO JSON và ảnh gốc; kiểm tra phụ thuộc/rule/context/test rồi deploy master; không thực hiện lại những phần đã có.

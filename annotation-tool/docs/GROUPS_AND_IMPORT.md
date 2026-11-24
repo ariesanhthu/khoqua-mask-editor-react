@@ -33,7 +33,7 @@ erDiagram
 | `group_assignments(group_id, user_id, assigned_by, created_at)`, PK `(group_id, user_id)` | Người được giao nhóm |
 | `dataset_files.group_id` (TEXT NULL, FK `file_groups`) | Nhóm của ảnh. Dữ liệu có sẵn giữ `NULL` |
 
-Bảng `assignments` (giao theo từng ảnh) có từ trước không có luồng ghi nào; quyền xem **không** dựa vào bảng này. Trường `FileListItem.assignment` giữ nguyên nghĩa cũ. Type mới: `FileGroupSummary`, `FileGroupList`, `UserSummary`, `DatasetImportResult`; `FileListItem.group?` (tùy chọn); `ErrorCode` thêm `INVALID_DATASET`.
+Bảng `assignments` (giao theo từng ảnh) có từ trước, tới 2026-11-24 không có luồng ghi nào. **Từ 2026-11-24 (người dùng yêu cầu: admin giao việc ở mức từng ảnh)**, ADMIN ghi bảng này qua `PUT /api/projects/:id/files/assignee`. Quyền xem cộng thêm ảnh được giao riêng (mỗi ảnh tối đa một người, chỉ ảnh đã thuộc nhóm). Trường `FileListItem.assignment` giữ nguyên nghĩa (người phụ trách) và nay có dữ liệu. Type mới: `FileGroupSummary`, `FileGroupList`, `UserSummary`, `DatasetImportResult`; `FileListItem.group?` (tùy chọn); `ErrorCode` thêm `INVALID_DATASET`.
 
 ## 3. Quyền xem theo nhóm
 
@@ -41,11 +41,12 @@ Vai trò đọc từ bảng `users` (không tin riêng JWT, vì JWT sống 24 gi
 
 | Endpoint | ADMIN | Người khác |
 | --- | --- | --- |
-| `GET /api/projects` | Mọi dự án | Dự án có ít nhất một nhóm được giao |
-| `GET /api/projects/:id/groups` | Mọi nhóm + người được giao + số ảnh chưa phân nhóm | Chỉ nhóm được giao; `assignees: []`, `ungrouped: 0` |
-| `GET /api/projects/:id/files` | Mọi ảnh; `groupId=ungrouped` xem ảnh chưa phân nhóm | Chỉ ảnh thuộc nhóm được giao (áp cho cả Home, sidebar editor và Done & Next) |
-| `GET /api/files/:id/editor` | Mọi ảnh | 403 `FORBIDDEN` nếu ảnh ngoài nhóm được giao |
-| `POST /api/files/:id/lock` | Mọi ảnh | 403 `FORBIDDEN` nếu ảnh ngoài nhóm được giao |
+| `GET /api/projects` | Mọi dự án | Dự án có ít nhất một nhóm được giao **hoặc một ảnh được giao riêng** (2026-11-24) |
+| `GET /api/projects/:id/groups` | Mọi nhóm + người được giao + số ảnh chưa phân nhóm | Nhóm được giao hoặc có ảnh được giao riêng; số liệu chỉ đếm ảnh mình được xem; `assignees: []`, `ungrouped: 0` |
+| `GET /api/projects/:id/files` | Mọi ảnh; `groupId=ungrouped` xem ảnh chưa phân nhóm | Ảnh thuộc nhóm được giao + ảnh được giao riêng (áp cho cả Home, sidebar editor và Done & Next) |
+| `GET /api/files/:id/editor` | Mọi ảnh | 403 `FORBIDDEN` nếu ảnh ngoài phạm vi được giao |
+| `POST /api/files/:id/lock` | Mọi ảnh | 403 `FORBIDDEN` nếu ảnh ngoài phạm vi được giao |
+| `PUT /api/projects/:id/files/assignee` | Giao riêng ảnh đã có nhóm hoặc gỡ phân công riêng | 403 |
 
 Không đổi (có chủ đích):
 
@@ -63,8 +64,9 @@ Giữ token màu, bo góc, nút, thẻ ảnh theo UI Style Guide; chỉ sắp x�
 - **ADMIN** có thêm ba tab: *Nhóm & ảnh* (thẻ nhóm có danh sách người được giao, nút **Phân công**; thẻ **Chưa phân nhóm** với nút **Tự động chia nhóm** theo tên ảnh), *Nhập dữ liệu*, *Quản trị* (tạo dự án từ nguồn manifest và tạo người dùng như trước).
 - Nhóm đang xem được nhớ theo dự án (`localStorage` khóa `last-group-id:<projectId>`), nên bấm về Home từ editor sẽ quay lại đúng nhóm.
 - Panel **Dữ liệu dự án** (Kết nối Drive, Đồng bộ nguồn, Cập nhật Drive, Tải ZIP) giữ nguyên nút và câu chữ, đặt dưới danh sách nhóm. *Đồng bộ nguồn* ẩn với dự án tạo bằng tải thư mục (không có nguồn manifest). Drive vẫn chỉ ghi khi bấm *Cập nhật Drive* ở Home.
-- Thẻ ảnh: bỏ dòng "Phụ trách/Chưa phân công" (luôn trống vì bảng `assignments` không được ghi); nút đổi theo trạng thái: Bắt đầu / Tiếp tục (bản nháp) / Chỉnh sửa lại / Chỉ xem.
-- Bộ lọc cũ "Có thể làm" và "Của tôi" (dựa trên bảng `assignments` không được ghi) được thay bằng "Cần làm" (chưa hoàn tất) và nút Làm ảnh tiếp theo (chỉ chọn ảnh không ai đang mở). Tham số API `lockState=AVAILABLE`, `assignedTo=me` vẫn giữ nguyên cho nơi khác dùng.
+- Trong một nhóm, ADMIN chọn ảnh qua ô ở góc trên bên phải thẻ, chọn người phụ trách rồi bấm **Giao ảnh**. Giao lại thay người phụ trách trước đó.
+- **Bỏ giao** cạnh tên người phụ trách gỡ giao riêng cho một ảnh, kể cả từ kết quả tìm kiếm hoặc với phân công cũ của ảnh chưa phân nhóm. **Bỏ giao riêng** trên thanh phân công áp dụng cho các ảnh đang chọn có người phụ trách. **Bỏ chọn** chỉ xóa lựa chọn trên màn hình.
+- Quyền từ phân công nhóm vẫn áp dụng sau khi bỏ giao riêng. **Làm ảnh tiếp theo** lọc ảnh khả dụng trước khi phân trang và ưu tiên ảnh được giao cho chính người dùng.
 
 ## 5. Nhập thư mục
 

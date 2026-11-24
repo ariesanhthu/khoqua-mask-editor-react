@@ -3,7 +3,7 @@ import 'server-only';
 import JSZip from 'jszip';
 import sharp from 'sharp';
 import type { MaskOperation } from '@/types';
-import { ADMIN_ACCESS_SQL, FILE_ACCESS_SQL } from './access-service';
+import { FILE_ACCESS_SQL, PROJECT_ACCESS_SQL } from './access-service';
 import { cocoCategories, cocoInstance } from './coco-export';
 import { getDb } from './db';
 import { fetchDatasetAsset } from './drive-service';
@@ -23,8 +23,7 @@ interface CompletedRow extends Record<string, unknown> {
 export async function createCompletedProjectExportArchive(projectId: string, userId: string) {
   const db = await getDb();
   const project = await db.prepare<{ name: string }>(`SELECT p.name FROM projects p WHERE p.id = ?
-    AND (${ADMIN_ACCESS_SQL} OR EXISTS (SELECT 1 FROM file_groups g
-      JOIN group_assignments ga ON ga.group_id = g.id WHERE g.project_id = p.id AND ga.user_id = ?))`)
+    AND ${PROJECT_ACCESS_SQL}`)
     .get(projectId, userId, userId);
   if (!project) return null;
 

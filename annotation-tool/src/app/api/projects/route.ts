@@ -1,17 +1,15 @@
 import { NextResponse } from 'next/server';
 import { generateId, getDb, nowISO } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { ADMIN_ACCESS_SQL, requireAdminAccount } from '@/lib/access-service';
+import { PROJECT_ACCESS_SQL, requireAdminAccount } from '@/lib/access-service';
 import { normalizeDriveFolderId } from '@/lib/drive-service';
 
 export async function GET(request: Request) {
   const user = await requireAuth(request);
   const db = await getDb();
-  // Người không phải ADMIN chỉ thấy dự án có ít nhất một nhóm được giao cho mình.
+  // Người không phải ADMIN chỉ thấy dự án có ít nhất một nhóm hoặc một ảnh được giao cho mình.
   const projects = await db.prepare(`SELECT p.* FROM projects p
-    WHERE ${ADMIN_ACCESS_SQL} OR EXISTS (SELECT 1 FROM file_groups g
-      JOIN group_assignments ga ON ga.group_id = g.id
-      WHERE g.project_id = p.id AND ga.user_id = ?)
+    WHERE ${PROJECT_ACCESS_SQL}
     ORDER BY p.created_at DESC`).all(user.userId, user.userId);
   return NextResponse.json(
     projects.map((p: Record<string, unknown>) => ({

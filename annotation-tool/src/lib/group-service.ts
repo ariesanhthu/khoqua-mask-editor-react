@@ -1,7 +1,7 @@
 import 'server-only';
 
 import type { FileGroupList, FileGroupSummary } from '@/types';
-import { ADMIN_ACCESS_SQL, GROUP_ACCESS_SQL } from './access-service';
+import { ADMIN_ACCESS_SQL, FILE_ACCESS_SQL, GROUP_ACCESS_SQL } from './access-service';
 import { generateId, getDb, nowISO, type AppDatabase } from './db';
 import { inferGroupName, isValidGroupName, normalizeGroupName } from './file-groups';
 
@@ -21,8 +21,10 @@ export async function ensureGroup(db: AppDatabase, projectId: string, name: stri
 }
 
 /**
- * Nhóm của dự án kèm tiến độ. Người không phải ADMIN chỉ nhận nhóm được giao, không có danh sách
- * người được giao và không thấy ảnh chưa phân nhóm. Null khi dự án không tồn tại.
+ * Nhóm của dự án kèm tiến độ. Người không phải ADMIN chỉ nhận nhóm được giao hoặc có ảnh được giao riêng,
+ * không có danh sách người được giao và không thấy ảnh chưa phân nhóm. Số liệu chỉ đếm ảnh người xem có quyền
+ * (2026-11-24): ADMIN và người được giao cả nhóm thấy như cũ, người chỉ được giao vài ảnh thấy đúng số ảnh đó.
+ * Null khi dự án không tồn tại.
  */
 export async function listGroups(projectId: string, userId: string): Promise<FileGroupList | null> {
   const db = await getDb();
@@ -36,11 +38,11 @@ export async function listGroups(projectId: string, userId: string): Promise<Fil
         COUNT(CASE WHEN df.annotation_state = 'DONE' THEN 1 END) AS done,
         COUNT(CASE WHEN fl.expires_at > ? THEN 1 END) AS locked
       FROM file_groups g
-      LEFT JOIN dataset_files df ON df.group_id = g.id
+      LEFT JOIN dataset_files df ON df.group_id = g.id AND ${FILE_ACCESS_SQL}
       LEFT JOIN file_locks fl ON fl.dataset_file_id = df.id
       WHERE g.project_id = ? AND ${GROUP_ACCESS_SQL}
       GROUP BY g.id, g.name
-      ORDER BY g.name`).all(now, projectId, userId, userId),
+      ORDER BY g.name`).all(now, userId, userId, projectId, userId, userId),
     db.prepare<{ total: number | string }>(`SELECT COUNT(*) AS total FROM dataset_files df
       JOIN datasets d ON d.id = df.dataset_id
       WHERE d.project_id = ? AND df.group_id IS NULL AND ${ADMIN_ACCESS_SQL}`).get(projectId, userId),

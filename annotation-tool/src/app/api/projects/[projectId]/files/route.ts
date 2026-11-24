@@ -62,6 +62,13 @@ export async function GET(
     queryParams.push(user.userId);
   }
 
+  // Chọn ứng viên trước LIMIT để ảnh của người khác không lấp hết trang đầu.
+  if (assignedTo === 'next') {
+    where += ` AND df.asset_state = 'READY' AND NOT EXISTS (SELECT 1 FROM assignments a
+      WHERE a.dataset_file_id = df.id AND a.user_id <> ?)`;
+    queryParams.push(user.userId);
+  }
+
   if (lockState === 'AVAILABLE') {
     where += ' AND NOT EXISTS (SELECT 1 FROM file_locks fl WHERE fl.dataset_file_id = df.id AND fl.expires_at > ?)';
     queryParams.push(now);
@@ -95,7 +102,7 @@ export async function GET(
     LEFT JOIN users lock_user ON lock_user.id = fl.user_id
     LEFT JOIN file_groups file_group ON file_group.id = df.group_id
     ${where}
-    ORDER BY df.external_key ASC
+    ORDER BY ${assignedTo === 'next' ? 'assignment_user_id ASC NULLS LAST,' : ''} df.external_key ASC, df.id ASC
     LIMIT ? OFFSET ?
   `).all(...queryParams, pageSize, offset);
 

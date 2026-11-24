@@ -15,6 +15,7 @@ import {
   getProjects,
   logout,
   projectExportDownloadUrl,
+  setFileAssignee,
   syncProject,
   type GoogleDriveConnectionStatus,
 } from '@/lib/api-client';
@@ -24,6 +25,7 @@ import dynamic from 'next/dynamic';
 
 const FileVersions = dynamic(() => import('./file-versions'));
 const GroupAssignDialog = dynamic(() => import('./group-assign-dialog'));
+const FileAssignBar = dynamic(() => import('./file-assign-bar'));
 const DatasetImport = dynamic(() => import('./dataset-import'));
 
 type View = 'groups' | 'import' | 'admin';
@@ -93,6 +95,12 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
   const [findingNext, setFindingNext] = useState(false);
   const [versionFile, setVersionFile] = useState<FileListItem | null>(null);
   const [assignGroup, setAssignGroup] = useState<FileGroupSummary | null>(null);
+  const fileScope = JSON.stringify([projectId, groupId, page, filter, deferredSearch.trim()]);
+  const [loadedFileScope, setLoadedFileScope] = useState('');
+  const [selection, setSelection] = useState({ scope: '', ids: new Set<string>() });
+  const [savingAssignment, setSavingAssignment] = useState<'assign' | 'unassign' | null>(null);
+  const [assignmentNotice, setAssignmentNotice] = useState({ scope: '', text: '', error: false });
+  const [assignmentRevision, setAssignmentRevision] = useState(0);
   const [projectAction, setProjectAction] = useState('');
   const [projectMessage, setProjectMessage] = useState('');
   const [driveUrl, setDriveUrl] = useState('');
@@ -100,6 +108,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
     configured: false,
     connected: false,
   });
+  const lastFileScope = useRef('');
   const fileRequestRef = useRef(0);
   const groupRequestRef = useRef(0);
 
@@ -187,19 +196,28 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
       if (requestId !== fileRequestRef.current) return;
       setFiles(result.items);
       setTotalFiles(result.total);
+      setLoadedFileScope(fileScope);
       setMessage('');
     } catch {
       if (requestId !== fileRequestRef.current) return;
+      setLoadedFileScope('');
+      setFiles([]);
+      setTotalFiles(0);
       setMessage('Không tải được danh sách ảnh. Hãy bấm Làm mới để thử lại.');
     } finally {
       if (requestId === fileRequestRef.current) setFilesLoading(false);
     }
-  }, [deferredSearch, filter, groupId, page, projectId]);
+  }, [deferredSearch, fileScope, filter, groupId, page, projectId]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void loadFiles(), 0);
+    const timer = window.setTimeout(() => {
+      const sameList = lastFileScope.current === fileScope;
+      if (!sameList) setSelection({ scope: fileScope, ids: new Set() });
+      lastFileScope.current = fileScope;
+      void loadFiles(sameList);
+    }, 0);
     return () => window.clearTimeout(timer);
-  }, [loadFiles]);
+  }, [loadFiles, fileScope, assignmentRevision]);
 
   const pageCount = Math.max(1, Math.ceil(totalFiles / PAGE_SIZE));
 
@@ -253,11 +271,11 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
     setMessage('');
     try {
       const result = await getFiles(projectId, {
-        groupId, annotationState: 'UNSTARTED,DRAFT', lockState: 'AVAILABLE', page: '1', pageSize: String(PAGE_SIZE),
+        groupId, annotationState: 'UNSTARTED,DRAFT', lockState: 'AVAILABLE', assignedTo: 'next', pageSize: '1',
       });
-      const next = result.items.find((file) => file.assetState === 'READY');
+      const next = result.items[0];
       if (next) openFile(next);
-      else setMessage('Nhóm không còn ảnh cần làm đang trống: các ảnh còn lại đã hoàn tất hoặc đang được người khác mở.');
+      else setMessage('Nhóm không còn ảnh cần làm đang trống: các ảnh còn lại đã hoàn tất, đang được người khác mở hoặc đã giao riêng cho người khác.');
     } catch {
       setMessage('Không tìm được ảnh tiếp theo. Hãy thử lại.');
     } finally {
@@ -303,13 +321,55 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
   const totals = groups.reduce((sum, group) => ({ total: sum.total + group.total, done: sum.done + group.done }), { total: 0, done: 0 });
   const searching = Boolean(search.trim());
 
+  // Giao riêng từng ảnh: ADMIN, trong danh sách ảnh của một nhóm (ảnh chưa phân nhóm không giao riêng được).
+  const fileAssigning = isAdmin && Boolean(activeGroup);
+  const listReady = !filesLoading && loadedFileScope === fileScope && search.trim() === deferredSearch.trim();
+  const visibleSelection = files.filter((file) => selection.scope === fileScope && selection.ids.has(file.id));
+  const assignmentDisabled = !listReady || savingAssignment !== null;
+  const selectFiles = (ids: string[]) => setSelection({ scope: fileScope, ids: new Set(ids) });
+  const toggleFileSelection = (fileId: string) => {
+    const next = new Set(visibleSelection.map((file) => file.id));
+    if (next.has(fileId)) next.delete(fileId); else next.add(fileId);
+    selectFiles([...next]);
+  };
+
+  const saveAssignment = async (fileIds: string[], target: string | null) => {
+    if (assignmentDisabled || !fileIds.length) return;
+    setSavingAssignment(target ? 'assign' : 'unassign');
+    setAssignmentNotice({ scope: fileScope, text: '', error: false });
+    try {
+      const { updated, assignee } = await setFileAssignee(projectId, fileIds, target);
+      const changed = new Set(fileIds);
+      setFiles((current) => current.map((file) => changed.has(file.id) ? { ...file, assignment: assignee ?? undefined } : file));
+      setSelection((current) => current.scope === fileScope
+        ? { scope: fileScope, ids: new Set([...current.ids].filter((id) => !changed.has(id))) } : current);
+      const text = assignee ? `Đã giao ${updated} ảnh cho ${assignee.displayName}.` : `Đã bỏ giao riêng ${updated} ảnh.`;
+      setAssignmentNotice({ scope: fileScope, text, error: false });
+      setAssignmentRevision((current) => current + 1);
+    } catch (error) {
+      setAssignmentNotice({ scope: fileScope, text: (error as { message?: string }).message || 'Không lưu được phân công ảnh.', error: true });
+    } finally {
+      setSavingAssignment(null);
+    }
+  };
+
   const fileList = (
     <>
       {message ? <p role="status" aria-live="polite" className="notice warning">{message}</p> : null}
+      {fileAssigning ? (
+        <FileAssignBar files={files} selected={visibleSelection} disabled={assignmentDisabled} saving={savingAssignment}
+          onSelect={selectFiles} onSave={saveAssignment} />
+      ) : null}
+      {isAdmin && assignmentNotice.scope === fileScope && assignmentNotice.text ? (
+        <p role={assignmentNotice.error ? 'alert' : 'status'} className={`notice ${assignmentNotice.error ? 'warning' : ''}`}>{assignmentNotice.text}</p>
+      ) : null}
       <section className="file-grid" aria-busy={filesLoading} aria-label="Danh sách ảnh">
         {filesLoading ? Array.from({ length: 8 }, (_, index) => <div className="file-card skeleton" key={index} />) : null}
         {!filesLoading && files.map((file) => (
           <FileCard key={file.id} file={file} userId={user.id} isAdmin={isAdmin} showGroup={!groupId} opening={openingId === file.id}
+            selectable={fileAssigning} selected={selection.scope === fileScope && selection.ids.has(file.id)}
+            assignmentDisabled={assignmentDisabled} onToggleSelect={() => toggleFileSelection(file.id)}
+            onUnassign={() => void saveAssignment([file.id], null)}
             onOpen={() => openFile(file)} onVersions={() => setVersionFile(file)} />
         ))}
       </section>
@@ -640,8 +700,9 @@ function GroupCard({ group, isAdmin, onOpen, onAssign }: { group: FileGroupSumma
   );
 }
 
-function FileCard({ file, userId, isAdmin, showGroup, opening, onOpen, onVersions }: {
-  file: FileListItem; userId: string; isAdmin: boolean; showGroup: boolean; opening: boolean; onOpen(): void; onVersions(): void;
+function FileCard({ file, userId, isAdmin, showGroup, opening, selectable = false, selected = false, assignmentDisabled, onToggleSelect, onUnassign, onOpen, onVersions }: {
+  file: FileListItem; userId: string; isAdmin: boolean; showGroup: boolean; opening: boolean;
+  selectable?: boolean; selected?: boolean; assignmentDisabled?: boolean; onToggleSelect?(): void; onUnassign?(): void; onOpen(): void; onVersions(): void;
 }) {
   // Khóa của chính tài khoản này (tab/thiết bị khác) không chặn sửa: mở ở đây sẽ nhận lại quyền sửa.
   const lockedBySelf = file.lock.state === 'LOCKED' && file.lock.userId === userId;
@@ -656,12 +717,29 @@ function FileCard({ file, userId, isAdmin, showGroup, opening, onOpen, onVersion
       : file.annotationState === 'DONE' ? 'Đã hoàn tất' : file.annotationState === 'DRAFT' ? 'Có bản nháp đã lưu' : 'Sẵn sàng chỉnh sửa';
   const action = opening ? 'Đang mở…' : locked ? 'Chỉ xem' : lockedBySelf ? 'Sửa tại đây' : file.annotationState === 'DONE' ? 'Chỉnh sửa lại'
     : file.annotationState === 'DRAFT' ? 'Tiếp tục' : 'Bắt đầu';
+  // Người phụ trách riêng của ảnh (phân công theo ảnh, 2026-11-24).
+  const assignee = file.assignment
+    ? isAdmin ? `Phụ trách: ${file.assignment.displayName}` : file.assignment.userId === userId ? 'Giao riêng cho bạn' : `Giao riêng cho ${file.assignment.displayName}`
+    : selectable ? 'Chưa giao riêng' : '';
   return (
-    <article className={`file-card ${locked ? 'locked' : ''}`}>
+    <article className={`file-card ${locked ? 'locked' : ''} ${selected ? 'selected' : ''}`}>
       <FileThumbnail key={file.thumbnailUrl} file={file} />
+      {selectable ? (
+        <label className="file-select" title={selected ? 'Bỏ chọn ảnh này' : 'Chọn ảnh này để giao riêng'}>
+          <input type="checkbox" checked={selected} disabled={assignmentDisabled} onChange={onToggleSelect} aria-label={`Chọn ${file.externalKey} để giao riêng`} />
+        </label>
+      ) : null}
       <div className="file-card-body">
         <div className="file-title-row"><h3>{file.externalKey}</h3><StateBadge state={file.annotationState} /></div>
         <p>{status}</p>
+        {assignee ? (
+          <div className="file-assignee">
+            <span>{assignee}</span>
+            {isAdmin && file.assignment ? (
+              <button type="button" disabled={assignmentDisabled} aria-label={`Bỏ giao riêng ${file.externalKey}`} onClick={onUnassign}>Bỏ giao</button>
+            ) : null}
+          </div>
+        ) : null}
         {showGroup ? <small>{file.group ? `Nhóm ${file.group.name}` : 'Chưa phân nhóm'}</small> : null}
         <div className="file-card-actions">
           <button className="button primary" disabled={assetError || opening} onClick={onOpen}>{action}</button>
