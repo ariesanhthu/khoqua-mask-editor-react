@@ -29,7 +29,7 @@ const FileAssignBar = dynamic(() => import('./file-assign-bar'));
 const DatasetImport = dynamic(() => import('./dataset-import'));
 
 type View = 'groups' | 'import' | 'admin';
-type Filter = 'ALL' | 'TODO' | 'DRAFT' | 'DONE' | 'LOCKED';
+type Filter = 'ALL' | 'TODO' | 'DRAFT' | 'REVIEW' | 'DONE' | 'LOCKED';
 
 const views: Array<{ value: View; label: string }> = [
   { value: 'groups', label: 'Nhóm & ảnh' },
@@ -41,7 +41,9 @@ const filters: Array<{ value: Filter; label: string }> = [
   { value: 'ALL', label: 'Tất cả' },
   { value: 'TODO', label: 'Cần làm' },
   { value: 'DRAFT', label: 'Bản nháp' },
-  { value: 'DONE', label: 'Hoàn tất' },
+  // Duyệt theo ảnh (người dùng xác nhận 2026-11-17): Hoàn tất gán nhãn → Cần review → duyệt Đạt → Hoàn thành.
+  { value: 'REVIEW', label: 'Cần review' },
+  { value: 'DONE', label: 'Hoàn thành' },
   { value: 'LOCKED', label: 'Đang được mở' },
 ];
 
@@ -52,8 +54,9 @@ const groupStorageKey = (projectId: string) => `last-group-id:${projectId}`;
 
 function filterCount(group: FileGroupSummary | undefined, filter: Filter): number | undefined {
   if (!group) return undefined;
-  if (filter === 'TODO') return group.total - group.done;
+  if (filter === 'TODO') return group.unstarted + group.draft;
   if (filter === 'DRAFT') return group.draft;
+  if (filter === 'REVIEW') return group.review;
   if (filter === 'DONE') return group.done;
   if (filter === 'LOCKED') return group.locked;
   return group.total;
@@ -188,7 +191,7 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
     if (groupId) {
       params.groupId = groupId;
       if (filter === 'TODO') params.annotationState = 'UNSTARTED,DRAFT';
-      if (filter === 'DRAFT' || filter === 'DONE') params.annotationState = filter;
+      if (filter === 'DRAFT' || filter === 'REVIEW' || filter === 'DONE') params.annotationState = filter;
       if (filter === 'LOCKED') params.lockState = 'LOCKED';
     }
     try {
@@ -320,7 +323,6 @@ export default function Dashboard({ user }: { user: CurrentUser }) {
   const groupComplete = Boolean(activeGroup && activeGroup.total > 0 && activeGroup.done === activeGroup.total);
   const totals = groups.reduce((sum, group) => ({ total: sum.total + group.total, done: sum.done + group.done }), { total: 0, done: 0 });
   const searching = Boolean(search.trim());
-
   // Giao riêng từng ảnh: ADMIN, trong danh sách ảnh của một nhóm (ảnh chưa phân nhóm không giao riêng được).
   const fileAssigning = isAdmin && Boolean(activeGroup);
   const listReady = !filesLoading && loadedFileScope === fileScope && search.trim() === deferredSearch.trim();
@@ -688,7 +690,8 @@ function GroupCard({ group, isAdmin, onOpen, onAssign }: { group: FileGroupSumma
       <dl className="group-stats">
         <div><dt>Chưa làm</dt><dd>{group.unstarted}</dd></div>
         <div><dt>Bản nháp</dt><dd>{group.draft}</dd></div>
-        <div><dt>Hoàn tất</dt><dd>{group.done}</dd></div>
+        <div><dt>Cần review</dt><dd>{group.review}</dd></div>
+        <div><dt>Hoàn thành</dt><dd>{group.done}</dd></div>
       </dl>
       {group.locked ? <p className="group-live"><span aria-hidden="true" />{group.locked} ảnh đang được mở</p> : null}
       {isAdmin ? <AssigneeList assignees={group.assignees} /> : null}
@@ -714,8 +717,10 @@ function FileCard({ file, userId, isAdmin, showGroup, opening, selectable = fals
       ? 'Bạn đang mở ở tab hoặc thiết bị khác'
     : file.lock.state === 'LOCKED'
       ? `Đang được ${file.lock.displayName} chỉnh sửa`
-      : file.annotationState === 'DONE' ? 'Đã hoàn tất' : file.annotationState === 'DRAFT' ? 'Có bản nháp đã lưu' : 'Sẵn sàng chỉnh sửa';
-  const action = opening ? 'Đang mở…' : locked ? 'Chỉ xem' : lockedBySelf ? 'Sửa tại đây' : file.annotationState === 'DONE' ? 'Chỉnh sửa lại'
+      : file.annotationState === 'DONE' ? 'Đã duyệt, hoàn thành' : file.annotationState === 'REVIEW' ? 'Đã hoàn tất gán nhãn, chờ duyệt'
+        : file.annotationState === 'DRAFT' ? 'Có bản nháp đã lưu' : 'Sẵn sàng chỉnh sửa';
+  const reviewable = file.annotationState === 'REVIEW' && !assetError;
+  const action = opening ? 'Đang mở…' : locked ? 'Chỉ xem' : lockedBySelf ? 'Sửa tại đây' : file.annotationState === 'DONE' || file.annotationState === 'REVIEW' ? 'Chỉnh sửa lại'
     : file.annotationState === 'DRAFT' ? 'Tiếp tục' : 'Bắt đầu';
   // Người phụ trách riêng của ảnh (phân công theo ảnh, 2026-11-24).
   const assignee = file.assignment
@@ -742,7 +747,9 @@ function FileCard({ file, userId, isAdmin, showGroup, opening, selectable = fals
         ) : null}
         {showGroup ? <small>{file.group ? `Nhóm ${file.group.name}` : 'Chưa phân nhóm'}</small> : null}
         <div className="file-card-actions">
-          <button className="button primary" disabled={assetError || opening} onClick={onOpen}>{action}</button>
+          {/* Ảnh chờ duyệt: mọi vai trò mở trang duyệt chỉ xem (không xin khóa) để xem từng mask rồi kết luận. */}
+          {reviewable ? <a className="button primary" href={`/review/${file.id}`}>Duyệt</a> : null}
+          <button className={reviewable ? 'button ghost' : 'button primary'} disabled={assetError || opening} onClick={onOpen}>{action}</button>
           {isAdmin ? <button className="button ghost" onClick={onVersions}>Xem / xóa version</button> : null}
         </div>
       </div>
@@ -761,6 +768,6 @@ function FileThumbnail({ file }: { file: FileListItem }) {
 }
 
 function StateBadge({ state }: { state: FileListItem['annotationState'] }) {
-  const labels = { UNSTARTED: 'Chưa làm', DRAFT: 'Bản nháp', DONE: 'Hoàn tất' };
+  const labels = { UNSTARTED: 'Chưa làm', DRAFT: 'Bản nháp', REVIEW: 'Cần review', DONE: 'Hoàn thành' };
   return <span className={`state-badge ${state.toLowerCase()}`}>{labels[state]}</span>;
 }

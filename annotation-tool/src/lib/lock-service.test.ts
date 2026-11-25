@@ -110,7 +110,7 @@ describe('exclusive edit locks and revisions', () => {
     expect(await saveDraft('revisions', 'a', lock.lockToken, 0, segmentation, legacy)).toMatchObject({ revision: 1 });
     expect(await saveDraft('revisions', 'a', lock.lockToken, 0, segmentation, legacy)).toMatchObject({ conflict: true, serverRevision: 1 });
     expect(await getAnnotation('revisions')).toMatchObject({ segmentation: { wartPoints }, breakpoints: legacy });
-    expect(await submitDone('revisions', 'a', lock.lockToken, 1, segmentation, legacy)).toMatchObject({ revision: 2, annotationState: 'DONE' });
+    expect(await submitDone('revisions', 'a', lock.lockToken, 1, segmentation, legacy)).toMatchObject({ revision: 2, annotationState: 'REVIEW' });
     expect(await saveDraft('revisions', 'a', lock.lockToken, 2, segmentation, legacy)).toBe('LOCK_LOST');
     expect(await acquireLock('revisions', 'b')).toMatchObject({ denied: false, baseRevision: 2 });
   });

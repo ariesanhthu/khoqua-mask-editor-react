@@ -1,10 +1,15 @@
 // ─── Enums & Literals ───────────────────────────────────
 
 export type UserRole = 'ADMIN' | 'ANNOTATOR' | 'REVIEWER';
-export type AnnotationState = 'UNSTARTED' | 'DRAFT' | 'DONE';
+/**
+ * Trạng thái ảnh. `REVIEW` (người dùng xác nhận 2026-11-17): người gán nhãn bấm Hoàn tất thì ảnh sang "Cần review";
+ * chỉ khi được duyệt Đạt mới thành `DONE` (Hoàn thành). Duyệt theo ẢNH, không lưu quyết định từng mask.
+ */
+export type AnnotationState = 'UNSTARTED' | 'DRAFT' | 'REVIEW' | 'DONE';
 export type HumanAction = 'UNTOUCHED' | 'ACCEPTED' | 'MODIFIED';
 export type BreakpointState = 'NOT_ANNOTATED' | 'ANNOTATED' | 'CONFIRMED_NONE';
-export type AnnotationStatus = 'DRAFT' | 'DONE';
+export type AnnotationStatus = 'DRAFT' | 'REVIEW' | 'DONE';
+export type ReviewDecision = 'APPROVE' | 'REJECT';
 export type SyncState = 'SYNCED' | 'DIRTY' | 'SYNCING' | 'CONFLICT';
 export type SessionCloseReason = 'DONE' | 'SWITCH_FILE' | 'EXPLICIT_RELEASE' | 'LOCK_EXPIRED' | 'UNKNOWN';
 
@@ -12,6 +17,8 @@ export type ErrorCode =
   | 'FILE_LOCKED' | 'LOCK_LOST' | 'REVISION_CONFLICT'
   | 'INVALID_ANNOTATION' | 'ASSET_NOT_FOUND' | 'DRIVE_SYNC_ERROR'
   | 'FILE_NOT_FOUND' | 'UNAUTHORIZED' | 'FORBIDDEN' | 'INVALID_DATASET'
+  // Duyệt theo ảnh (POST /api/files/:id/review, 2026-11-17).
+  | 'INVALID_REVIEW' | 'NOT_IN_REVIEW'
   // Client-side: a non-JSON response (e.g. the platform's plain-text 413).
   | 'UNKNOWN';
 
@@ -97,6 +104,8 @@ export interface FileGroupSummary {
   total: number;
   unstarted: number;
   draft: number;
+  /** Ảnh đã Hoàn tất gán nhãn, đang chờ duyệt (2026-11-17). */
+  review: number;
   done: number;
   /** Ảnh đang có phiên giữ khóa chỉnh sửa. */
   locked: number;
@@ -182,7 +191,8 @@ export interface DoneRequest {
 export interface DoneResponse {
   revision: number;
   versionNumber: number;
-  annotationState: 'DONE';
+  /** Hoàn tất gán nhãn đưa ảnh sang Cần review, không phải Hoàn thành (2026-11-17). */
+  annotationState: 'REVIEW';
   lockState: 'AVAILABLE';
 }
 

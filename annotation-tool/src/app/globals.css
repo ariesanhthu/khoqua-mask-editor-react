@@ -86,7 +86,7 @@ input:focus-visible, select:focus-visible { border-color: var(--accent); box-sha
 .thumbnail span { font-size: 20px; font-weight: 900; writing-mode: vertical-rl; letter-spacing: .12em; }
 .file-card-body { display: flex; flex-direction: column; padding: 15px; }.file-card-body p { flex: 1; margin: 10px 0 4px; color: var(--text-secondary); font-size: 13px; }.file-card-body small { margin-bottom: 12px; color: var(--text-muted); }
 .file-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }.file-title-row h2 { margin: 0; font-size: 16px; }
-.state-badge { padding: 4px 7px; border-radius: 999px; font-size: 9px; font-weight: 800; text-transform: uppercase; }.state-badge.unstarted { color: #175cd3; background: #eff8ff; }.state-badge.draft { color: #b54708; background: #fffaeb; }.state-badge.done { color: #067647; background: #ecfdf3; }
+.state-badge { padding: 4px 7px; border-radius: 999px; font-size: 9px; font-weight: 800; text-transform: uppercase; }.state-badge.unstarted { color: #175cd3; background: #eff8ff; }.state-badge.review { color: #6941c6; background: #f4ebff; }.state-badge.draft { color: #b54708; background: #fffaeb; }.state-badge.done { color: #067647; background: #ecfdf3; }
 .skeleton { min-height: 176px; background: linear-gradient(90deg, #f8f9fc, #eef0f5, #f8f9fc); background-size: 200% 100%; animation: shimmer 1.2s infinite; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 .empty-state { margin-top: 20px; padding: 32px; text-align: center; }.empty-state h2 { margin-top: 0; }
@@ -1098,4 +1098,45 @@ kbd { padding: 2px 5px; color: var(--text-secondary); background: #111827; borde
   .file-assign-user { width: 100%; }
   .file-assign-controls { flex: 1 1 100%; }
   .file-assign-controls .button { flex: 1; }
+}
+
+/* Trang duyệt theo ảnh (2026-11-17 / 2026-11-24): canvas chỉ xem + panel lớp phủ và kết luận. */
+.review-shell .review-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; width: 100%; height: 100%; min-height: 0; }
+.review-shell.review-message { display: grid; place-items: center; padding: 24px; }
+.review-shell.review-message .decision-card { display: grid; gap: 10px; max-width: 420px; }
+.review-shell .canvas-statusbar .review-back { padding: 6px 10px; color: var(--editor-body); background: #fff; border: 1px solid var(--editor-border); border-radius: 8px; font-size: 10px; font-weight: 700; cursor: pointer; }
+.review-shell .canvas-statusbar .review-back:hover { color: var(--editor-primary-dark); border-color: #d8ceff; }
+.review-shell .control-panel-title small { color: var(--editor-muted); font-size: 10px; font-weight: 600; }
+.review-facts { display: grid; gap: 12px; }
+.review-facts dl { display: grid; gap: 6px; margin: 0; }
+.review-facts dl div { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; }
+.review-facts dt { color: var(--editor-muted); }
+.review-facts dd { margin: 0; color: var(--editor-text); font-weight: 700; text-align: right; }
+.review-overlay, .review-decision { display: grid; gap: 12px; }
+/* `.section-title-row button` ép nút icon 25×25 px: nút bật/tắt lớp phủ cần rộng theo chữ. */
+.review-overlay .section-title-row .layer-toggle { position: static; width: auto; height: auto; flex: 0 0 auto; padding: 5px 10px; font-size: 10px; white-space: nowrap; }
+.review-color-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 4px; background: #f8f9fc; border: 1px solid var(--editor-border); border-radius: 12px; }
+.review-color-modes button { min-height: 36px; padding: 6px 4px; color: var(--editor-muted); background: transparent; border: 1px solid transparent; border-radius: 9px; font-size: 11px; font-weight: 700; cursor: pointer; }
+.review-color-modes button:hover { color: var(--editor-primary-dark); }
+.review-color-modes button.active { color: var(--editor-primary-dark); background: #fff; border-color: #d8ceff; box-shadow: 0 2px 7px rgba(16,24,40,.06); }
+.review-legend { display: grid; gap: 8px; }
+.review-legend-row { display: grid; gap: 5px; margin: 0; font-size: 11px; }
+.review-legend-row strong { color: var(--editor-text); }
+.review-swatches { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.review-swatches small { color: var(--editor-muted); font-size: 10px; }
+.review-swatch { display: inline-block; width: 16px; height: 16px; vertical-align: middle; border: 1px solid rgba(16,24,40,.15); border-radius: 4px; }
+.review-note { margin: 0; color: var(--editor-muted); font-size: 11px; line-height: 1.55; }
+.review-decision-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.review-decision .button { min-height: 38px; }
+.review-decision .button.danger { color: #b42318; border-color: #fecdca; }
+.review-decision .button.danger:hover:not(:disabled) { background: #fef3f2; }
+.review-outcome { margin: 0; padding: 10px 12px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+.review-outcome.approved { color: #067647; background: #ecfdf3; }
+.review-outcome.rejected { color: #b54708; background: #fffaeb; }
+/* Tab Review trong editor (người dùng xác nhận 2026-11-25): dùng lại các khối .review-* của trang /review. */
+.editor-shell .workflow-tabs button:disabled { cursor: not-allowed; opacity: .55; }
+.editor-shell .canvas-statusbar .review-mode-chip { color: var(--editor-primary-dark); font-weight: 700; }
+@media (max-width: 900px) {
+  .review-shell .review-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(320px, 1fr) auto; }
+  .review-shell .control-panel { max-height: 48vh; border-top: 1px solid var(--editor-border); border-left: 0; }
 }

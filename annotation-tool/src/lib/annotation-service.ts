@@ -1,3 +1,4 @@
+import { FILE_ACCESS_SQL } from './access-service';
 import { type AppDatabase, generateId, getDb, hashToken, nowISO } from './db';
 
 interface SaveResult { revision: number; savedAt: string; versionNumber: number }
@@ -120,21 +121,61 @@ export async function submitDone(
 
     await tx.prepare(`INSERT INTO annotations
       (dataset_file_id, revision, status, segmentation_json, breakpoints_json, last_edited_by, updated_at)
-      VALUES (?, ?, 'DONE', ?, ?, ?, ?)
+      VALUES (?, ?, 'REVIEW', ?, ?, ?, ?)
       ON CONFLICT (dataset_file_id) DO UPDATE SET revision = EXCLUDED.revision,
-        status = 'DONE', segmentation_json = EXCLUDED.segmentation_json,
+        status = 'REVIEW', segmentation_json = EXCLUDED.segmentation_json,
         breakpoints_json = EXCLUDED.breakpoints_json, last_edited_by = EXCLUDED.last_edited_by,
         updated_at = EXCLUDED.updated_at`).run(fileId, newRevision, segJson, bpJson, userId, now);
     // Hoàn tất ngay sau "Bản lưu" của chính người đó: đổi version đó thành "Hoàn tất" thay vì tạo bản trùng.
     const newVersionNumber = await recordVersion(tx, file, current?.segmentation_json, userId, baseRevision, segJson, bpJson, now, DONE_VERSION_LABEL);
     await tx.prepare(`UPDATE dataset_files SET latest_revision = ?, latest_version_number = ?,
-      annotation_state = 'DONE', updated_at = ? WHERE id = ?`)
+      annotation_state = 'REVIEW', updated_at = ? WHERE id = ?`)
       .run(newRevision, Math.max(newVersionNumber, Number(file.latest_version_number)), now, fileId);
     await tx.prepare(`UPDATE annotation_sessions SET closed_at = ?, close_reason = 'DONE'
       WHERE id = ? AND closed_at IS NULL`).run(now, lock!.session_id);
     await tx.prepare('DELETE FROM file_locks WHERE dataset_file_id = ?').run(fileId);
 
-    return { revision: newRevision, versionNumber: newVersionNumber, annotationState: 'DONE', lockState: 'AVAILABLE' };
+    // Hoàn tất gán nhãn KHÔNG còn là "hoàn thành": ảnh sang "Cần review" và chỉ thành DONE khi được duyệt Đạt
+    // (người dùng xác nhận 2026-11-17). Version, nhả khóa, đóng session giữ nguyên như trước.
+    return { revision: newRevision, versionNumber: newVersionNumber, annotationState: 'REVIEW', lockState: 'AVAILABLE' };
+  });
+}
+
+export type ReviewResult =
+  | { annotationState: 'DONE' | 'DRAFT'; revision: number }
+  | { error: 'NOT_FOUND' | 'FORBIDDEN' | 'NOT_IN_REVIEW' | 'REVISION_CONFLICT' | 'FILE_LOCKED'; serverRevision?: number; annotationState?: string };
+
+/**
+ * DUYỆT THEO ẢNH (người dùng xác nhận 2026-11-17): mọi vai trò có quyền xem ảnh đều duyệt được. Đạt → `DONE`
+ * (Hoàn thành), Cần sửa → `DRAFT` (Đang sửa). Chỉ đổi nhãn trạng thái: không đổi revision, không tạo version, không
+ * đụng `segmentation_json` — không có bảng duyệt riêng, không lưu quyết định từng mask.
+ *
+ * Quyết định gắn với đúng phiên bản đang xem: `revision` phải bằng `latest_revision`, và ảnh không được đang bị
+ * người khác giữ khóa sửa. Ảnh đã bị sửa sau khi mở trang duyệt thì phải tải lại rồi duyệt lại.
+ *
+ * ĐẠT THẲNG TỪ BẢN NHÁP (tab Review trong editor, người dùng xác nhận 2026-11-25): `APPROVE` trên ảnh `DRAFT` chỉ
+ * được khi gửi kèm `lockToken` của khóa hợp lệ mà chính người đó đang giữ (editor vừa lưu xong, revision khớp).
+ * Không có token (trang `/review`) thì giữ nguyên luật cũ: chỉ ảnh `REVIEW` mới kết luận được. Cần sửa vẫn chỉ từ `REVIEW`.
+ */
+export async function reviewAnnotation(fileId: string, userId: string, decision: 'APPROVE' | 'REJECT', revision: number, lockToken?: string): Promise<ReviewResult> {
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const file = await tx.prepare(`SELECT df.id, df.latest_revision, df.annotation_state, ${FILE_ACCESS_SQL} AS can_access
+      FROM dataset_files df WHERE df.id = ? FOR UPDATE`).get(userId, userId, fileId);
+    if (!file) return { error: 'NOT_FOUND' as const };
+    if (!file.can_access) return { error: 'FORBIDDEN' as const };
+    const lock = await tx.prepare('SELECT user_id, lock_token_hash, expires_at FROM file_locks WHERE dataset_file_id = ? FOR UPDATE').get(fileId);
+    const approveDraft = decision === 'APPROVE' && file.annotation_state === 'DRAFT'
+      && Boolean(lockToken) && validOwnedLock(lock, userId, lockToken!);
+    if (file.annotation_state !== 'REVIEW' && !approveDraft) return { error: 'NOT_IN_REVIEW' as const, annotationState: String(file.annotation_state) };
+    if (Number(file.latest_revision) !== revision) return { error: 'REVISION_CONFLICT' as const, serverRevision: Number(file.latest_revision) };
+    if (lock && lock.user_id !== userId && new Date(String(lock.expires_at)) > new Date()) return { error: 'FILE_LOCKED' as const };
+
+    const next = decision === 'APPROVE' ? 'DONE' : 'DRAFT';
+    const now = nowISO();
+    await tx.prepare('UPDATE annotations SET status = ? WHERE dataset_file_id = ?').run(next, fileId);
+    await tx.prepare('UPDATE dataset_files SET annotation_state = ?, updated_at = ? WHERE id = ?').run(next, now, fileId);
+    return { annotationState: next, revision };
   });
 }
 

@@ -19,6 +19,7 @@ Tài liệu chuyên đề (snapshot theo ngày, đọc khi làm đúng vùng đ�
 | [SURFACE_IMPORT_20261025.md](SURFACE_IMPORT_20261025.md) | Nhập 117 ảnh surface (COCO 1.0) lên production, polygon ít điểm (`compactPolygon`), backup, kiểm chứng, hoàn nguyên |
 | [IMAGE_VERSIONS.md](IMAGE_VERSIONS.md) | Version ảnh, xem/xóa/đặt làm bản chính (ADMIN) |
 | [GROUPS_AND_IMPORT.md](GROUPS_AND_IMPORT.md) | Nhóm ảnh, phân công theo nhóm, quyền xem, Home theo nhóm, nhập thư mục (mặc định / COCO 1.0) |
+| [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) | Duyệt theo ảnh (REVIEW → DONE/DRAFT), phân công theo từng ảnh, trang duyệt và lớp phủ Xanh – Đỏ / Nóng – Lạnh |
 | [ZIP_PIXEL_AUDIT.md](ZIP_PIXEL_AUDIT.md) | Kiểm tra notebook 28 và sửa ZIP pixel-exact |
 | [GROUND_TRUTH_EXPORT.md](GROUND_TRUTH_EXPORT.md) | Xuất/kiểm ground truth, COCO RLE, audit độc lập |
 | [CLOUDFLARE_R2_STORAGE.md](CLOUDFLARE_R2_STORAGE.md) | Lưu file trên Cloudflare R2 thay Vercel Blob: backend, quy trình chuyển, hoàn nguyên, chưa kiểm chứng |

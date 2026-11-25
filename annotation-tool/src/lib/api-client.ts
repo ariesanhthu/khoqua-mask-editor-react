@@ -7,7 +7,7 @@ import type {
   FileListItem, PaginatedResponse, LockAcquireResponse,
   HeartbeatResponse, EditorBootstrap, SaveDraftRequest,
   SaveDraftResponse, DoneRequest, DoneResponse, ApiError, CurrentUser, ProjectSummary,
-  DatasetImportResult, FileGroupList, FileGroupSummary, UserSummary,
+  DatasetImportResult, FileGroupList, FileGroupSummary, UserSummary, AnnotationState, ReviewDecision,
 } from '@/types';
 
 /**
@@ -310,6 +310,14 @@ export async function submitDone(fileId: string, data: DoneRequest) {
   });
   forgetLockToken(fileId);
   return result;
+}
+
+/** Duyệt theo ảnh: Đạt → Hoàn thành, Cần sửa → Đang sửa. `revision` là phiên bản đang xem. */
+export function reviewFile(fileId: string, decision: ReviewDecision, revision: number) {
+  return apiFetch<{ annotationState: AnnotationState; revision: number }>(`/api/files/${encodeURIComponent(fileId)}/review`, {
+    method: 'POST',
+    body: JSON.stringify({ decision, revision }),
+  });
 }
 
 // ─── Seed ───────────────────────────────────────────────

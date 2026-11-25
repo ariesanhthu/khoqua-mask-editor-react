@@ -65,7 +65,7 @@ describe('what a labeler can see', () => {
     as('an');
     const body = await (await getGroups(request('/api/projects/p1/groups'), projectParams('p1'))).json();
     expect(body).toEqual({ ungrouped: 0, groups: [
-      { id: 'g8582', name: '8582', total: 3, unstarted: 1, draft: 1, done: 1, locked: 0, assignees: [] },
+      { id: 'g8582', name: '8582', total: 3, unstarted: 1, draft: 1, review: 0, done: 1, locked: 0, assignees: [] },
     ] });
   });
 

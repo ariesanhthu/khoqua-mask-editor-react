@@ -20,7 +20,7 @@ import type {
 } from '@/types';
 import { photoLevelFor, photoPyramidSizes, renderPixelRatio, zoomViewAt } from '@/lib/canvas-view';
 import { forEachPolygonSpan, normalizeMaskRgba, polygonPixelRect, simplifyRing, smoothPolygon } from '@/lib/mask-pixels';
-import { labelColor } from '@/lib/label-colors';
+import { overlayColor, type OverlayColorMode } from '@/lib/review-colors';
 import { nextLabel, semanticForLabelKind, type PolygonLabelKind } from '@/lib/polygon-labels';
 import { clipPolygonDifference, clonePolygons, computeSmoothNodeDisplacements, createCirclePolygon, createRectanglePolygon, drawSmoothClosedPath, explainAutoAnchorPath, findEnclosedPocketAtPoint, getSmoothSegmentControlPoints, insertNodeAtEdge, mergePolygonsIntoSingle, nearestMagnetVertex, pointInMask, polygonRings, resolvePolygonCut, type AutoAnchorResult } from '@/lib/polygon-geometry';
 import { applyAnchor, findAnchorTarget, type AnchorTarget, type CompletionFailure } from '@/lib/mask-anchor';
@@ -98,6 +98,11 @@ interface Props {
   paintMode: PaintMode;
   maskOpacity: number;
   showMask: boolean;
+  /**
+   * Màu lớp phủ (chỉ hiển thị). Mặc định `'label'` = màu theo label như mọi khi; editor không truyền prop này.
+   * Trang duyệt dùng `'twoTone'` (Xanh – Đỏ) / `'warmCool'` (Nóng – Lạnh) để tách nhanh r* / w* (2026-11-24).
+   */
+  colorMode?: OverlayColorMode;
   /** Select (V): node đang kéo dính vào điểm gần nhất của mask khác (người dùng xác nhận 2026-11-05). */
   magnet?: boolean;
   /**
@@ -131,6 +136,8 @@ const isDraftTool = (tool: EditorTool) => tool === 'polygon' || tool === 'brush'
 /** Gợi ý neo: hiện các đỉnh của polygon có thể neo trong khung nhìn (người dùng yêu cầu 2026-11-12). */
 /** Bán kính magnet khi kéo node (px màn hình). 10 px bị người dùng báo "hơi mạnh" nên giảm còn 6 (2026-11-16). */
 const MAGNET_RADIUS = 6;
+/** Khoảng tối đa giữa hai lần nhấp của một cú nhấp đúp (mặc định của hệ điều hành; web không đọc được thiết lập thật). */
+const DOUBLE_CLICK_MS = 500;
 const ANCHOR_HINT_RADIUS = 2;
 const ANCHOR_HINT_MIN_SCREEN_SIZE = 24;
 const COMPLETION_FAILURE_MESSAGES: Record<CompletionFailure, string> = {
@@ -329,6 +336,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     predictionUrl,
     currentMaskUrl,
     showMask,
+    colorMode = 'label',
     magnet = false,
     brightness = 1,
     edgeStrength = 0,
@@ -404,11 +412,17 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   const polygonCursorRef = useRef<ImagePoint | null>(null);
   // Điểm nháp vừa chấm bằng một lần nhấp: nhấp đúp ngay tại đó (lần nhấp đầu của nhấp đúp đã chấm nó) không hoàn tất.
   /**
-   * Điểm nháp vừa chấm + số lần nhấp trúng lại nó. Nhấp đúp lên BẤT KỲ điểm đã chấm đều hoàn tất (người dùng xác
-   * nhận 2026-11-16); chỉ cú nhấp đúp ở chỗ trống (lần nhấp đầu tự tạo điểm, lần hai trúng lại đúng một lần) là
-   * không — khi đó `retouches` mới bằng 1. Trước đây chặn theo 600 ms nên nhấp đúp lên điểm vừa vẽ không ăn.
+   * HOÀN TẤT BẢN NHÁP = hai lần nhấp TRÚNG cùng một điểm đã chấm trong DOUBLE_CLICK_MS (người dùng xác nhận
+   * 2026-11-06, mở rộng 2026-11-16: bất kỳ điểm nào, kể cả điểm vừa vẽ — cần cho đường cắt 2 điểm của Paint (−)).
+   *
+   * Tự đếm ở pointerdown, KHÔNG dựa vào sự kiện `dblclick` của trình duyệt (sửa 2026-11-17): chấm một điểm rồi nhấp
+   * đúp ngay lên nó bị trình duyệt gộp thành chuỗi nhấp 1-2-3 — `dblclick` nổ ở cú thứ HAI (lúc điểm vừa mới sinh
+   * ra, giống hệt nhấp đúp ở chỗ trống) còn cú thứ ba không sinh `dblclick` nào, nên thao tác tự nhiên nhất không
+   * bao giờ hoàn tất. Cú nhấp TẠO điểm không được tính là "trúng": nhấp đúp ở chỗ trống vẫn chỉ để lại một điểm.
    */
-  const lastAddedDraftPointRef = useRef<{ id: string; time: number; retouches: number } | null>(null);
+  const draftTouchRef = useRef<{ id: string; time: number; count: number } | null>(null);
+  /** Vừa hoàn tất bằng nhấp đúp: bỏ qua cú nhấp thừa của cùng chuỗi tại chỗ đó (không chấm điểm mồ côi mới). */
+  const draftCompletedAtRef = useRef<{ time: number; x: number; y: number } | null>(null);
   /**
    * Đường cắt CHỜ của Paint (−), theo id mask (spec người dùng 2026-11-16, Rule 3): đường 2 điểm chưa chia được mask
    * không tạo ID mới mà được giữ ở đây; mỗi đường mới được đánh giá cùng toàn bộ đường chờ (mask-cut.ts). Chỉ sống
@@ -437,7 +451,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   const pointRedoRef = useRef<BreakpointPoint[][]>([]);
   const selectedPointIdRef = useRef<string | null>(null);
   const humanActionRef = useRef(initialHumanAction);
-  const displayRef = useRef({ showMask, maskOpacity });
+  const displayRef = useRef({ showMask, maskOpacity, colorMode });
   const toolRef = useRef(tool);
   const renderFrameRef = useRef<number | null>(null);
   const brushWorkerRef = useRef<Worker | null>(null);
@@ -1044,7 +1058,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         if (polygon.nodes.length < 3) continue;
         const bounds = polygonBounds(polygon);
         if (bounds.right < area.left || bounds.left > area.right || bounds.bottom < area.top || bounds.top > area.bottom) continue;
-        context.fillStyle = polygon.meta?.locked ? '#fff' : labelColor(polygon.label);
+        context.fillStyle = polygon.meta?.locked ? '#fff' : overlayColor(polygon.label, display.colorMode);
         context.fill(polygonPathAt(polygon, view.scale), 'evenodd');
       }
     } else {
@@ -1143,8 +1157,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     // Viền đậm nhạt theo thanh độ mờ như phần tô (người dùng xác nhận 2026-11-05); node và nhãn của polygon
     // đang chọn vẫn rõ để còn chỉnh được khi kéo độ mờ xuống thấp.
     const outlineAlpha = Math.min(1, Math.max(0, display.maskOpacity));
-    // Lớp phủ luôn tô theo label: cùng label cùng màu (người dùng xác nhận 2026-11-06, chế độ duy nhất).
-    const outlineColor = (polygon: AnnotationPolygon) => labelColor(polygon.label);
+    // Lớp phủ luôn tô theo label: cùng label cùng màu (người dùng xác nhận 2026-11-06, chế độ duy nhất ở editor).
+    // Trang duyệt có thể đổi bảng màu (`colorMode`), vẫn giữ cùng label cùng màu.
+    const outlineColor = (polygon: AnnotationPolygon) => overlayColor(polygon.label, display.colorMode);
     const minimumSize = 1.5 / view.scale;
     const dotsByColor = new Map<string, Path2D>();
     const lockedPolygons: AnnotationPolygon[] = [];
@@ -1488,7 +1503,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
   useEffect(() => {
     const previous = displayRef.current;
     magnetRef.current = magnet;
-    displayRef.current = { showMask, maskOpacity };
+    displayRef.current = { showMask, maskOpacity, colorMode };
     // Mask visibility and opacity are layer styles: no mask redraw needed.
     const layer = maskLayerRef.current;
     if (layer) {
@@ -1503,7 +1518,15 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       dirty.vectorsRect = null;
       scheduleFrame();
     }
-  }, [magnet, maskOpacity, scheduleFrame, showMask]);
+    // Bảng màu đổi (trang duyệt): tô lại phần fill và viền, không vẽ lại ảnh.
+    if (previous.colorMode !== colorMode) {
+      dirty.mask = true;
+      dirty.maskRect = null;
+      dirty.vectors = true;
+      dirty.vectorsRect = null;
+      scheduleFrame();
+    }
+  }, [colorMode, magnet, maskOpacity, scheduleFrame, showMask]);
 
   const rebuildTint = useCallback((source: HTMLCanvasElement, target: HTMLCanvasElement, color: string) => {
     const context = target.getContext('2d');
@@ -2306,11 +2329,29 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
         insertAutoComplete(point);
         return;
       }
-      // Nhấp lên một điểm đã chấm không chấm thêm (nhấp đúp lên điểm để hoàn tất, người dùng xác nhận 2026-11-06).
-      const touched = draft.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale);
+      const now = performance.now();
+      // Cú nhấp thừa ngay sau khi hoàn tất bằng nhấp đúp (chuỗi 1-2-3 trên một điểm có sẵn): không chấm điểm mới.
+      const completedAt = draftCompletedAtRef.current;
+      if (completedAt && now - completedAt.time <= DOUBLE_CLICK_MS
+          && Math.hypot(completedAt.x - point.x, completedAt.y - point.y) <= snapTolerance) {
+        return;
+      }
+      // Nhấp lên một điểm đã chấm không chấm thêm; hai lần trúng cùng điểm trong DOUBLE_CLICK_MS thì hoàn tất.
+      // Tầm trúng = tầm neo: điểm bị neo kéo tới biên (≤ snapTolerance) vẫn được coi là trúng khi nhấp lại chỗ cũ
+      // (tầm 12 px cũ nhỏ hơn tầm neo 14 px, nên nhấp lại đúng chỗ vừa nhấp có lúc lại chấm thêm điểm trùng).
+      const touched = draft.reduce<PolygonNode | null>((best, node) => {
+        const gap = Math.hypot(node.x - point.x, node.y - point.y);
+        return gap <= snapTolerance && (!best || gap < Math.hypot(best.x - point.x, best.y - point.y)) ? node : best;
+      }, null);
       if (touched) {
-        const added = lastAddedDraftPointRef.current;
-        if (added && added.id === touched.id) added.retouches += 1;
+        const previous = draftTouchRef.current;
+        const count = previous && previous.id === touched.id && now - previous.time <= DOUBLE_CLICK_MS ? previous.count + 1 : 1;
+        draftTouchRef.current = { id: touched.id, time: now, count };
+        if (count >= 2) {
+          draftTouchRef.current = null;
+          if (completePolygon()) draftCompletedAtRef.current = { time: now, x: point.x, y: point.y };
+          return;
+        }
         render();
         return;
       }
@@ -2360,7 +2401,7 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
       const added = { id: crypto.randomUUID(), ...effectivePoint, isAnchor: true };
       if (!draftRef.current.nodes.length) draftToolRef.current = tool;
       draftRef.current.add(added);
-      lastAddedDraftPointRef.current = { id: added.id, time: performance.now(), retouches: 0 };
+      draftTouchRef.current = null;
       // Paint (−) với đúng 2 điểm là đường cắt (người dùng xác nhận 2026-11-16): nhắc cách áp dụng.
       if (tool === 'brush' && paintModeRef.current === 'subtract' && draftRef.current.nodes.length === 2) {
         onMessage('Đường cắt 2 điểm: nhấp đúp lên một điểm, Enter hoặc nút Áp dụng để tách mask. Chấm tiếp nếu muốn vẽ polygon trừ.');
@@ -2545,16 +2586,9 @@ const EditorCanvas = forwardRef<EditorCanvasHandle, Props>(function EditorCanvas
     if (props.readOnly) return;
     if (isDraftTool(tool)) {
       event.preventDefault();
-      // Nhấp đúp lên BẤT KỲ điểm đã chấm đều hoàn tất (người dùng xác nhận 2026-11-16, kể cả điểm vừa vẽ xong —
-      // cần cho đường cắt 2 điểm của Paint (−)). Chỉ cú nhấp đúp ở chỗ trống không hoàn tất: lần nhấp đầu của nó
-      // tự tạo điểm rồi lần hai trúng lại đúng MỘT lần (`retouches === 1`), còn nhấp đúp lên điểm có sẵn đi qua
-      // hai lần nhấp trúng (`retouches ≥ 2`) hoặc trúng điểm không phải điểm vừa thêm.
-      const point = imagePoint(event);
-      const hit = draftRef.current.nodes.find((node) => Math.hypot(node.x - point.x, node.y - point.y) <= 12 / viewRef.current.scale);
-      const added = lastAddedDraftPointRef.current;
-      const emptySpaceDoubleClick = Boolean(hit && added && added.id === hit.id && added.retouches <= 1 && performance.now() - added.time < 600);
-      if (hit && !emptySpaceDoubleClick) completePolygon();
-      else render();
+      // Hoàn tất bằng nhấp đúp do onPointerDown tự đếm (xem draftTouchRef): sự kiện dblclick của trình duyệt không
+      // phân biệt được "nhấp đúp lên điểm vừa vẽ" với "nhấp đúp ở chỗ trống". Ở đây chỉ chặn hành vi mặc định.
+      render();
       return;
     }
     if (tool !== 'select' || !readyRef.current) return;

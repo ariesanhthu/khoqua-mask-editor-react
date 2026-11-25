@@ -33,7 +33,7 @@ erDiagram
 | `group_assignments(group_id, user_id, assigned_by, created_at)`, PK `(group_id, user_id)` | Người được giao nhóm |
 | `dataset_files.group_id` (TEXT NULL, FK `file_groups`) | Nhóm của ảnh. Dữ liệu có sẵn giữ `NULL` |
 
-Bảng `assignments` (giao theo từng ảnh) có từ trước, tới 2026-11-24 không có luồng ghi nào. **Từ 2026-11-24 (người dùng yêu cầu: admin giao việc ở mức từng ảnh)**, ADMIN ghi bảng này qua `PUT /api/projects/:id/files/assignee`. Quyền xem cộng thêm ảnh được giao riêng (mỗi ảnh tối đa một người, chỉ ảnh đã thuộc nhóm). Trường `FileListItem.assignment` giữ nguyên nghĩa (người phụ trách) và nay có dữ liệu. Type mới: `FileGroupSummary`, `FileGroupList`, `UserSummary`, `DatasetImportResult`; `FileListItem.group?` (tùy chọn); `ErrorCode` thêm `INVALID_DATASET`.
+Bảng `assignments` (giao theo từng ảnh) có từ trước, tới 2026-11-24 không có luồng ghi nào. **Từ 2026-11-24 (người dùng yêu cầu: admin giao việc ở mức từng ảnh)**, ADMIN ghi bảng này qua `PUT /api/projects/:id/files/assignee`. Quyền xem cộng thêm ảnh được giao riêng (mỗi ảnh tối đa một người, chỉ ảnh đã thuộc nhóm). Trường `FileListItem.assignment` giữ nguyên nghĩa (người phụ trách) và nay có dữ liệu. Chi tiết: [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) §3. Type mới: `FileGroupSummary`, `FileGroupList`, `UserSummary`, `DatasetImportResult`; `FileListItem.group?` (tùy chọn); `ErrorCode` thêm `INVALID_DATASET`.
 
 ## 3. Quyền xem theo nhóm
 

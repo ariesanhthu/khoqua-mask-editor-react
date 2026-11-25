@@ -25,12 +25,13 @@ Home (2026-11-16): nút **Tải ảnh hoàn tất** cạnh **Tải ZIP về máy
 
 Người dùng nhấn mạnh (2026-10-25) giữ nguyên hành vi này; khóa bằng `src/lib/polygon-draft.test.ts` và `scripts/canvas-browser-check.mjs`.
 
-- Mỗi click chấm một điểm; nhấp lên một điểm đã chấm không chấm thêm. **Hoàn tất (người dùng xác nhận 2026-11-06, mở rộng 2026-11-16): nhấp đúp lên BẤT KỲ điểm đã chấm nào — kể cả điểm vừa vẽ xong — Enter, hoặc nút “Hoàn tất polygon”.** Nhấp đơn lên điểm đầu và nhấp đúp ở chỗ trống không hoàn tất (nhấp đúp ở chỗ trống chỉ chấm đúng một điểm như nhấp đơn; phân biệt bằng số lần nhấp trúng lại điểm vừa thêm — `retouches` — thay cho ngưỡng 600 ms cũ, vì ngưỡng cũ chặn cả nhấp đúp lên điểm vừa chấm, làm đường cắt 2 điểm của Paint (−) không áp dụng được bằng chuột). Thay cho hợp đồng 2026-10-25 “click lại điểm đầu hoặc double-click ở đâu cũng hoàn tất”.
+- Mỗi click chấm một điểm; nhấp lên một điểm đã chấm không chấm thêm. **Hoàn tất (người dùng xác nhận 2026-11-06, mở rộng 2026-11-16, sửa cách nhận biết 2026-11-17): nhấp đúp lên BẤT KỲ điểm đã chấm nào — kể cả điểm vừa vẽ xong — Enter, hoặc nút “Hoàn tất polygon”.** "Nhấp đúp" = hai lần nhấp trúng cùng một điểm trong 500 ms, do `onPointerDown` tự đếm (`draftTouchRef`), KHÔNG dùng sự kiện `dblclick`: chấm điểm rồi nhấp đúp ngay bị trình duyệt gộp thành chuỗi 1-2-3 (dblclick nổ ở cú thứ hai, khi điểm vừa sinh ra) nên dựa vào `dblclick` thì thao tác đó không bao giờ hoàn tất. Cú nhấp tạo điểm không tính là trúng: nhấp đơn lên điểm đầu và nhấp đúp ở chỗ trống không hoàn tất (nhấp đúp ở chỗ trống chỉ chấm đúng một điểm). Tầm trúng điểm bằng tầm neo (14 px màn hình), để điểm bị neo kéo tới biên vẫn trúng khi nhấp lại chỗ cũ. Thay cho hợp đồng 2026-10-25 “click lại điểm đầu hoặc double-click ở đâu cũng hoàn tất”.
 - Đang chấm điểm: **Ctrl+Z gỡ đúng một điểm vừa chấm** mỗi lần; Ctrl+Y/Ctrl+Shift+Z chấm lại; nút Hoàn tác/Làm lại trên thanh công cụ có cùng hiệu ứng và hiện trạng thái “cục bộ”. Chấm điểm mới sau khi undo bỏ nhánh redo.
 - Chuột phải lên một điểm của bản nháp xóa điểm đó (hoàn tác được).
 - Gỡ hết điểm rồi undo tiếp: rời bản nháp, undo chuyển sang lịch sử chung (ví dụ hoàn tác cả polygon vừa hoàn tất trước đó). Polygon đã hoàn tất được hoàn tác cả vùng bằng một bước.
 - Esc hủy bản nháp. Đổi sang công cụ khác ngoài Pan cũng hủy bản nháp; Pan giữ bản nháp.
-- “Hoàn tất & Tiếp theo” bị khóa khi đang có điểm nháp (undo cục bộ).
+- “Hoàn tất & Tiếp theo” bị khóa khi đang có điểm nháp (undo cục bộ). Nút **Review** cạnh nó (thay “‹ Quay lại” từ 2026-11-25) và tab Review cũng bị khóa trong lúc đó.
+- **Tab Review (người dùng yêu cầu 2026-11-25):** panel phải có 2 tab **Vùng chọn · Review**, đổi tại chỗ. Tab Review: canvas chỉ xem, 3 chế độ màu duyệt, kết luận **Đạt & Tiếp theo** (được cả từ Bản nháp khi đang giữ khóa) / **Cần sửa**. Chọn công cụ vẽ (V, P, B, R, C, A) quay về Gán nhãn. Save policy không đổi: sang tab Review lưu phần sửa treo như mọi lần đổi tab. Chi tiết: [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) §4b.
 
 ## Neo và Tự hoàn thiện — người dùng xác nhận 2026-11-12 (thay mục "Auto anchor" 2026-11-06 & 2026-11-07)
 
@@ -144,6 +145,7 @@ Chưa thử thao tác tay trên thiết bị thật; số đo dữ liệu thật
 - **Độ mờ áp dụng cả đường biên**: viền của mọi polygon (thường, khóa, đang chọn) đậm nhạt cùng phần tô. Node và tag label của polygon đang chọn luôn rõ để vẫn chỉnh được khi kéo thấp.
 - Giới hạn: mask chỉ có raster (chưa chuyển sang polygon) hiện một màu vì raster không có label; vẽ lại theo label sau khi chuyển. Polygon khóa vẫn tô trắng/viền xám. Bản nháp polygon đang vẽ giữ màu tím (Paint (−): đỏ).
 - Khi đang dùng Paint, cả nhóm lớp phủ nằm dưới thanh chế độ Paint (thanh che nút lớp phủ khi vùng canvas hẹp ~700 px). Màn hình ≤ 760 px: tùy chọn thành một hàng gọn cạnh nút.
+- **Trang duyệt (người dùng yêu cầu 2026-11-24):** `EditorCanvas` nhận prop tùy chọn `colorMode` (`'label'` mặc định | `'twoTone'` Xanh – Đỏ | `'warmCool'` Nóng – Lạnh). Hàm màu là `overlayColor` trong `src/lib/review-colors.ts`. Chỉ `r*`/`w*` được tách màu, label khác tô xám. Cùng label vẫn cùng màu. Chỉ hiển thị. Tab **Gán nhãn** của editor truyền `'label'` (chế độ duy nhất khi sửa). Tab **Review** (người dùng yêu cầu 2026-11-25) truyền chế độ đã chọn, kèm `readOnly` + `pan`. Chi tiết và giả định màu: [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) §4b, §5.
 
 ## Hợp đồng thao tác trong Select
 

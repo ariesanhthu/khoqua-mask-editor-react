@@ -7,6 +7,7 @@ import { PaintModeIcon } from '@/components/paint-mode-icon';
 import { explainAutoAnchorPath, pointInMask } from '@/lib/polygon-geometry';
 import { planNodeAnchorDrag } from '@/lib/node-anchor';
 import type { PaintMode } from '@/lib/polygon-paint';
+import type { OverlayColorMode } from '@/lib/review-colors';
 import type { AnnotationPolygon, MaskOperation } from '@/types';
 
 const noop = () => {};
@@ -111,6 +112,8 @@ export default function BrowserCheck() {
   const [overlay, setOverlay] = useState({ opacity: 0.5, showMask: true, magnet: true });
   // Hiển thị ảnh (độ sáng + làm rõ biên) và minimap, như sidebar của workspace (người dùng xác nhận 2026-11-16).
   const [adjust, setAdjust] = useState({ brightness: 1, edge: 0 });
+  // Bảng màu lớp phủ của trang duyệt (2026-11-24); mặc định 'label' như editor.
+  const [colorMode, setColorMode] = useState<OverlayColorMode>('label');
   const [view, setView] = useState<CanvasViewInfo | null>(null);
   // Cho script kiểm tra đọc tọa độ node (magnet, Paint, kéo + Shift).
   useEffect(() => { (window as unknown as { __polygons?: AnnotationPolygon[] }).__polygons = polygons; }, [polygons]);
@@ -177,6 +180,12 @@ export default function BrowserCheck() {
       <button data-adjust="edge" onClick={() => setAdjust((value) => ({ ...value, edge: 1 }))}>Edge 100</button>
       <button data-adjust="reset" onClick={() => setAdjust({ brightness: 1, edge: 0 })}>Adjust reset</button>
     </div>
+    {/* Hàng nút trên đã tràn khỏi cửa sổ 1280 px: nút màu đặt cố định ở góc, không đẩy canvas (tọa độ các kiểm tra khác giữ nguyên). */}
+    <div style={{ position: 'fixed', right: 8, bottom: 8, zIndex: 50, display: 'flex', gap: 6 }}>
+      {(['label', 'twoTone', 'warmCool'] as const).map((value) => (
+        <button key={value} data-colors={value} aria-pressed={colorMode === value} onClick={() => setColorMode(value)}>Colors {value}</button>
+      ))}
+    </div>
     <p>Mode={mode}; tool={tool}; masks={polygons.length}; holes={polygons.reduce((n, p) => n + (p.holes?.length ?? 0), 0)}; center filled={String(polygons.some((p) => pointInMask({ x: 400, y: 250 }, p)))}; zoom={zoom.toFixed(4)}</p>
     <p data-testid="history">history local={String(history.local)}; canUndo={String(history.canUndo)}; canRedo={String(history.canRedo)}; last={polygons.at(-1)?.label ?? '-'}:{polygons.at(-1)?.nodes.length ?? 0}; selected={selected.length}; totalNodes={polygons.reduce((sum, polygon) => sum + polygon.nodes.length, 0)}; maxNodes={polygons.reduce((max, polygon) => Math.max(max, polygon.nodes.length + (polygon.holes ?? []).reduce((sum, hole) => sum + hole.length, 0)), 0)}</p>
     <p>{message} {exported}</p>
@@ -185,12 +194,12 @@ export default function BrowserCheck() {
         {scene
           ? <EditorCanvas ref={ref} width={scene.width} height={scene.height} imageUrl={scene.photo} predictionUrl={scene.mask}
             initialHumanAction={scene.operations.length ? 'MODIFIED' : 'UNTOUCHED'} initialBreakpoints={breaks} initialOperations={scene.operations}
-            tool={tool} paintMode={mode} maskOpacity={overlay.opacity} showMask={overlay.showMask} magnet={overlay.magnet}
+            tool={tool} paintMode={mode} maskOpacity={overlay.opacity} showMask={overlay.showMask} magnet={overlay.magnet} colorMode={colorMode}
             brightness={adjust.brightness} edgeStrength={adjust.edge} onViewChange={setView}
             onChange={change} onSelectionChange={setSelected} onHistoryChange={setHistory} onReady={noop} onMessage={setMessage} onZoomChange={setZoom} />
           : <EditorCanvas ref={ref} width={800} height={500} imageUrl={image} predictionUrl={blank}
             initialHumanAction="MODIFIED" initialBreakpoints={breaks} initialOperations={operations}
-            tool={tool} paintMode={mode} maskOpacity={overlay.opacity} showMask={overlay.showMask} magnet={overlay.magnet}
+            tool={tool} paintMode={mode} maskOpacity={overlay.opacity} showMask={overlay.showMask} magnet={overlay.magnet} colorMode={colorMode}
             brightness={adjust.brightness} edgeStrength={adjust.edge} onViewChange={setView}
             onChange={change} onSelectionChange={setSelected} onHistoryChange={setHistory} onReady={noop} onMessage={setMessage} onZoomChange={setZoom} />}
       </div>

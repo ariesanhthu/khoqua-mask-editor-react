@@ -11,6 +11,7 @@ vi.mock('./auth', () => ({ requireAuth: async () => session.user }));
 
 import { getDb } from './db';
 import { listGroups } from './group-service';
+import { reviewAnnotation } from './annotation-service';
 import { MAX_FILES_PER_ASSIGNMENT } from './file-assignment-service';
 import { PUT as putFileAssignee } from '../app/api/projects/[projectId]/files/assignee/route';
 import { GET as listProjects } from '../app/api/projects/route';
@@ -46,14 +47,16 @@ beforeAll(async () => {
   }
   await db.prepare("INSERT INTO file_groups (id, project_id, name) VALUES ('g1', 'p1', '8582'), ('g2', 'p1', 'DC3'), ('gp2', 'p2', 'VIN')").run();
   const rows = [
-    ['f1', 'd-p1', '8582_01', 'g1', 'UNSTARTED'], ['f2', 'd-p1', '8582_02', 'g1', 'DRAFT'], ['f3', 'd-p1', '8582_03', 'g1', 'DONE'],
+    ['f1', 'd-p1', '8582_01', 'g1', 'UNSTARTED'], ['f2', 'd-p1', '8582_02', 'g1', 'DRAFT'], ['f3', 'd-p1', '8582_03', 'g1', 'REVIEW'],
     ['f4', 'd-p1', 'DC3_01', 'g2', 'UNSTARTED'], ['f5', 'd-p1', 'loose', null, 'UNSTARTED'], ['f6', 'd-p2', 'VIN_01', 'gp2', 'UNSTARTED'],
   ];
   for (const [id, dataset, key, group, state] of rows) {
     await db.prepare(`INSERT INTO dataset_files (id, dataset_id, external_key, image_drive_file_id, prediction_drive_file_id,
       image_filename, prediction_filename, width, height, group_id, annotation_state, latest_revision)
-      VALUES (?, ?, ?, 'image', 'mask', 'image.png', 'mask.png', 8, 6, ?, ?, ?)`).run(id, dataset, key, group, state, 0);
+      VALUES (?, ?, ?, 'image', 'mask', 'image.png', 'mask.png', 8, 6, ?, ?, ?)`).run(id, dataset, key, group, state, state === 'REVIEW' ? 2 : 0);
   }
+  await db.prepare(`INSERT INTO annotations (dataset_file_id, revision, status, segmentation_json, breakpoints_json, last_edited_by)
+    VALUES ('f3', 2, 'REVIEW', '{"humanAction":"MODIFIED","maskOperations":[]}', '{"state":"NOT_ANNOTATED","points":[]}', 'binh')`).run();
   // binh được giao cả nhóm g1 như trước; an, chi, rv chưa được giao gì.
   await db.prepare("INSERT INTO group_assignments (group_id, user_id) VALUES ('g1', 'binh')").run();
 }, 30_000);
@@ -78,7 +81,7 @@ describe('giao riêng từng ảnh', () => {
     expect(await fileIds('/api/projects/p1/files?groupId=g1')).toEqual(['f2']);
     const groups = await (await getGroups(request('/api/projects/p1/groups'), projectParams('p1'))).json();
     expect(groups).toEqual({ ungrouped: 0, groups: [
-      { id: 'g1', name: '8582', total: 1, unstarted: 0, draft: 1, done: 0, locked: 0, assignees: [] },
+      { id: 'g1', name: '8582', total: 1, unstarted: 0, draft: 1, review: 0, done: 0, locked: 0, assignees: [] },
     ] });
   });
 
@@ -99,7 +102,7 @@ describe('giao riêng từng ảnh', () => {
     const own = await listGroups('p1', 'binh');
     expect(own?.groups.map((group) => [group.id, group.total])).toEqual([['g1', 3]]);
     const all = await listGroups('p1', 'admin');
-    expect(all?.groups.map((group) => [group.id, group.total, group.draft])).toEqual([['g1', 3, 1], ['g2', 1, 0]]);
+    expect(all?.groups.map((group) => [group.id, group.total, group.draft, group.review])).toEqual([['g1', 3, 1, 1], ['g2', 1, 0, 0]]);
     expect(all?.ungrouped).toBe(1);
   });
 
@@ -121,7 +124,12 @@ describe('giao riêng từng ảnh', () => {
     expect(await (await listProjects(request('/api/projects'))).json()).toEqual([]);
   });
 
-
+  it('người duyệt được giao riêng ảnh chờ duyệt thì kết luận được ảnh đó', async () => {
+    expect(await reviewAnnotation('f3', 'rv', 'APPROVE', 2)).toEqual({ error: 'FORBIDDEN' });
+    as('admin', 'ADMIN');
+    await assign({ fileIds: ['f3'], userId: 'rv' });
+    expect(await reviewAnnotation('f3', 'rv', 'APPROVE', 2)).toEqual({ annotationState: 'DONE', revision: 2 });
+  });
 });
 
 describe('bỏ giao và chọn ảnh tiếp theo', () => {

@@ -21,12 +21,84 @@ Mẫu một mục:
 
 ---
 
+## 2026-11-25 — Tab Review trong editor; rà soát luồng duyệt
+
+- **Thay đổi:**
+  - Editor có thêm tab **Review** cạnh "Vùng chọn". Mọi tài khoản đổi qua lại tại chỗ được. Nút "‹ Quay lại" cạnh **Hoàn tất & Tiếp theo** đổi thành **Review**; về danh sách vẫn bằng icon thư mục.
+  - Tab Review: canvas chỉ xem, 3 chế độ màu (Theo label · Xanh – Đỏ · Nóng – Lạnh), số mask/label `r*`/`w*`, **Đạt & Tiếp theo** (mở ảnh chờ duyệt kế tiếp ở tab Review) và **Cần sửa** (ở lại ảnh, về tab Gán nhãn để sửa). Ảnh đã Hoàn thành thì nút chính là **Ảnh cần duyệt tiếp theo**.
+  - **Hoàn tất & Tiếp theo không đổi** (→ Cần review, sang ảnh chưa xong kế tiếp).
+  - `/editor/:id?tab=review` mở thẳng tab Review.
+- **Kiến trúc/ảnh hưởng:**
+  - `reviewAnnotation(fileId, userId, decision, revision, lockToken?)` cho phép `APPROVE` ảnh `DRAFT` **chỉ khi** có lock token hợp lệ của chính người đó. Route `/api/files/:id/review` đọc header `X-Annotation-Lock-Token`, header mà `apiFetch` vốn đã gửi. Luật cũ cho trang `/review` (không có khóa) giữ nguyên.
+  - Không đổi schema, save policy, mô hình khóa hay export.
+  - Mới: `src/components/review-color-controls.tsx`, dùng chung giữa `review-workspace.tsx` và `editor-workspace.tsx` (trang `/review` chỉ refactor, hành vi giữ nguyên).
+  - `editor-workspace.tsx` thêm state `panelTab`/`fileState`/`colorMode`, không viết lại luồng cũ. `editor/[fileId]/page.tsx` đọc `searchParams`. `globals.css` thêm 2 dòng.
+- **Rà soát (không đổi code):**
+  - Tài liệu cũ ghi ảnh `REVIEW` không có trong ZIP đầy đủ/Drive. Thực tế `export-service.ts` lấy mọi ảnh trừ `UNSTARTED`; đã sửa tài liệu, chờ người dùng xác nhận hành vi.
+  - Mở ảnh `REVIEW` bằng "Chỉnh sửa lại" giữ khóa, nên người duyệt nhận 423. Một lần lưu đưa ảnh về `DRAFT` (đúng sơ đồ trạng thái). Tab Review hiện rõ trạng thái này.
+- **Người dùng xác nhận (2026-11-25):** đổi tab ngay trong editor (không sang trang khác); cho **Đạt thẳng từ Bản nháp**; **giữ cả** nút Duyệt ở Home và trang `/review`.
+- **Quyết định của agent, chưa được xác nhận:**
+  - Tab Review dùng "Đạt & Tiếp theo" thay cho Hoàn tất, để không đưa ảnh vừa Đạt về lại Cần review.
+  - Cần sửa ở lại ảnh và về tab Gán nhãn.
+  - Phím công cụ vẽ quay về Gán nhãn.
+  - Đạt từ Bản nháp không tạo version "Hoàn tất".
+- **Đã kiểm chứng:**
+  - `npm run typecheck`, `npm run lint` sạch; `npm test` 392 test / 39 file qua; `npm run build` qua.
+  - `canvas-browser-check`: 83/84, đúng như baseline 2026-11-24. Ô đỏ duy nhất vẫn là kịch bản đường cắt thứ hai (guard 500 ms, chờ người dùng quyết, §8); không có ô đỏ mới.
+  - E2E cô lập Chrome headless (PGlite/filesystem tạm, `/api/health` `database:false`, `blob:false`) 30/30. Chi tiết: [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) §7b.
+- **Chưa kiểm chứng:** dữ liệu/Postgres/production thật; mobile; Safari/Firefox; tab Review ở chế độ chỉ xem; ANNOTATOR/REVIEWER trên trình duyệt. Chưa commit, chưa deploy.
+- **Tài liệu đã cập nhật:** REVIEW_AND_ASSIGNMENT (R5, §2, §4b, §5, §7b, §8), ARCHITECTURE (yêu cầu 22, sơ đồ, §8), EDITOR_PIPELINE, AGENT_GUIDE (impact map), CHANGELOG.
+
+---
+
 ## 2026-11-24 — Giao và bỏ giao ảnh trên trang admin
 
 - ADMIN có thể giao lại ảnh, bỏ giao ngay trên thẻ hoặc bỏ giao hàng loạt trong nhóm. Tách thao tác bỏ chọn khỏi bỏ giao và giới hạn lựa chọn theo trang, nhóm và bộ lọc.
 - Dùng bảng `assignments` hiện có. Server kiểm quyền ADMIN, khóa hàng theo thứ tự ID, xử lý cả lô trong một transaction và đếm số ảnh thực sự được bỏ giao. Người được giao cả nhóm vẫn có quyền theo nhóm.
 - “Làm ảnh tiếp theo” lọc theo người phụ trách trước khi phân trang. Ảnh được giao cho chính người dùng được ưu tiên.
 - Bản phát hành qua 370 kiểm thử Vitest, typecheck, lint và build. Chrome trên dữ liệu PGlite cô lập đã kiểm tra giao lại, lưu qua tải lại trang, bỏ giao từng ảnh và hàng loạt, đổi trang, thử lại sau lỗi, quyền của người nhận và bố cục rộng 375 px.
+
+## 2026-11-24 — Giao việc theo từng ảnh, trang duyệt `/review` với lớp phủ Xanh – Đỏ / Nóng – Lạnh
+
+- **Người dùng yêu cầu (2026-11-24):**
+  - Cho phép admin giao việc ở mức từng ảnh.
+  - Bổ sung chức năng review: nút lớp phủ tách nhanh 2 màu xanh – đỏ (gradient gần nhau), chỉ cho u vấu và vết gợn; một nút tách theo nóng – lạnh, trong đó từng loại khác màu theo nhóm nóng – lạnh.
+  - Explore code và cập nhật SAD trước khi thực hiện. Thiết kế đã được ghi vào `REVIEW_AND_ASSIGNMENT.md` và `ARCHITECTURE.md` (yêu cầu 19–21) trước khi code.
+- **Thay đổi:**
+  - *Phân công theo ảnh:* `PUT /api/projects/:id/files/assignee` + `file-assignment-service.ts`, ghi vào bảng `assignments` có sẵn. Không đổi schema.
+  - *Quyền:* `access-service` thêm nhánh "ảnh được giao riêng" vào `FILE_ACCESS_SQL`/`GROUP_ACCESS_SQL` và thêm `PROJECT_ACCESS_SQL`, dùng cho route `projects` và `completed-export-service`. Cả ba vẫn nhận đúng 2 tham số. `listGroups` chỉ đếm ảnh trong quyền.
+  - *Home (ADMIN):* ô chọn ảnh (chip góc trên phải ảnh, theo yêu cầu người dùng sau lần xem đầu: checkbox cũ bị rule `input { width:100% }` kéo giãn thành một hàng riêng) + thanh giao riêng (`file-assign-bar.tsx`), dòng "Phụ trách / Giao riêng cho bạn". "Làm ảnh tiếp theo" bỏ qua ảnh giao riêng cho người khác, như Done & Next.
+  - *Trang duyệt:* trang `/review/[fileId]` (`review-workspace.tsx`), chỉ xem, không khóa, Đạt / Cần sửa. Trước đó dashboard đã trỏ tới trang này nhưng trang chưa có (404).
+  - *Màu lớp phủ:* `review-colors.ts` (`overlayColor`, `reviewLabelSummary`). Canvas nhận prop tùy chọn `colorMode`, mặc định `'label'`.
+  - `ErrorCode` thêm `INVALID_REVIEW`, `NOT_IN_REVIEW` (mã mà route duyệt ngày 2026-11-17 đã trả).
+  - Trang `/canvas-browser-check` thêm nút màu cố định ở góc; script thêm 3 kiểm tra.
+- **Kiến trúc/ảnh hưởng:**
+  - Quyền xem cộng thêm. Người được giao cả nhóm và ADMIN giữ nguyên số liệu/kết quả (kỳ vọng cũ của `group-access.test.ts` không đổi).
+  - Lock, save policy, export/ZIP/Drive, version không đổi. Editor không truyền `colorMode` nên vẫn chỉ có màu theo label.
+  - Dữ liệu production: bảng `assignments` chỉ có hàng khi ADMIN bấm Giao; không có migration.
+- **Giả định của agent (chờ người dùng xác nhận):**
+  - `r*` = đỏ/nóng, `w*` = xanh/lạnh; "xanh" = xanh dương, để không chìm vào nền khổ qua xanh lá.
+  - Mỗi ảnh một người phụ trách; chỉ giao riêng ảnh đã có nhóm.
+  - Trang duyệt mặc định mở Xanh – Đỏ.
+  - Ảnh `REVIEW` vẫn không nằm trong ZIP đầy đủ/Drive (bộ lọc DRAFT + DONE không đổi).
+- **Đã kiểm chứng:**
+  - `npm run typecheck`, `npm run lint` sạch; `npm test` **387 test / 39 file** (trước 368 / 37); `npm run build` qua.
+  - `canvas-browser-check` 83/84: 3 kiểm tra màu mới qua; kiểm tra đỏ là đường cắt thứ hai của phần nhấp đúp 2026-11-17, do guard 500 ms gặp nhịp script; chèn thêm 300 ms thì 84/84 — chi tiết ở REVIEW_AND_ASSIGNMENT §7.
+  - E2E Chrome headless trên PGlite + filesystem cô lập: **32/32** (giao riêng trên Home, người được giao chỉ thấy đúng ảnh, 403 trang duyệt ngoài phạm vi, 3 chế độ màu khác nhau trên canvas thật, không khóa/không lưu, Đạt → DONE).
+- **Chưa kiểm chứng:** dữ liệu/ảnh thật, Postgres/Neon thật, mobile/Safari/Firefox, "Cần sửa" và "Ảnh cần duyệt tiếp theo" trên trình duyệt. Chưa commit/deploy.
+- **Tài liệu:** REVIEW_AND_ASSIGNMENT (mới), ARCHITECTURE (yêu cầu 19–21, bản đồ code, API, mục kiến trúc, việc còn lại §8), GROUPS_AND_IMPORT §2–§4, EDITOR_PIPELINE (lớp phủ), AGENT_GUIDE (bản đồ ảnh hưởng, bẫy §8), README, ENGINEERING_POLICY/CLAUDE.md (baseline).
+
+## 2026-11-17 — Hoàn tất bằng nhấp đúp tự đếm ở pointerdown (đường cắt 2 điểm của chế độ trừ không hoàn tất được)
+
+- **Người dùng báo:** chế độ trừ (−) với đúng 2 điểm không hoàn tất được; muốn nhấp đúp lên BẤT KỲ điểm nào của bản nháp là hoàn tất và thực hiện trim.
+- **Nguyên nhân (tái hiện bằng chuỗi nhấp thật trên Chrome headless, trước khi sửa):**
+  1. Chấm điểm rồi nhấp đúp NGAY lên nó bị trình duyệt gộp thành chuỗi clickCount 1-2-3: `dblclick` nổ ở cú thứ hai — lúc điểm vừa sinh ra, giống hệt nhấp đúp ở chỗ trống nên bị guard chặn — còn cú thứ ba không sinh `dblclick`. Thao tác tự nhiên nhất vì thế không bao giờ hoàn tất. Kiểm trình duyệt cũ gửi chuỗi 1 rồi 1-2 (có nghỉ) nên không bắt được.
+  2. Tầm "trúng điểm" 12 px nhỏ hơn tầm neo 14 px: điểm bị neo kéo đi 13 px thì nhấp lại đúng chỗ cũ không được coi là trúng (có lúc còn chấm thêm điểm trùng).
+- **Thay đổi (`editor-canvas.tsx`):** bỏ phụ thuộc vào sự kiện `dblclick`; `onPointerDown` tự đếm số lần nhấp trúng cùng một điểm đã chấm (`draftTouchRef`), hai lần trong `DOUBLE_CLICK_MS` (500 ms) thì gọi `completePolygon`. Cú nhấp TẠO điểm không tính là trúng nên nhấp đúp ở chỗ trống vẫn chỉ để lại một điểm (rule 2026-11-06/2026-11-16 giữ nguyên). Tầm trúng = tầm neo (14 px màn hình). Cú nhấp thừa ngay sau khi hoàn tất tại cùng chỗ bị bỏ qua (không chấm điểm mồ côi). `onDoubleClick` của công cụ vẽ chỉ còn chặn mặc định. Áp dụng chung cho P và Paint (+/−).
+- **Kiến trúc/ảnh hưởng:** chỉ đổi cách nhận biết nhấp đúp trên bản nháp; lõi trim/cắt (`polygon-paint`, `mask-cut`) không đổi. Enter và nút Áp dụng/Hoàn tất như cũ.
+- **Đã kiểm chứng:** 8 kịch bản chuỗi nhấp thật (script dò tạm) — trước sửa 3 ca hỏng, sau sửa đúng cả 8: chấm-nghỉ-nhấp đúp, chấm rồi nhấp đúp ngay (1-2-3), nhấp đúp lên điểm đầu, điểm neo lệch 13 px, polygon trừ ≥ 3 điểm, P 3 điểm, và hai ca nhấp đúp chỗ trống KHÔNG hoàn tất. 4 cổng xanh (359 test / 36 file, build qua); `canvas-browser-check` **81/81** (5 kiểm mới dùng chuỗi clickCount thật).
+- **Chưa kiểm chứng:** editor thật với chuột thật (kiểm trên Chrome headless qua DevTools Protocol), thiết bị cảm ứng/bút. **Bản đang chạy production (`a9444b5`) vẫn còn lỗi này** cho tới khi thay đổi được commit + deploy.
+- **Tài liệu:** EDITOR_PIPELINE (Hợp đồng vẽ polygon), AGENT_GUIDE §8, baseline.
 
 ## 2026-11-17 — Tải riêng ảnh hoàn tất kèm polygon/COCO JSON
 

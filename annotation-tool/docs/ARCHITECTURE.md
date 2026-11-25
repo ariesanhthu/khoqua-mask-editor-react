@@ -61,6 +61,10 @@ Các lệnh trên không thay thế kiểm thử tương tác, race condition tr
     Chi tiết: [EDITOR_PIPELINE.md](EDITOR_PIPELINE.md) “Hợp đồng Paint (công cụ B)”.
 
 18. *(Người dùng xác nhận 2026-11-16)* Thêm nút tải **chỉ ảnh đã hoàn tất**, cạnh nút tải ZIP ở Home, cho mọi vai trò. Gói gồm ảnh gốc và polygon/COCO JSON. Không thực hiện lại phần Trim đã có; kiểm tra phụ thuộc, cập nhật rule/context, chạy test rồi deploy `master`. Áp dụng quyền nhóm hiện có cho gói mới (ADMIN mọi nhóm; người khác các nhóm được giao).
+19. *(Người dùng xác nhận 2026-11-17, ghi theo comment trong code chưa commit của phiên đó)* **Duyệt theo ảnh**: Hoàn tất gán nhãn → `REVIEW` (Cần review); duyệt Đạt → `DONE` (Hoàn thành), Cần sửa → `DRAFT`. Chỉ đổi nhãn trạng thái, không tạo revision/version, không lưu quyết định từng mask; mọi vai trò có quyền xem ảnh đều duyệt được. Chi tiết: [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) §2.
+20. *(Người dùng yêu cầu 2026-11-24)* **Admin giao việc ở mức từng ảnh**, bên cạnh phân công theo nhóm (yêu cầu 9 giữ nguyên). Thiết kế: dùng lại bảng `assignments` có sẵn (không đổi schema), quyền cộng thêm, mỗi ảnh một người phụ trách. Chi tiết: [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) §3.
+21. *(Người dùng yêu cầu 2026-11-24)* Trang duyệt có **nút lớp phủ tách nhanh 2 màu xanh – đỏ** (các mask cùng loại là sắc gần nhau), **chỉ cho u vấu `w*` và vết gợn `r*`**, và **một nút tách theo nóng – lạnh** (mỗi loại một nhóm nhiệt độ màu, từng label một màu khác). Chỉ đổi hiển thị. Giả định về loại nào màu nào ghi ở [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) §1, §5.
+22. *(Người dùng yêu cầu 2026-11-25)* **Tab Review trong editor** cho mọi tài khoản, đổi tại chỗ như một trạng thái trên canvas. Nút "‹ Quay lại" cạnh Hoàn tất & Tiếp theo thành nút **Review**. Hoàn tất & Tiếp theo giữ như cũ (→ Cần review). Người dùng chọn: đổi tab tại chỗ (không sang trang khác), **cho Đạt thẳng từ Bản nháp** (chỉ khi đang giữ khóa), **giữ cả** nút Duyệt ở Home và trang `/review`. Chi tiết: [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) §4b.
 
 ## Stack và phạm vi
 
@@ -107,8 +111,11 @@ Timer heartbeat 30 giây và polling danh sách 8 giây chỉ giữ khóa/đọc
 | `src/components/dataset-import.tsx` | ADMIN tải thư mục lên: chọn dự án, định dạng (mặc định/COCO 1.0), cách chia nhóm, xem trước, nhập từng ảnh |
 | `src/lib/file-groups.ts` | Quy tắc nhóm dùng chung client/server: nhóm theo thư mục con, theo tiền tố tên, kiểm tên |
 | `src/lib/import-plan.ts`, `src/lib/coco-import.ts` | Lập kế hoạch nhập thư mục ở trình duyệt; đổi COCO (polygon/RLE) thành prelabel `POLYGON_SET` |
-| `src/lib/access-service.ts` | Biểu thức SQL quyền theo nhóm (vai trò đọc từ DB), `requireAdminAccount` |
-| `src/lib/group-service.ts` | Danh sách nhóm + tiến độ, phân công, tự chia nhóm ảnh chưa phân nhóm |
+| `src/lib/access-service.ts` | Biểu thức SQL quyền (vai trò đọc từ DB): `FILE_ACCESS_SQL`, `GROUP_ACCESS_SQL`, `PROJECT_ACCESS_SQL` — nhóm được giao **hoặc** ảnh được giao riêng (2026-11-24); `requireAdminAccount` |
+| `src/lib/group-service.ts` | Danh sách nhóm + tiến độ (chỉ đếm ảnh trong quyền người xem), phân công nhóm, tự chia nhóm ảnh chưa phân nhóm |
+| `src/lib/file-assignment-service.ts` | Giao/bỏ giao riêng từng ảnh (`setFileAssignee`, bảng `assignments`, tối đa một người mỗi ảnh) — 2026-11-24 |
+| `src/lib/review-colors.ts` | Màu lớp phủ trang duyệt: Theo label / Xanh – Đỏ / Nóng – Lạnh, chỉ tách `r*`/`w*` (`overlayColor`) — chỉ hiển thị |
+| `src/components/review-workspace.tsx`, `src/app/review/[fileId]/page.tsx` | Trang duyệt chỉ xem: canvas `readOnly`, 3 nút màu lớp phủ, Đạt / Cần sửa; không khóa, không IndexedDB |
 | `src/lib/dataset-import-service.ts` | Nhập một ảnh: kiểm ảnh/mask/prelabel, ghi object store, upsert ảnh + nhóm trong transaction |
 | `src/components/editor-workspace.tsx` | Bootstrap, recovery local, quản lý tab/file, save gate, heartbeat, conflict UI, sidebar |
 | `src/components/editor-canvas.tsx` | Bộ điều khiển tương tác: polygon/node, point, selection, undo/redo, zoom/pan, render/export canvas; có prop `readOnly`. Bốn lớp canvas có cờ bẩn riêng, image pyramid, dirty rectangle, gợi ý neo ([EDITOR_RENDERING.md](EDITOR_RENDERING.md)). Chỉ gọi các hàm hình học thuần bên dưới rồi `commitPolygons` |
@@ -156,7 +163,9 @@ Timer heartbeat 30 giây và polling danh sách 8 giây chỉ giữ khóa/đọc
 | `GET /api/files/:fileId/editor` | Bootstrap cho cả editor và viewer; `readOnly`, `lockedBy`, `lockedBySelf` (khóa thuộc phiên khác của chính tài khoản), `lock: null` nếu không sở hữu token; 403 nếu ảnh ngoài nhóm được giao |
 | `POST /api/files/:fileId/mask` | Upload PNG với khóa hợp lệ |
 | `PATCH /api/files/:fileId/annotation` | Lưu draft, tăng revision, kiểm tra lock/revision trong transaction; `newVersion: true` (tùy chọn) buộc tạo version riêng thay vì gộp vào “Bản lưu” mới nhất của cùng người |
-| `POST /api/files/:fileId/done` | Validate nhiệm vụ, tạo version, tăng revision, nhả khóa |
+| `POST /api/files/:fileId/done` | Validate nhiệm vụ, tạo version, tăng revision, nhả khóa; ảnh sang `REVIEW` (Cần review), chưa phải `DONE` (2026-11-17) |
+| `POST /api/files/:fileId/review` | Duyệt theo ảnh `{ decision: APPROVE \| REJECT, revision }`: `REVIEW` → `DONE`/`DRAFT`; mọi vai trò có quyền xem; 409 revision lệch/không ở REVIEW, 423 người khác đang sửa; không tạo revision/version |
+| `PUT /api/projects/:projectId/files/assignee` | ADMIN giao/bỏ giao riêng 1–500 ảnh đã có nhóm cho một người (`{ fileIds, userId \| null }`); thay người cũ |
 | `POST /api/projects/:projectId/export` | Ghi dữ liệu đã lưu server lên Drive; chỉ gọi từ nút Home |
 | `GET /api/projects/:projectId/export` | Tải ZIP, không ghi Drive |
 | `GET /api/projects/:projectId/export/completed` | Gói ảnh gốc + COCO + polygon JSON, chỉ annotation hiện tại `DONE` và trong quyền nhóm; mọi vai trò đăng nhập; không ghi Drive |
@@ -168,6 +177,31 @@ Authentication dùng JWT/cookie httpOnly; header khóa là `X-Annotation-Lock-To
 ## Nhóm ảnh và phân công (2026-10-25)
 
 Schema chỉ thêm: `file_groups`, `group_assignments`, cột `dataset_files.group_id` (NULL = chưa phân nhóm, gồm toàn bộ dữ liệu có sẵn). Quyền xem tính bằng biểu thức SQL trong `access-service.ts` nhúng vào truy vấn có sẵn (vai trò đọc từ bảng `users`): người không phải ADMIN chỉ thấy project/nhóm/ảnh được giao và bị từ chối bootstrap/xin khóa ảnh khác; heartbeat/lưu/Hoàn tất không kiểm lại phân công để không mất bản đang sửa. Ảnh mới vào hệ thống qua *Đồng bộ nguồn* (như cũ) hoặc qua tải thư mục (định dạng mặc định hoặc COCO 1.0, mỗi thư mục con thành một nhóm). Chi tiết, quy tắc chia nhóm, chuyển đổi COCO và cách xử lý dữ liệu production có sẵn: [GROUPS_AND_IMPORT.md](GROUPS_AND_IMPORT.md).
+
+## Duyệt theo ảnh, phân công theo ảnh, lớp phủ duyệt (2026-11-17 / 2026-11-24)
+
+```mermaid
+flowchart LR
+  Home[Dashboard] -->|ADMIN chọn ảnh + người| AS[PUT /files/assignee]
+  AS --> FA[file-assignment-service] --> T[(assignments)]
+  Home -->|nút Duyệt, ảnh REVIEW| RV[/review/:fileId/]
+  RV -->|GET bootstrap, không khóa| ED[/api/files/:id/editor/]
+  RV --> C[EditorCanvas readOnly + colorMode]
+  C --> RC[review-colors.overlayColor]
+  RV -->|Đạt / Cần sửa + revision| RA[POST /api/files/:id/review]
+  RA --> SVC[annotation-service.reviewAnnotation] --> DB[(dataset_files, annotations)]
+  EW[/editor/:fileId tab Review/] -->|Đạt / Cần sửa + lock token| RA
+  EW --> RCC[review-color-controls]
+  RV --> RCC
+```
+
+- Trạng thái ảnh thêm `REVIEW` giữa Hoàn tất gán nhãn và Hoàn thành (`AnnotationState`, `AnnotationStatus`). Hoàn tất → `REVIEW`; chỉ duyệt Đạt mới thành `DONE`.
+- Quyền cộng thêm: ADMIN ∨ nhóm được giao ∨ ảnh được giao riêng. Ba biểu thức trong `access-service.ts` giữ hai tham số `(userId, userId)` nên chỗ gọi không đổi; tiến độ nhóm chỉ đếm ảnh trong quyền.
+- Không đổi schema DB (bảng `assignments` có sẵn từ đầu, nay mới có luồng ghi). Không đổi save policy, mô hình khóa, export/Drive.
+- Lớp phủ duyệt chỉ đổi màu hiển thị. Tab Gán nhãn của editor giữ chế độ Theo label duy nhất; tab Review (2026-11-25) có đủ 3 chế độ.
+- Tab Review trong editor (2026-11-25): không thêm route hay schema. `reviewAnnotation` nhận thêm lock token tùy chọn, có token hợp lệ thì cho Đạt thẳng `DRAFT → DONE`.
+
+Thiết kế, giả định chưa xác nhận và kiểm chứng: [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md).
 
 ## Hợp đồng annotation u vấu
 
@@ -314,6 +348,14 @@ Các điểm sau được ghi nhận để agent tiếp tục; **chưa sửa/xá
 - Đỉnh của mask khác nằm giữa cạnh (chỗ nối chữ T) được dùng làm đỉnh của polygon mới nhưng không chèn vào mask có cạnh đó; nếu hai mask cũ hở nhau vài px, biên mới có thể lệch tối đa ~2.5 px so với một trong hai.
 - Lớp phủ màu theo label/độ mờ viền (cùng nhánh): canvas đã kiểm bằng Chrome headless (cảnh `?labels=1`); thẻ tùy chọn trong `editor-workspace.tsx` chỉ được kiểm bằng ảnh chụp trang tĩnh dựng từ CSS thật, **chưa** thử trong editor thật (cần đăng nhập + DB), ảnh khổ qua thật, Safari/Firefox. Chưa có chú giải (legend) màu ↔ label trong panel.
 - Các hàm của thuật toán cũ không còn được canvas dùng nhưng vẫn export và có test: `getSharedBoundaryAutofillPath`, `getCachedCollectivePolygon`, `getConnectedPolygonCluster`, `arePolygonsConnected`, `polygonDistanceToDraft`. Xóa chúng cần người dùng đồng ý (xóa kèm test).
+
+### 8. Duyệt theo ảnh, phân công theo ảnh, lớp phủ duyệt (2026-11-24)
+
+- Giả định chờ người dùng xác nhận: `r*` đỏ/nóng, `w*` xanh dương/lạnh; một người phụ trách mỗi ảnh; chỉ giao ảnh đã có nhóm; ảnh `REVIEW` **có** nằm trong ZIP đầy đủ/Drive (tài liệu cũ ghi ngược, đã sửa 2026-11-25 theo `export-service.ts`). Xem [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) §1, §8.
+- Không lưu người duyệt/thời điểm duyệt (đúng yêu cầu 19: chỉ đổi nhãn trạng thái).
+- `canvas-browser-check` 83/84: kiểm tra đường cắt thứ hai (phần nhấp đúp 2026-11-17) đỏ vì guard bỏ cú nhấp trong 500 ms sau khi hoàn tất; cần người dùng chọn nới nhịp script hay thu hẹp guard.
+- Chưa thử trên dữ liệu thật/Postgres thật/mobile; chưa commit, chưa deploy.
+- Kiểm chứng và phần chưa kiểm chứng: [REVIEW_AND_ASSIGNMENT.md](REVIEW_AND_ASSIGNMENT.md) §7.
 
 ## Môi trường kiểm thử và lưu ý cho agent sau
 

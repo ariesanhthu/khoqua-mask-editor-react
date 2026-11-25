@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation';
 import type {
   AnnotationPolygon,
+  AnnotationState,
   ApiError,
   BreakpointAnnotation,
   EditorBootstrap,
@@ -12,6 +13,7 @@ import type {
   HumanAction,
   LocalDraft,
   MaskOperation,
+  ReviewDecision,
   SyncState,
 } from '@/types';
 import {
@@ -19,6 +21,7 @@ import {
   getFiles,
   getEditorData,
   releaseLock,
+  reviewFile,
   saveDraft,
   sendHeartbeat,
   submitDone,
@@ -27,9 +30,11 @@ import { deleteLocalDraft, draftKey, getLocalDraft, putLocalDraft } from '@/lib/
 import { labelsForKind, nextLabel, polygonLabelKind, type PolygonLabelKind } from '@/lib/polygon-labels';
 import { parseWebPolygonImport } from '@/lib/web-import';
 import type { PaintMode } from '@/lib/polygon-paint';
+import { reviewLabelSummary, type OverlayColorMode } from '@/lib/review-colors';
 import { PAINT_ICON_PATHS } from './paint-mode-icon';
 import { formatTime, VersionFacts, VersionPreview } from './version-compare';
 import CanvasMinimap from './canvas-minimap';
+import { ANNOTATION_STATE_LABELS, readStoredColorMode, ReviewColorModes, ReviewLegend, storeColorMode } from './review-color-controls';
 import EditorCanvas, {
   type CanvasViewInfo,
   type EditorCanvasHandle,
@@ -40,6 +45,8 @@ import EditorCanvas, {
 
 type SaveStatus = 'LOCAL' | 'SAVED' | 'SAVING' | 'OFFLINE' | 'SYNCING' | 'CONFLICT';
 type WorkspaceStep = 'mask' | 'warts';
+/** Tab của panel phải (người dùng xác nhận 2026-11-25): Gán nhãn hoặc Review, đổi tại chỗ trên cùng canvas. */
+export type EditorPanelTab = 'annotate' | 'review';
 
 interface EditorSeed {
   key: number;
@@ -83,7 +90,7 @@ async function claimNextAvailableFile(projectId: string, currentFileId: string, 
     });
     const candidates = result.items
       .filter((file) => file.id !== currentFileId
-        && file.annotationState !== 'DONE'
+        && file.annotationState !== 'DONE' && file.annotationState !== 'REVIEW'
         && file.assetState === 'READY'
         && (!file.assignment || file.assignment.userId === userId))
       .sort((left, right) => {
@@ -105,7 +112,7 @@ async function claimNextAvailableFile(projectId: string, currentFileId: string, 
   }
 }
 
-export default function EditorWorkspace({ fileId, userId, displayName }: { fileId: string; userId: string; displayName: string }) {
+export default function EditorWorkspace({ fileId, userId, displayName, initialTab = 'annotate' }: { fileId: string; userId: string; displayName: string; initialTab?: EditorPanelTab }) {
   const router = useRouter();
   const canvasRef = useRef<EditorCanvasHandle>(null);
   const [bootstrap, setBootstrap] = useState<EditorBootstrap | null>(null);
@@ -126,6 +133,13 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     return stored && ['polygon', 'rectangle', 'circle', 'anchor', 'select', 'cut', 'brush', 'pan'].includes(stored) ? stored : 'select';
   });
   const [workspaceStep, setWorkspaceStep] = useState<WorkspaceStep>('mask');
+  // Tab Review (người dùng xác nhận 2026-11-25): mọi tài khoản đổi qua lại được; canvas chỉ xem + màu lớp phủ duyệt,
+  // kết luận Đạt / Cần sửa ngay trong editor. `fileState` là trạng thái ảnh trên máy chủ (lưu xong luôn là Bản nháp).
+  const [panelTab, setPanelTab] = useState<EditorPanelTab>(initialTab);
+  const [fileState, setFileState] = useState<AnnotationState>('UNSTARTED');
+  const [colorMode, setColorMode] = useState<OverlayColorMode>(readStoredColorMode);
+  const [deciding, setDeciding] = useState<ReviewDecision | null>(null);
+  const [findingNextReview, setFindingNextReview] = useState(false);
   const [opacity, setOpacity] = useState(() => {
     if (typeof window === 'undefined') return 0.5;
     const stored = Number(localStorage.getItem('mask-opacity'));
@@ -274,6 +288,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       setDraftDecisionPending(false);
       setStatus('SAVED');
       setWorkspaceStep('mask');
+      setPanelTab(initialTab);
+      setDeciding(null);
       setTool('pan');
       try {
         let lock = null;
@@ -283,6 +299,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         if (cancelled) return;
         const canEdit = Boolean(lock && !data.readOnly);
         setReadOnly(!canEdit);
+        setFileState(data.annotation?.status ?? 'UNSTARTED');
         if (!canEdit) setToast(`Chỉ xem · ${data.lockedBy || 'Phiên khác'} đang chỉnh sửa.`);
         else if (lock?.takenOver) setToast('Đã nhận quyền sửa từ phiên khác của bạn (tab hoặc thiết bị khác). Phiên đó sẽ không ghi đè được bản này.');
         revisionRef.current = lock?.baseRevision ?? data.annotation?.revision ?? 0;
@@ -328,7 +345,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
       }
     })();
     return () => { cancelled = true; };
-  }, [createServerSeed, fileId, userId, reloadKey]);
+  }, [createServerSeed, fileId, initialTab, userId, reloadKey]);
 
   // Ban nhap chi nen mang co DIRTY khi that su con thay doi chua gui len may chu.
   // Neu da dong bo xong ma van ghi DIRTY thi lan mo file sau se bao xung dot gia.
@@ -410,6 +427,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         forceNewVersionRef.current = false;
         revisionRef.current = result.revision;
         syncedVersionRef.current = syncingVersion;
+        setFileState('DRAFT');
         await persistLocal(dirtyVersionRef.current === syncingVersion ? 'SYNCED' : 'DIRTY');
         setStatus(dirtyVersionRef.current === syncingVersion ? 'SAVED' : 'SAVING');
         return true;
@@ -558,6 +576,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         const serverSeed = createServerSeed(latest);
         const next = { humanAction: serverSeed.humanAction, breakpoints: serverSeed.breakpoints, maskOperations: serverSeed.operations, polygons: polygonsFromOperations(serverSeed.operations) };
         setBootstrap(latest);
+        setFileState(latest.annotation?.status ?? 'UNSTARTED');
         setSeed(serverSeed);
         snapshotRef.current = next; setSnapshot(next);
         setToast(`Đã tải bản mới nhất từ máy chủ (revision ${latestRevision}).`);
@@ -610,7 +629,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
         annotation: { segmentation: { wartPoints: synced.breakpoints, humanAction: synced.humanAction, maskOperations: synced.maskOperations }, breakpoints: legacyBreakpointsRef.current },
       });
       await deleteLocalDraft(bootstrap!.file.projectId, fileId, userId);
-      setToast('Đang mở nhiệm vụ khả dụng tiếp theo…');
+      // Hoàn tất gán nhãn đưa ảnh sang Cần review (người dùng xác nhận 2026-11-17), chưa phải Hoàn thành.
+      setToast('Đã gửi ảnh sang Cần review. Đang mở nhiệm vụ khả dụng tiếp theo…');
       let nextFileId: string | null = null;
       try {
         nextFileId = await claimNextAvailableFile(bootstrap!.file.projectId, fileId, userId);
@@ -640,6 +660,7 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     legacyBreakpointsRef.current = latest.annotation?.breakpoints ?? emptyBreakpoints;
     setReadOnly(latest.readOnly);
     setBootstrap(latest);
+    setFileState(latest.annotation?.status ?? 'UNSTARTED');
     await deleteLocalDraft(bootstrap.file.projectId, fileId, userId);
     const serverSeed = createServerSeed(latest);
     setSeed({ ...serverSeed, key: Date.now() });
@@ -755,6 +776,8 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
     // Paint (brush) sửa thẳng trên polygon từ 2026-11-12 nên cũng cần polygon sẵn sàng như các công cụ polygon khác.
     if (!readOnly && !conflictRef.current && (['select', 'polygon', 'rectangle', 'circle', 'anchor', 'cut', 'brush'].includes(nextTool)) && nextStep === 'mask') canvasRef.current?.beginPolygonEdit();
     if (nextTool === 'brush') setShowMask(true);
+    // Chọn một công cụ vẽ/sửa (kể cả bằng phím tắt) khi đang ở tab Review thì quay về Gán nhãn.
+    if (nextTool !== 'pan') setPanelTab('annotate');
     setTool(readOnly ? 'pan' : nextTool);
     setWorkspaceStep(nextStep);
     localStorage.setItem('editor-tool', nextTool);
@@ -810,7 +833,75 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   };
   */
   const returnToMaskStep = async () => {
+    setPanelTab('annotate');
     await selectTool(tool === 'point' ? 'pan' : tool, 'mask');
+  };
+  // ── Tab Review trong editor (người dùng xác nhận 2026-11-25) ──
+  // Đổi tab tại chỗ, không đổi dữ liệu. Phần sửa chưa gửi được lưu ngay để trạng thái/revision ở panel khớp bản đang xem.
+  const openReviewTab = async () => {
+    if (navigating || history.local) return;
+    await canvasRef.current?.flushPendingEdits();
+    setPanelTab('review');
+    if (!readOnly && !conflictRef.current) void flushExplicitly();
+  };
+  const chooseColorMode = (mode: OverlayColorMode) => {
+    setColorMode(mode);
+    setShowMask(true);
+    storeColorMode(mode);
+  };
+  /** Ảnh Cần review kế tiếp không ai đang mở (trong phạm vi được giao), như nút cùng tên ở trang /review. */
+  const findNextReviewFile = async () => {
+    const result = await getFiles(bootstrap.file.projectId, { annotationState: 'REVIEW', lockState: 'AVAILABLE', page: '1', pageSize: '100' });
+    return result.items.find((file) => file.id !== fileId && file.assetState === 'READY')?.id ?? null;
+  };
+  const openNextReview = async () => {
+    if (navigating || findingNextReview) return;
+    setFindingNextReview(true);
+    try {
+      const nextId = await findNextReviewFile();
+      if (nextId) await navigateTo(`/editor/${nextId}?tab=review`);
+      else setToast('Không còn ảnh nào chờ duyệt (trong phạm vi bạn được giao) mà không ai đang mở.');
+    } catch {
+      setToast('Không tìm được ảnh chờ duyệt tiếp theo. Hãy thử lại.');
+    } finally {
+      setFindingNextReview(false);
+    }
+  };
+  // Đạt: REVIEW → Hoàn thành, hoặc thẳng từ Bản nháp (server chỉ cho khi đang giữ khóa hợp lệ), rồi mở ảnh chờ duyệt
+  // kế tiếp ở tab Review. Cần sửa: REVIEW → Bản nháp, ở lại ảnh này và về tab Gán nhãn để sửa ngay.
+  const decideReview = async (decision: ReviewDecision) => {
+    if (readOnly || navigating || deciding || transitioningFileRef.current || conflictRef.current) return;
+    await canvasRef.current?.flushPendingEdits();
+    if (decision === 'APPROVE' && snapshotRef.current.humanAction === 'UNTOUCHED') {
+      setToast('Hãy chấp nhận mặt nạ gợi ý hoặc chỉnh sửa mặt nạ trước.'); return;
+    }
+    setDeciding(decision);
+    try {
+      // Kết luận gắn với đúng revision vừa lưu: còn phần sửa treo thì lưu trước (lưu xong ảnh là Bản nháp).
+      if (!await flushExplicitly()) return;
+      const result = await reviewFile(fileId, decision, revisionRef.current);
+      setFileState(result.annotationState);
+      if (decision === 'REJECT') {
+        setPanelTab('annotate');
+        setToast('Đã trả về Cần sửa: ảnh về Bản nháp. Sửa ngay tại đây rồi bấm Hoàn tất để gửi duyệt lại.');
+        return;
+      }
+      let nextId: string | null = null;
+      try { nextId = await findNextReviewFile(); } catch { /* Không tìm được thì ở lại ảnh vừa duyệt. */ }
+      if (nextId) {
+        setToast('Đã duyệt Đạt. Đang mở ảnh chờ duyệt tiếp theo…');
+        await navigateTo(`/editor/${nextId}?tab=review`);
+      } else {
+        setToast('Đã duyệt Đạt: ảnh chuyển sang Hoàn thành. Không còn ảnh chờ duyệt nào đang trống.');
+      }
+    } catch (error) {
+      const apiError = error as ApiError;
+      setToast(apiError.message || 'Không lưu được kết luận duyệt. Hãy thử lại.');
+      const serverState = apiError.annotationState;
+      if (apiError.code === 'NOT_IN_REVIEW' && typeof serverState === 'string') setFileState(serverState as AnnotationState);
+    } finally {
+      setDeciding(null);
+    }
   };
   // Hoan tat mot polygon chi la mot thao tac ve: khong gui server (xem onEditorChange).
   const completePolygon = () => {
@@ -823,6 +914,18 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
   };
   */
   const maskConfirmed = snapshot.humanAction !== 'UNTOUCHED';
+  const reviewing = panelTab === 'review';
+  const reviewSummary = reviewing ? reviewLabelSummary(snapshot.polygons) : { ridge: { masks: 0, labels: [] }, wart: { masks: 0, labels: [] }, other: 0 };
+  // Đạt được cả từ Bản nháp (người dùng xác nhận 2026-11-25); ảnh đã Hoàn thành thì chỉ còn sang ảnh chờ duyệt kế tiếp.
+  const canApprove = !readOnly && fileState !== 'DONE';
+  const canReject = !readOnly && fileState === 'REVIEW' && deciding === null && !navigating && status !== 'SYNCING' && status !== 'CONFLICT';
+  const reviewHint = readOnly
+    ? `Chỉ xem: ${bootstrap.lockedBySelf ? 'bạn đang mở ảnh này ở phiên khác (bấm "Sửa tại đây" để kết luận ở tab này)' : `${bootstrap.lockedBy || 'phiên khác'} đang sửa ảnh này`} nên chưa kết luận được ở đây.`
+    : fileState === 'REVIEW'
+      ? 'Ảnh đang chờ duyệt. Đạt & Tiếp theo: sang Hoàn thành rồi mở ảnh chờ duyệt kế tiếp. Cần sửa: trả về Bản nháp để sửa ngay tại đây.'
+      : fileState === 'DONE'
+        ? 'Ảnh đã Hoàn thành. Muốn sửa: về Gán nhãn, sửa rồi bấm Hoàn tất để gửi duyệt lại.'
+        : 'Ảnh chưa gửi duyệt. Đạt & Tiếp theo sẽ lưu rồi chuyển thẳng sang Hoàn thành, không qua bước Cần review.';
   const polygonCount = snapshot.polygons.length;
   const selectedPolygons = snapshot.polygons.filter((polygon) => selectedPolygonIds.includes(polygon.id));
   /* Wart task temporarily hidden.
@@ -881,10 +984,10 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
             {queueError ? <p role="status">{queueError}</p> : null}
             {queue.map((file) => <button key={file.id} aria-current={file.id === fileId ? 'page' : undefined}
               disabled={navigating || status === 'SYNCING' || file.assetState === 'ERROR'} title={file.externalKey}
-              onClick={() => { if (file.id !== fileId) void navigateTo(`/editor/${file.id}`); }}>
+              onClick={() => { if (file.id !== fileId) void navigateTo(`/editor/${file.id}${panelTab === 'review' ? '?tab=review' : ''}`); }}>
               <strong>{file.externalKey}</strong>
               <small>{file.id === fileId ? (readOnly ? 'Đang xem' : 'Đang sửa') : file.lock.state === 'LOCKED' ? (file.lock.userId === userId ? 'Bạn đang mở ở phiên khác' : `Chỉ xem · ${file.lock.displayName}`) : file.assetState === 'ERROR' ? 'Thiếu dữ liệu' : 'Có thể làm'}</small>
-              <span>{({ UNSTARTED: 'Chưa làm', DRAFT: 'Bản nháp', DONE: 'Hoàn tất' })[file.annotationState]}</span>
+              <span>{({ UNSTARTED: 'Chưa làm', DRAFT: 'Bản nháp', REVIEW: 'Cần review', DONE: 'Hoàn thành' })[file.annotationState]}</span>
             </button>)}
           </nav>
           <div className="queue-pagination sidebar-label">
@@ -906,11 +1009,12 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
           <div className="canvas-statusbar">
             <span className="canvas-file"><span className="queue-dot" />{bootstrap.file.externalKey}</span>
             {readOnly ? <span className="save-indicator">Chỉ xem · {bootstrap.lockedBySelf ? 'bạn đang mở ở phiên khác' : bootstrap.lockedBy || 'Khóa không thuộc phiên này'}</span> : <SaveIndicator status={status} />}
+            {reviewing ? <span className="save-indicator review-mode-chip" title="Tab Review: chỉ xem, đổi màu lớp phủ và kết luận Đạt / Cần sửa">Review · chỉ xem</span> : null}
             {readOnly && (bootstrap.lockedBySelf || !bootstrap.lockedBy) ? <button disabled={navigating} onClick={editHere} title="Nhận lại quyền sửa từ phiên khác của chính bạn">Sửa tại đây</button> : null}
             <button disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} onClick={() => void saveExplicitly()}>Lưu</button>
           </div>
 
-          {workspaceStep === 'mask' && tool === 'brush' ? <fieldset className="brush-toolbar" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} aria-label="Chế độ Paint: nối hoặc trừ mask bằng polygon">
+          {!reviewing && workspaceStep === 'mask' && tool === 'brush' ? <fieldset className="brush-toolbar" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} aria-label="Chế độ Paint: nối hoặc trừ mask bằng polygon">
             {/* Icon + phím cho biết đang nối (+) hay trừ (−) (người dùng yêu cầu 2026-11-12). */}
             <div className="brush-mode-switch" role="group" aria-label="Chế độ Paint">
               <button type="button" className={paintMode === 'add' ? 'active' : ''} aria-pressed={paintMode === 'add'} title="Nối vào mask (=)" onClick={() => setPaintMode('add')}>
@@ -927,8 +1031,10 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               <button aria-label="Phóng to" title="Phóng to" onClick={() => canvasRef.current?.zoomBy(1.2)}>＋</button>
               <span ref={zoomLabelRef}>100%</span>
               <button aria-label="Thu nhỏ" title="Thu nhỏ" onClick={() => canvasRef.current?.zoomBy(1 / 1.2)}>−</button>
+              {/* Tab Review ẩn thanh công cụ vẽ nên đưa nút Vừa khung lên đây. */}
+              {reviewing ? <button aria-label="Vừa khung hình" title="Vừa khung hình" onClick={() => canvasRef.current?.fit()}>⤢</button> : null}
             </div>
-            <fieldset className="floating-toolbar" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} aria-label="Công cụ chú thích">
+            {reviewing ? null : <fieldset className="floating-toolbar" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} aria-label="Công cụ chú thích">
               <ToolbarButton active={tool === 'select'} label="Chọn / chỉnh sửa (V)" icon="cursor" onClick={() => selectTool('select', 'mask')} />
               <ToolbarButton active={tool === 'pan'} label="Di chuyển ảnh (H)" icon="hand" onClick={() => selectTool('pan')} />
               <ToolbarButton active={tool === 'polygon'} label="Vẽ polygon (P)" icon="polygon" onClick={() => selectTool('polygon', 'mask')} />
@@ -945,24 +1051,31 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               <span className="toolbar-divider" />
               <ToolbarButton label="Xóa lựa chọn (Delete)" icon="trash" danger onClick={() => workspaceStep === 'warts' ? canvasRef.current?.deleteSelectedPoint() : canvasRef.current?.deleteSelection()} />
               <ToolbarButton label="Vừa khung hình" icon="fit" onClick={() => canvasRef.current?.fit()} />
-            </fieldset>
+            </fieldset>}
           </div>
 
           <EditorCanvas key={seed.key} ref={canvasRef} width={bootstrap.file.width} height={bootstrap.file.height}
             imageUrl={bootstrap.assets.imageUrl} predictionUrl={bootstrap.assets.predictionMaskUrl}
             currentMaskUrl={bootstrap.assets.currentMaskUrl} localMaskBlob={seed.localMaskBlob}
             initialHumanAction={seed.humanAction} initialBreakpoints={seed.breakpoints} initialOperations={seed.operations}
-            readOnly={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating} tool={readOnly ? 'pan' : tool} maskOpacity={opacity} showMask={showMask} magnet={magnet}
+            readOnly={readOnly || reviewing || status === 'CONFLICT' || status === 'SYNCING' || navigating} tool={readOnly || reviewing ? 'pan' : tool} maskOpacity={opacity} showMask={showMask} magnet={magnet}
+            colorMode={reviewing ? colorMode : 'label'}
             paintMode={paintMode} brightness={brightness} edgeStrength={edgeStrength}
             onHistoryChange={setHistory} onPolygonComplete={onPolygonComplete} onViewChange={setCanvasView}
             onChange={onEditorChange} onSelectionChange={setSelectedPolygonIds} onReady={onCanvasReady} onMessage={setToast} onZoomChange={updateZoomLabel} />
         </section>
 
         {rightCollapsed ? <aside className="right-sidebar-rail"><button aria-label="Mở sidebar phải" title="Mở thiết lập nhiệm vụ" onClick={() => setRightCollapsed(false)}><Icon name="chevron-left" /></button></aside> : <aside className="control-panel">
-          <div className="control-panel-title"><span>Thiết lập nhiệm vụ</span><button aria-label="Thu gọn sidebar phải" title="Thu gọn sidebar" onClick={() => setRightCollapsed(true)}><Icon name="chevron-right" /></button></div>
-          <div className="workflow-tabs" style={{ gridTemplateColumns: '1fr' }} role="tablist" aria-label="Các bước chú thích">
-            <button role="tab" aria-selected={workspaceStep === 'mask'} className={workspaceStep === 'mask' ? 'active' : maskConfirmed ? 'complete' : ''} onClick={() => void returnToMaskStep()}>
+          <div className="control-panel-title"><span>{reviewing ? 'Duyệt ảnh' : 'Thiết lập nhiệm vụ'}</span><button aria-label="Thu gọn sidebar phải" title="Thu gọn sidebar" onClick={() => setRightCollapsed(true)}><Icon name="chevron-right" /></button></div>
+          <div className="workflow-tabs" role="tablist" aria-label="Gán nhãn hoặc duyệt ảnh">
+            <button role="tab" aria-selected={!reviewing && workspaceStep === 'mask'} className={!reviewing && workspaceStep === 'mask' ? 'active' : maskConfirmed ? 'complete' : ''} onClick={() => void returnToMaskStep()}>
               <span>{maskConfirmed ? '✓' : '1'}</span> Vùng chọn
+            </button>
+            {/* Tab Review (người dùng xác nhận 2026-11-25): mọi tài khoản đổi qua lại tại chỗ. */}
+            <button role="tab" aria-selected={reviewing} className={reviewing ? 'active' : fileState === 'DONE' ? 'complete' : ''}
+              disabled={navigating || history.local} title={history.local ? 'Hoàn tất hoặc hủy (Esc) polygon đang vẽ trước khi sang Review' : 'Xem mask theo màu duyệt và kết luận Đạt / Cần sửa'}
+              onClick={() => void openReviewTab()}>
+              <span>{fileState === 'DONE' ? '✓' : '2'}</span> Review
             </button>
             {/* Wart step temporarily hidden.
             <button role="tab" aria-selected={workspaceStep === 'warts'} className={workspaceStep === 'warts' ? 'active' : breakpointConfirmed ? 'complete' : ''} onClick={() => void continueToBreakpoints()}>
@@ -971,7 +1084,31 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
             */}
           </div>
 
-          <fieldset className="control-panel-scroll" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating}>
+          {reviewing ? <div className="control-panel-scroll editor-review-panel">
+            <section className="review-facts">
+              <dl>
+                <div><dt>Trạng thái</dt><dd><span className={`state-badge ${fileState.toLowerCase()}`}>{ANNOTATION_STATE_LABELS[fileState]}</span></dd></div>
+                <div><dt>Vết gợn (r*)</dt><dd>{reviewSummary.ridge.masks} mask · {reviewSummary.ridge.labels.length} label</dd></div>
+                <div><dt>U vấu (w*)</dt><dd>{reviewSummary.wart.masks} mask · {reviewSummary.wart.labels.length} label</dd></div>
+                {reviewSummary.other ? <div><dt>Label khác</dt><dd>{reviewSummary.other} mask</dd></div> : null}
+              </dl>
+            </section>
+            <section className="review-overlay" aria-labelledby="editor-review-overlay-title">
+              <div className="section-title-row"><p id="editor-review-overlay-title">Màu lớp phủ</p><span>Chỉ hiển thị</span></div>
+              <ReviewColorModes mode={colorMode} onChange={chooseColorMode} />
+              <ReviewLegend summary={reviewSummary} mode={colorMode} />
+            </section>
+            <section className="review-decision" aria-labelledby="editor-review-decision-title">
+              <div className="section-title-row"><p id="editor-review-decision-title">Kết luận</p><span>Theo cả ảnh</span></div>
+              <p className="review-note">{reviewHint}</p>
+              <button className="button ghost danger wide" type="button" disabled={!canReject} onClick={() => void decideReview('REJECT')}>
+                {deciding === 'REJECT' ? 'Đang lưu…' : 'Cần sửa · trả về Bản nháp'}
+              </button>
+            </section>
+            <div className={`panel-message ${toast ? 'has-message' : ''}`} role="status" aria-live="polite">
+              {toast ? <><span>{toast}</span><button type="button" aria-label="Ẩn thông báo" title="Ẩn thông báo" onClick={() => setToast('')}>×</button></> : <span>Tab Review chỉ để xem: kéo để di chuyển, cuộn để zoom. Chọn một công cụ vẽ (V, P, B…) hoặc bấm ‹ Gán nhãn để sửa tiếp.</span>}
+            </div>
+          </div> : <fieldset className="control-panel-scroll" disabled={readOnly || status === 'CONFLICT' || status === 'SYNCING' || navigating}>
             {workspaceStep === 'mask' ? <>
               {snapshot.humanAction === 'UNTOUCHED' && polygonCount === 0 ? <section className="decision-card">
                 <h2>Mask ban đầu đã sẵn sàng</h2>
@@ -1038,10 +1175,24 @@ export default function EditorWorkspace({ fileId, userId, displayName }: { fileI
               </button>
             </>}
             */}
-          </fieldset>
+          </fieldset>}
           <div className="panel-actions">
-            <button className="button ghost" onClick={() => void goBack()}>‹ Quay lại</button>
-            <button className="button primary" disabled={readOnly || !ready || history.local || status === 'SYNCING' || status === 'CONFLICT' || navigating} onClick={() => void finish()}>Hoàn tất &amp; Tiếp theo <span aria-hidden="true">→</span></button>
+            {/* "‹ Quay lại" đổi thành nút Review (người dùng xác nhận 2026-11-25); về danh sách vẫn bằng icon thư mục
+                ở sidebar trái. Ở tab Review, nút chính là Đạt & Tiếp theo thay cho Hoàn tất: Hoàn tất trên ảnh vừa duyệt
+                sẽ đưa ảnh về lại Cần review. */}
+            {reviewing ? <>
+              <button className="button ghost" disabled={navigating || deciding !== null} onClick={() => void returnToMaskStep()}>‹ Gán nhãn</button>
+              {canApprove
+                ? <button className="button primary" disabled={!ready || deciding !== null || status === 'SYNCING' || status === 'CONFLICT' || navigating} onClick={() => void decideReview('APPROVE')}>
+                  {deciding === 'APPROVE' ? 'Đang lưu…' : <>Đạt &amp; Tiếp theo <span aria-hidden="true">→</span></>}
+                </button>
+                : <button className="button primary" disabled={navigating || findingNextReview} onClick={() => void openNextReview()}>
+                  {findingNextReview ? 'Đang tìm…' : <>Ảnh cần duyệt tiếp theo <span aria-hidden="true">→</span></>}
+                </button>}
+            </> : <>
+              <button className="button ghost" disabled={navigating || history.local} title={history.local ? 'Hoàn tất hoặc hủy (Esc) polygon đang vẽ trước khi sang Review' : 'Sang tab Review: xem mask theo màu duyệt và kết luận Đạt / Cần sửa ngay tại đây'} onClick={() => void openReviewTab()}>Review</button>
+              <button className="button primary" disabled={readOnly || !ready || history.local || status === 'SYNCING' || status === 'CONFLICT' || navigating} onClick={() => void finish()}>Hoàn tất &amp; Tiếp theo <span aria-hidden="true">→</span></button>
+            </>}
           {/* Original two-step actions temporarily hidden.
           {workspaceStep === 'mask' ? <>
             <button className="button ghost" onClick={() => void goBack()}>‹ Quay lại</button>

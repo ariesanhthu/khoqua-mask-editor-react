@@ -35,6 +35,7 @@ export async function listGroups(projectId: string, userId: string): Promise<Fil
         COUNT(df.id) AS total,
         COUNT(CASE WHEN df.annotation_state = 'UNSTARTED' THEN 1 END) AS unstarted,
         COUNT(CASE WHEN df.annotation_state = 'DRAFT' THEN 1 END) AS draft,
+        COUNT(CASE WHEN df.annotation_state = 'REVIEW' THEN 1 END) AS review,
         COUNT(CASE WHEN df.annotation_state = 'DONE' THEN 1 END) AS done,
         COUNT(CASE WHEN fl.expires_at > ? THEN 1 END) AS locked
       FROM file_groups g
@@ -66,6 +67,7 @@ export async function listGroups(projectId: string, userId: string): Promise<Fil
     total: Number(row.total),
     unstarted: Number(row.unstarted),
     draft: Number(row.draft),
+    review: Number(row.review),
     done: Number(row.done),
     locked: Number(row.locked),
     assignees: byGroup.get(String(row.id)) ?? [],

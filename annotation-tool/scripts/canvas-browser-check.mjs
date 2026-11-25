@@ -358,6 +358,39 @@ try {
     field(s.status, 'masks') === '7' && r2Split.length === 2 && r2Split[0].id !== r2Split[1].id && r2Split.some((p) => p.id === '1'), `${s.status} | ${JSON.stringify(r2Split)} | ${s.message}`);
   await ctrl('z'); await sleep(300);
   check('undo restores the mask split by combined cuts', (await evaluate(masksOf)) === 6);
+  // CHUỖI NHẤP THẬT (sửa 2026-11-17): chấm điểm rồi nhấp đúp ngay lên nó bị trình duyệt gộp thành clickCount
+  // 1-2-3 (dblclick nổ ở cú thứ hai, cú thứ ba không có dblclick). Các kiểm trên dùng 1 rồi 1-2 nên không bắt được
+  // lỗi "không hoàn tất được đường cắt 2 điểm". Tọa độ tính lại trước mỗi cú nhấp vì thông báo đẩy canvas.
+  const multiClickImage = async (x, y, counts) => {
+    for (const clickCount of counts) { const p = (await imageToScreen(800, 500))(x, y); await click(p.x, p.y, { clickCount }); await sleep(90); }
+    await sleep(350);
+  };
+  await clickImage(545, 300);
+  await multiClickImage(605, 300, [1, 2, 3]);
+  s = await state();
+  check('real double-click right after placing the 2nd point (click counts 1-2-3) applies the cut',
+    field(s.status, 'masks') === '7' && field(s.history, 'local') === 'false', `${s.status} | ${s.history} | ${s.message}`);
+  await ctrl('z'); await sleep(300);
+  // Nhấp đúp ở chỗ MỚI (1-2) chỉ chấm điểm thứ hai, không tự áp dụng (rule "nhấp đúp chỗ trống không hoàn tất").
+  await clickImage(545, 330);
+  await multiClickImage(605, 330, [1, 2]);
+  s = await state();
+  check('double-click on a NEW spot only places the point (no auto-apply)', field(s.status, 'masks') === '6' && field(s.history, 'local') === 'true', `${s.status} | ${s.history}`);
+  // …và nhấp đúp lên điểm ĐẦU của cùng bản nháp thì áp dụng (bất kỳ điểm nào của bản nháp).
+  await multiClickImage(545, 330, [1, 2]);
+  s = await state();
+  check('double-click on the FIRST point of the 2-point draft applies the cut', field(s.status, 'masks') === '7' && field(s.history, 'local') === 'false', `${s.status} | ${s.history} | ${s.message}`);
+  await ctrl('z'); await sleep(300);
+  // Điểm chấm cách biên 13 px màn hình bị neo kéo đi xa hơn tầm trúng 12 px cũ: nhấp đúp lại đúng chỗ đã nhấp vẫn áp dụng.
+  const offBoundary = 600 + 13 / ((await imageToScreen(800, 500))(100, 0).x - (await imageToScreen(800, 500))(0, 0).x) * 100;
+  await clickImage(545, 360);
+  await clickImage(offBoundary, 360); await sleep(700);
+  await multiClickImage(offBoundary, 360, [1, 2]);
+  s = await state();
+  check('double-click where a snapped point was clicked (13 px off the boundary) still applies the cut', field(s.status, 'masks') === '7', `${s.status} | ${s.history} | ${s.message}`);
+  await ctrl('z'); await sleep(300);
+  await escape(); await sleep(150);
+  check('real-click cut scenarios leave 6 masks after undo', (await evaluate(masksOf)) === 6);
   await clickSelector('button[data-tool=select]'); await sleep(300);
   await clickButtonText('Check PNG'); await sleep(500);
   s = await state();
@@ -498,6 +531,20 @@ try {
   // Màu theo label là chế độ duy nhất (người dùng xác nhận 2026-11-06).
   const [labelA, labelB, labelW] = await pixelsAt(await maskCenters());
   check('label colours by default: two separate r1 masks share a colour, w1 differs', sameColor(labelA, labelB) && !sameColor(labelA, labelW), JSON.stringify([labelA, labelB, labelW]));
+  // Lớp phủ trang duyệt (người dùng yêu cầu 2026-11-24): Xanh – Đỏ / Nóng – Lạnh tách r* (đỏ/nóng) và w* (xanh/lạnh);
+  // cùng label vẫn cùng màu; về 'label' thì đúng màu cũ (editor không đổi).
+  const reddish = ([r, g, b]) => r - b > 40 && r - g > 40;
+  const bluish = ([r, , b]) => b - r > 40;
+  await clickSelector('button[data-colors=twoTone]'); await sleep(400);
+  const [twoA, twoB, twoW] = await pixelsAt(await maskCenters());
+  check('review colours Xanh – Đỏ: both r1 masks red and equal, w1 blue', sameColor(twoA, twoB) && reddish(twoA) && bluish(twoW), JSON.stringify([twoA, twoB, twoW]));
+  await clickSelector('button[data-colors=warmCool]'); await sleep(400);
+  const [warmA, warmB, coolW] = await pixelsAt(await maskCenters());
+  check('review colours Nóng – Lạnh: r1 warm, w1 cool, same label same colour', sameColor(warmA, warmB) && warmA[0] - warmA[2] > 40 && bluish(coolW) && !sameColor(warmA, twoA),
+    JSON.stringify([warmA, warmB, coolW]));
+  await clickSelector('button[data-colors=label]'); await sleep(400);
+  const [backA, backB, backW] = await pixelsAt(await maskCenters());
+  check('switching back to label colours restores the editor colours exactly', sameColor(backA, labelA) && sameColor(backB, labelB) && sameColor(backW, labelW), JSON.stringify([backA, backB, backW]));
   // Gợi ý neo (người dùng yêu cầu 2026-11-12): ở P/Paint, và khi đang kéo node trong Select, đỉnh của mask khác hiện chấm
   // tâm trắng; Select đứng yên thì không. So pixel đúng tại góc (500,100) của mask r1 bên phải.
   const cornerWhiteness = async () => { const p = (await imageToScreen(800, 500))(500, 100); const [pixel] = await pixelsAt([[p.x, p.y]]); return Math.min(...pixel); };
